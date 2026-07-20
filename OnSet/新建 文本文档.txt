@@ -1,0 +1,4 @@
+{
+  "accent": "#d2aa5c",
+  "support": "#0d1214"
+}

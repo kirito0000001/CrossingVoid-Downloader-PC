@@ -1,0 +1,64 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "security": {
+      "csp": null
+    },
+    "windows": [
+      {
+        "center": true,
+        "decorations": false,
+        "height": 675,
+        "maximizable": false,
+        "minHeight": 675,
+        "minWidth": 1200,
+        "resizable": false,
+        "title": "零境启动器",
+        "width": 1200
+      }
+    ]
+  },
+  "build": {
+    "beforeBuildCommand": "npm run build",
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist"
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [
+      "resources/VC_redist.x64.exe"
+    ],
+    "targets": [
+      "nsis"
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/installer.ico",
+        "uninstallerIcon": "icons/installer.ico"
+      }
+    }
+  },
+  "identifier": "com.lingjing.launcher",
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://gitee.com/xiaojie578/CrossingVoid-Downloader-PC/raw/master/launcher/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ0MjZFQzczMDUxRDZENzMKUldSemJSMEZjK3dtUktya2FUNFc0Q3VCcG5COGlTTnZlSzdoT0ltazIwRmxqOHZvUFY4SEN5eWcK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
+  "productName": "零境启动器",
+  "version": "1.0.3"
+}

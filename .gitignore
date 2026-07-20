@@ -1,0 +1,57 @@
+# Dependencies and frontend output
+node_modules/
+dist/
+dist-ssr/
+dist-launcher-update/
+dist-launcher-update-debug/
+*.local
+
+# Tauri and Rust generated output
+src-tauri/target/
+src-tauri/gen/
+src-tauri/.cargo/config.toml
+
+# Private updater material. The public key used by the application is embedded
+# in tauri.conf.json; the signing private key must never enter source control.
+src-tauri/private/
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Release packages and signatures are published artifacts, not source files.
+*.exe
+*.msi
+*.msix
+*.zip
+*.7z
+*.rar
+*.sig
+!src-tauri/resources/VC_redist.x64.exe
+
+# Runtime state, game packages, logs, and local configuration
+Logs/
+logs/
+Saved/
+*.log
+.env
+.env.*
+!.env.example
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Editor and OS files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

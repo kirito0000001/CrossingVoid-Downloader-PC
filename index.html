@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>零境启动器</title>
+    <style>
+      html,
+      body,
+      #app {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+        background:
+          radial-gradient(circle at 72% 38%, rgba(210, 170, 92, 0.12), transparent 24%),
+          linear-gradient(115deg, #050708, #0d1214);
+      }
+
+      body::before {
+        content: "";
+        position: fixed;
+        left: 50%;
+        top: 50%;
+        width: 286px;
+        height: 100px;
+        background: url("/launcher/logo_white.png") center / contain no-repeat;
+        filter: drop-shadow(0 12px 18px rgba(0, 0, 0, 0.62));
+        pointer-events: none;
+        transform: translate(-50%, -50%);
+        transition: opacity 160ms ease;
+      }
+
+      body.launcher-app-mounted::before {
+        opacity: 0;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
