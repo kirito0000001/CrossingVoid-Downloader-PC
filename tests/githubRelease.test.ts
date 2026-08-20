@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildGitHubReleaseAssetApiUrl,
+  githubGameChunkAssetName,
   selectGitHubPlatformRelease,
 } from "../src/githubRelease";
 
@@ -14,6 +15,18 @@ describe("buildGitHubReleaseAssetApiUrl", () => {
   it("rejects invalid repositories and asset ids", () => {
     expect(buildGitHubReleaseAssetApiUrl("", 459550183)).toBe("");
     expect(buildGitHubReleaseAssetApiUrl("kirito0000001/CrossingVoid", 0)).toBe("");
+  });
+});
+
+describe("githubGameChunkAssetName", () => {
+  it("maps the Chinese PC chunk name to GitHub's numeric asset alias", () => {
+    expect(githubGameChunkAssetName({ index: 1, fileName: "CrossingVoid电脑端.碎片001" })).toBe("CrossingVoid.001");
+    expect(githubGameChunkAssetName({ index: 12, fileName: "CrossingVoid电脑端.碎片012" })).toBe("CrossingVoid.012");
+  });
+
+  it("preserves older or unrelated release asset names", () => {
+    expect(githubGameChunkAssetName({ index: 1, fileName: "CrossingVoid.zip.part001" })).toBe("CrossingVoid.zip.part001");
+    expect(githubGameChunkAssetName({ fileName: "custom.bin" })).toBe("custom.bin");
   });
 });
 

@@ -6,6 +6,37 @@ const appSource = readFileSync(resolve(process.cwd(), "src/App.vue"), "utf8");
 const rustSource = readFileSync(resolve(process.cwd(), "src-tauri/src/lib.rs"), "utf8");
 
 describe("long-running progress controls", () => {
+  it("tracks the source actually used by each game download request", () => {
+    const downloadFunction = appSource.slice(
+      appSource.indexOf("async function downloadGameArchive()"),
+      appSource.indexOf("async function installDownloadedGameArchive()"),
+    );
+
+    expect(appSource).toContain("activeGameDownloadSource");
+    expect(downloadFunction).toContain("const requestedSource = downloadSource.value");
+    expect(downloadFunction).toContain("resolveDownloadArchiveInfo(requestedSource)");
+    expect(downloadFunction).toContain("activeGameDownloadSource.value = requestedSource");
+    expect(downloadFunction).toContain("if (gameDownloadActive.value) return");
+    expect(appSource).toContain("activeGameDownloadSourceName");
+    expect(appSource).toContain('gameDownloadActive.value && launcherState.value !== "downloading"');
+  });
+
+  it("cancels game downloads and clears only their resumable artifacts", () => {
+    const cancelFunction = appSource.slice(
+      appSource.indexOf("async function cancelGameDownload()"),
+      appSource.indexOf("function requestDeleteGame()"),
+    );
+
+    expect(appSource).toContain("canCancelGameDownload");
+    expect(cancelFunction).toContain('invoke("pause_game_download")');
+    expect(cancelFunction).toContain("waitForGameDownloadToStop");
+    expect(cancelFunction).toContain('invoke("clear_game_download_artifacts"');
+    expect(cancelFunction).toContain("downloadedBytes.value = 0");
+    expect(rustSource).toContain("fn clear_game_download_artifacts(");
+    expect(rustSource).toContain('PathBuf::from(&install_path).join("_download")');
+    expect(rustSource).toContain("remove_download_artifacts(&download_dir)?");
+  });
+
   it("pauses repair downloads and cancels non-resumable game operations", () => {
     expect(appSource).toContain("repairOperationStage");
     expect(appSource).toContain("pauseRepairDownload");

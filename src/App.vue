@@ -9,14 +9,12 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import LauncherSelect from "./components/LauncherSelect.vue";
 import {
-  buildGitHubReleaseAssetApiUrl,
-  selectGitHubPlatformRelease,
-} from "./githubRelease";
-import {
   DownloadTimeEstimator,
   formatEtaClock,
   type DownloadEstimate,
 } from "./downloadTimeEstimator";
+import { githubNetworkWarning, type GithubNetworkStatus } from "./githubNetwork";
+import { githubGameChunkAssetName } from "./githubRelease";
 import { canPromoteInstalledGame, shouldPreserveSavedOperation } from "./downloadStatePolicy";
 import {
   CircleAlert,
@@ -100,6 +98,9 @@ type OnSetManifest = {
   videos?: VideoItem[];
 };
 type UpdateManifestPayload = {
+  schemaVersion: 2;
+  productKey: string;
+  downloadReleaseTag: string;
   latest?: {
     version?: string;
     assets?: Array<{
@@ -117,7 +118,8 @@ type DownloadArchiveChunk = {
   index?: number;
   count?: number;
   fileName: string;
-  url: string;
+  githubFileName?: string;
+  url?: string;
   sha256?: string;
   sizeBytes?: number;
   objectKey?: string;
@@ -129,32 +131,6 @@ type BackendArchiveChunk = {
   objectKey?: string;
   sha256?: string;
   sizeBytes?: number;
-};
-type UpdateManifestSource = {
-  directUrl?: string;
-  releaseAsset?: string;
-  legacyReleaseAsset?: string;
-  releaseTagPrefix?: string;
-  releaseProvider?: "github";
-  backend?: boolean;
-};
-type BackendUpdateCheckResponse = {
-  success?: boolean;
-  hasUpdate?: boolean;
-  message?: string;
-  manifest?: {
-    version?: string;
-    productKey?: string;
-    asset?: {
-      fileName?: string;
-      sha256?: string;
-      sizeBytes?: number;
-      downloadUrl?: string;
-      objectKey?: string;
-      runtime?: string;
-      chunks?: BackendArchiveChunk[];
-    } | null;
-  } | null;
 };
 type TrafficQuotaResponse = {
   success: boolean;
@@ -214,6 +190,16 @@ type RepairProgressEvent = {
   currentFileTotalBytes?: number;
   percent: number;
 };
+type ChunkImportProgressEvent = {
+  currentChunk: number;
+  totalChunks: number;
+  fileName: string;
+  processedBytes: number;
+  totalBytes: number;
+  currentChunkBytes: number;
+  currentChunkTotalBytes: number;
+  percent: number;
+};
 type LauncherUpdateConfirmStage = "idle" | "available";
 type DevScriptProgressEvent = {
   stage: string;
@@ -233,16 +219,6 @@ type DeveloperGamePublishContext = {
   gameDirectory: string;
   releaseVersion: string;
   releaseTitle: string;
-};
-type GitHubReleasePayload = {
-  tag_name?: string;
-  draft?: boolean;
-  prerelease?: boolean;
-  assets?: Array<{
-    id?: number;
-    name?: string;
-    browser_download_url?: string;
-  }>;
 };
 type QuickLink = {
   key: string;
@@ -332,11 +308,14 @@ type TranslationKey =
   | "settings.hideAfterGameLaunch"
   | "settings.downloadSource"
   | "settings.downloadSpeed"
+  | "settings.cancelDownload"
+  | "settings.cancelDownloadHint"
   | "settings.unlimited"
   | "settings.limited"
   | "settings.installPath"
   | "settings.openGameFolder"
   | "settings.relocateGame"
+  | "settings.migrateGame"
   | "settings.gameLog"
   | "settings.openGameLog"
   | "settings.gameManagement"
@@ -421,12 +400,16 @@ type TranslationKey =
   | "confirm.deleteTitle"
   | "confirm.deleteBody"
   | "confirm.delete"
+  | "confirm.cancelDownloadTitle"
+  | "confirm.cancelDownloadBody"
+  | "confirm.cancelDownload"
   | "confirm.uninstallLauncherTitle"
   | "confirm.uninstallLauncherBody"
   | "confirm.uninstallLauncher"
   | "confirm.cancel"
   | "dialog.chooseInstallPath"
-  | "dialog.chooseGamePath";
+  | "dialog.chooseGamePath"
+  | "dialog.chooseMigrationPath";
 
 const SETTINGS_SCROLLBAR = {
   viewportBottomInset: 90,
@@ -541,11 +524,14 @@ const translations: Record<LauncherLanguage, Record<TranslationKey, string>> = {
     "settings.hideAfterGameLaunch": "退出游戏后不弹出启动器",
     "settings.downloadSource": "下载源",
     "settings.downloadSpeed": "下载速度",
+    "settings.cancelDownload": "取消下载",
+    "settings.cancelDownloadHint": "停止当前下载，并清除已经下载的游戏碎片和缓存。",
     "settings.unlimited": "不限制",
     "settings.limited": "限制",
     "settings.installPath": "游戏安装目录",
     "settings.openGameFolder": "打开游戏目录",
     "settings.relocateGame": "重新定位游戏",
+    "settings.migrateGame": "迁移游戏文件",
     "settings.gameLog": "游戏日志",
     "settings.openGameLog": "打开游戏日志",
     "settings.gameManagement": "游戏管理",
@@ -630,12 +616,16 @@ const translations: Record<LauncherLanguage, Record<TranslationKey, string>> = {
     "confirm.deleteTitle": "删除游戏",
     "confirm.deleteBody": "将删除当前游戏目录，并把启动器状态恢复到未下载。此操作不会卸载启动器。",
     "confirm.delete": "删除",
+    "confirm.cancelDownloadTitle": "取消游戏下载",
+    "confirm.cancelDownloadBody": "将停止当前下载，并删除已经下载的游戏碎片和缓存。此操作不会删除已经安装的游戏。",
+    "confirm.cancelDownload": "取消下载",
     "confirm.uninstallLauncherTitle": "卸载启动器",
     "confirm.uninstallLauncherBody": "将先删除当前游戏目录，再打开系统卸载程序卸载启动器本体。请确认已经不需要保留本机文件。",
     "confirm.uninstallLauncher": "卸载",
     "confirm.cancel": "取消",
     "dialog.chooseInstallPath": "选择游戏下载位置",
     "dialog.chooseGamePath": "选择已有游戏目录",
+    "dialog.chooseMigrationPath": "选择新的游戏安装位置",
   },
   "zh-Hant": {
     "brand.title": "零境交錯:空界幻境",
@@ -714,11 +704,14 @@ const translations: Record<LauncherLanguage, Record<TranslationKey, string>> = {
     "settings.hideAfterGameLaunch": "退出遊戲後不彈出啟動器",
     "settings.downloadSource": "下載源",
     "settings.downloadSpeed": "下載速度",
+    "settings.cancelDownload": "取消下載",
+    "settings.cancelDownloadHint": "停止目前下載，並清除已下載的遊戲碎片與快取。",
     "settings.unlimited": "不限制",
     "settings.limited": "限制",
     "settings.installPath": "遊戲安裝目錄",
     "settings.openGameFolder": "開啟遊戲目錄",
     "settings.relocateGame": "重新定位遊戲",
+    "settings.migrateGame": "遷移遊戲檔案",
     "settings.gameLog": "遊戲日誌",
     "settings.openGameLog": "開啟遊戲日誌",
     "settings.gameManagement": "遊戲管理",
@@ -803,12 +796,16 @@ const translations: Record<LauncherLanguage, Record<TranslationKey, string>> = {
     "confirm.deleteTitle": "刪除遊戲",
     "confirm.deleteBody": "將刪除目前遊戲目錄，並把啟動器狀態恢復到未下載。此操作不會卸載啟動器。",
     "confirm.delete": "刪除",
+    "confirm.cancelDownloadTitle": "取消遊戲下載",
+    "confirm.cancelDownloadBody": "將停止目前下載，並刪除已下載的遊戲碎片與快取。此操作不會刪除已安裝的遊戲。",
+    "confirm.cancelDownload": "取消下載",
     "confirm.uninstallLauncherTitle": "卸載啟動器",
     "confirm.uninstallLauncherBody": "將先刪除目前遊戲目錄，再開啟系統卸載程式卸載啟動器本體。請確認已不需要保留本機檔案。",
     "confirm.uninstallLauncher": "卸載",
     "confirm.cancel": "取消",
     "dialog.chooseInstallPath": "選擇遊戲下載位置",
     "dialog.chooseGamePath": "選擇既有遊戲目錄",
+    "dialog.chooseMigrationPath": "選擇新的遊戲安裝位置",
   },
   en: {
     "brand.title": "Crossing Void: Illusion Dreamland",
@@ -887,11 +884,14 @@ const translations: Record<LauncherLanguage, Record<TranslationKey, string>> = {
     "settings.hideAfterGameLaunch": "Do not show launcher after exiting game",
     "settings.downloadSource": "Download Source",
     "settings.downloadSpeed": "Download Speed",
+    "settings.cancelDownload": "Cancel Download",
+    "settings.cancelDownloadHint": "Stop the current download and remove downloaded game chunks and cache.",
     "settings.unlimited": "Unlimited",
     "settings.limited": "Limited",
     "settings.installPath": "Game Install Path",
     "settings.openGameFolder": "Open game folder",
     "settings.relocateGame": "Relocate game",
+    "settings.migrateGame": "Move game files",
     "settings.gameLog": "Game Logs",
     "settings.openGameLog": "Open game logs",
     "settings.gameManagement": "Game Management",
@@ -976,12 +976,16 @@ const translations: Record<LauncherLanguage, Record<TranslationKey, string>> = {
     "confirm.deleteTitle": "Delete Game",
     "confirm.deleteBody": "Delete the current game folder and reset the launcher to the not-downloaded state. The launcher will not be uninstalled.",
     "confirm.delete": "Delete",
+    "confirm.cancelDownloadTitle": "Cancel Game Download",
+    "confirm.cancelDownloadBody": "Stop the current download and remove downloaded game chunks and cache. Installed game files will not be deleted.",
+    "confirm.cancelDownload": "Cancel Download",
     "confirm.uninstallLauncherTitle": "Uninstall Launcher",
     "confirm.uninstallLauncherBody": "Delete the current game folder first, then open the system uninstaller for the launcher. Make sure you do not need to keep local files.",
     "confirm.uninstallLauncher": "Uninstall",
     "confirm.cancel": "Cancel",
     "dialog.chooseInstallPath": "Choose game download location",
     "dialog.chooseGamePath": "Choose existing game folder",
+    "dialog.chooseMigrationPath": "Choose new game location",
   },
   ja: {
     "brand.title": "クロッシングヴォイド: 空界幻境",
@@ -1060,11 +1064,14 @@ const translations: Record<LauncherLanguage, Record<TranslationKey, string>> = {
     "settings.hideAfterGameLaunch": "ゲーム終了後にランチャーを表示しない",
     "settings.downloadSource": "ダウンロード元",
     "settings.downloadSpeed": "ダウンロード速度",
+    "settings.cancelDownload": "ダウンロードを中止",
+    "settings.cancelDownloadHint": "現在のダウンロードを停止し、ダウンロード済みのゲーム分割ファイルとキャッシュを削除します。",
     "settings.unlimited": "無制限",
     "settings.limited": "制限",
     "settings.installPath": "ゲームのインストール先",
     "settings.openGameFolder": "ゲームフォルダを開く",
     "settings.relocateGame": "ゲームを再指定",
+    "settings.migrateGame": "ゲームファイルを移動",
     "settings.gameLog": "ゲームログ",
     "settings.openGameLog": "ゲームログを開く",
     "settings.gameManagement": "ゲーム管理",
@@ -1149,12 +1156,16 @@ const translations: Record<LauncherLanguage, Record<TranslationKey, string>> = {
     "confirm.deleteTitle": "ゲームを削除",
     "confirm.deleteBody": "現在のゲームフォルダーを削除し、ランチャー状態を未ダウンロードに戻します。ランチャーはアンインストールされません。",
     "confirm.delete": "削除",
+    "confirm.cancelDownloadTitle": "ゲームのダウンロードを中止",
+    "confirm.cancelDownloadBody": "現在のダウンロードを停止し、ダウンロード済みのゲーム分割ファイルとキャッシュを削除します。インストール済みのゲームは削除されません。",
+    "confirm.cancelDownload": "ダウンロードを中止",
     "confirm.uninstallLauncherTitle": "ランチャーをアンインストール",
     "confirm.uninstallLauncherBody": "現在のゲームフォルダーを削除してから、ランチャーのアンインストーラーを開きます。ローカルファイルを保持する必要がないことを確認してください。",
     "confirm.uninstallLauncher": "アンインストール",
     "confirm.cancel": "キャンセル",
     "dialog.chooseInstallPath": "ゲームのダウンロード先を選択",
     "dialog.chooseGamePath": "既存のゲームフォルダを選択",
+    "dialog.chooseMigrationPath": "新しいゲーム保存先を選択",
   },
 };
 
@@ -1166,6 +1177,7 @@ type PersistedDownloadState = {
   installPath?: string;
   selectedInstallBasePath?: string;
   downloadSource?: DownloadSourceKey;
+  activeDownloadSource?: DownloadSourceKey;
   mode?: "install" | "update" | "repair";
   downloadedBytes?: number;
   totalBytes?: number;
@@ -1259,8 +1271,10 @@ const activeCharacterBanner = ref(0);
 const showSettings = ref(false);
 const showDeleteGameConfirm = ref(false);
 const showInstallConfirm = ref(false);
+const showGameChunkImportGuide = ref(false);
+const selectedChunkFolder = ref("");
 const showDevPackageConfirm = ref(false);
-const confirmAction = ref<"deleteGame" | "uninstallLauncher">("deleteGame");
+const confirmAction = ref<"cancelDownload" | "deleteGame" | "uninstallLauncher">("deleteGame");
 const activeSettingsTab = ref<SettingsTab>("preferences");
 const versionCheckPending = ref(false);
 const pendingRepairSummary = ref<ManifestVerifySummary | null>(
@@ -1273,11 +1287,17 @@ const remoteGameVersion = ref("");
 const lastCheckMessage = ref("");
 const trafficQuota = ref<TrafficQuotaResponse | null>(null);
 const trafficQuotaPending = ref(false);
+const githubNetworkStatus = ref<GithubNetworkStatus | null>(null);
+const githubNetworkPending = ref(false);
 const gameLaunchPending = ref(false);
 const gameRunning = ref(false);
+const gameMigrationPending = ref(false);
 const launcherUpdatePending = ref(false);
 const launcherUpdateStage = ref<LauncherUpdateStage>("idle");
 const launcherUpdateConfirmStage = ref<LauncherUpdateConfirmStage>("idle");
+type LauncherUpdateGate = "checking" | "ready" | "updateRequired" | "verificationFailed";
+const launcherUpdateGate = ref<LauncherUpdateGate>("checking");
+const launcherAccessLocked = computed(() => launcherUpdateGate.value !== "ready");
 // Tauri's Update instance owns private state and must not be wrapped in a Vue Proxy.
 const pendingLauncherUpdate = shallowRef<Update | null>(null);
 const launcherUpdateVersion = ref("");
@@ -1357,18 +1377,8 @@ const downloadSources = [
   nameKey: TranslationKey;
   descriptionKey: TranslationKey;
 }>;
-const updateManifestSources = {
-  official: {
-    backend: true,
-  },
-  github: {
-    releaseAsset: "CrossingVoid-PC-update.json",
-    legacyReleaseAsset: "update.json",
-    releaseTagPrefix: "PC-",
-    releaseProvider: "github",
-  },
-} as const satisfies Record<DownloadSourceKey, UpdateManifestSource>;
 const officialUpdateApiUrl = "https://www.crossingvoid.top/api/toolbox-updates";
+const gameMetadataManifestUrl = "https://gitee.com/xiaojie578/CrossingVoid-Downloader-PC/raw/master/game/windows-latest.json";
 const remoteLauncherNoticeUrl = "https://www.crossingvoid.top/launcher-notice.json";
 const officialProductKey = "crossingvoid-game";
 const officialRuntime = "Windows";
@@ -1393,6 +1403,20 @@ const downloadedMb = ref(bytesToMb(savedDownloadedBytes));
 const downloadedBytes = ref(savedDownloadedBytes);
 const activeDownloadBytes = ref<number | null>(savedTotalBytes || null);
 const downloadPauseRequested = ref(false);
+const gameDownloadActive = ref(false);
+const downloadCancelPending = ref(false);
+const activeGameDownloadSource = ref<DownloadSourceKey | null>(
+  savedDownloadedBytes > 0
+    ? normalizeDownloadSourceKey(savedDownloadState?.activeDownloadSource ?? savedDownloadState?.downloadSource)
+    : null,
+);
+const gameChunkImportPending = ref(false);
+const chunkImportSources = [
+  { name: "QQ群", url: "https://qm.qq.com/q/Nrlo5pBLwY" },
+  { name: "百度网盘", url: "https://pan.baidu.com/s/1J5zcggAWiq0Ui47fSZ1P0Q?pwd=2333" },
+  { name: "阿里云盘", url: "https://www.alipan.com/s/hGG6ZxsR6Y1" },
+  { name: "123云盘", url: "https://www.123684.com/s/SQH4vd-OoPZ3" },
+] as const;
 const repairOperationStage = ref<RepairOperationStage>("idle");
 const repairDownloadPauseRequested = ref(false);
 const gameOperationCancelRequested = ref(false);
@@ -1418,6 +1442,7 @@ const appWindow = getCurrentWindow();
 let installProgressUnlisten: UnlistenFn | undefined;
 let downloadProgressUnlisten: UnlistenFn | undefined;
 let repairProgressUnlisten: UnlistenFn | undefined;
+let chunkImportProgressUnlisten: UnlistenFn | undefined;
 let gameProcessExitedUnlisten: UnlistenFn | undefined;
 let windowFocusUnlisten: UnlistenFn | undefined;
 let bootSplashTimer: number | undefined;
@@ -1538,6 +1563,7 @@ function stopCharacterBannerRotation() {
 startCharacterBannerRotation();
 
 onBeforeUnmount(() => {
+  removeLauncherErrorLogging();
   stopCharacterBannerRotation();
   if (settingsScrollbarFrame !== undefined) {
     window.cancelAnimationFrame(settingsScrollbarFrame);
@@ -1569,6 +1595,10 @@ onBeforeUnmount(() => {
   if (repairProgressUnlisten) {
     repairProgressUnlisten();
     repairProgressUnlisten = undefined;
+  }
+  if (chunkImportProgressUnlisten) {
+    chunkImportProgressUnlisten();
+    chunkImportProgressUnlisten = undefined;
   }
   if (devScriptProgressUnlisten) {
     devScriptProgressUnlisten();
@@ -1738,6 +1768,7 @@ function hideBootSplash() {
 }
 
 onMounted(() => {
+  installLauncherErrorLogging();
   document.body.classList.add("launcher-app-mounted");
   downloadEstimateRefreshTimer = window.setInterval(() => {
     if (launcherState.value !== "downloading") return;
@@ -1764,7 +1795,11 @@ onMounted(() => {
       windowFocusUnlisten = await appWindow.onFocusChanged((event) => {
         if (event.payload) void refreshExternalInstallState();
       });
-      await Promise.all([refreshTrafficQuota(), refreshRemoteLauncherNotice()]);
+      await Promise.all([
+        refreshTrafficQuota(),
+        refreshRemoteLauncherNotice(),
+        ...(downloadSource.value === "github" ? [refreshGithubNetworkStatus()] : []),
+      ]);
       await nextTick();
 
       bootSplashStatus.value = "准备界面资源";
@@ -1772,11 +1807,11 @@ onMounted(() => {
     } catch (error) {
       console.warn("Launcher boot initialization failed", error);
     } finally {
-      hideBootSplash();
       if (trafficQuotaRefreshTimer === undefined) {
         trafficQuotaRefreshTimer = window.setInterval(() => void refreshTrafficQuota(), 5 * 60 * 1000);
       }
-      void checkUpdatesInOrder({ manual: false });
+      await checkUpdatesInOrder({ manual: false });
+      hideBootSplash();
     }
   })();
 });
@@ -1945,6 +1980,12 @@ const canCancelCurrentGameOperation = computed(
       (launcherState.value === "checking" && repairOperationStage.value === "verifying") ||
       (launcherState.value === "repairing" && repairOperationStage.value !== "downloading")),
 );
+const canCancelGameDownload = computed(
+  () =>
+    !downloadCancelPending.value &&
+    (launcherState.value === "downloading" ||
+      (launcherState.value === "paused" && downloadedBytes.value > 0)),
+);
 const hasPrimaryOperationControl = computed(
   () =>
     canPauseDeveloperUpload.value ||
@@ -1956,6 +1997,7 @@ const primaryActionDisabled = computed(
   () =>
     (launcherUpdateActive.value && launcherUpdateStage.value !== "checking") ||
     (developerTaskActive.value && !hasPrimaryOperationControl.value) ||
+    (gameDownloadActive.value && launcherState.value !== "downloading") ||
     gameLaunchPending.value ||
     gameRunning.value ||
     ((launcherState.value === "installing" || launcherState.value === "checking" || launcherState.value === "repairing") &&
@@ -1983,6 +2025,19 @@ const gameSettingsDisabled = computed(
     launcherState.value === "repairPending" ||
     launcherState.value === "repairing" ||
     (launcherState.value === "paused" && downloadedBytes.value > 0),
+);
+const gameChunkImportDisabled = computed(
+  () =>
+    hasLocalInstalledGame.value ||
+    gameChunkImportPending.value ||
+    launcherUpdateActive.value ||
+    developerTaskActive.value ||
+    gameLaunchPending.value ||
+    gameRunning.value ||
+    versionCheckPending.value ||
+    launcherState.value === "installing" ||
+    launcherState.value === "checking" ||
+    launcherState.value === "repairing",
 );
 const downloadSourceDisabled = computed(
   () =>
@@ -2015,6 +2070,7 @@ const actionCopy = computed(() => {
   if (offlinePlayable.value) return t("action.launchGame");
   if (versionCheckPending.value) return t("status.versionChecking");
   if (repairDownloadPauseRequested.value) return "正在暂停";
+  if (downloadPauseRequested.value && gameDownloadActive.value) return "正在暂停";
   if (gameOperationCancelRequested.value) return t("action.cancelling");
   if (canPauseRepairDownload.value) return t("action.pauseDownload");
   if (launcherState.value === "installing" && canCancelCurrentGameOperation.value) return t("action.cancelInstall");
@@ -2051,6 +2107,12 @@ const actionIcon = computed(() => {
   if (launcherState.value === "ready") return Gamepad2;
   return Download;
 });
+const showGameChunkImportAction = computed(
+  () =>
+    !hasLocalInstalledGame.value &&
+    launcherState.value !== "downloaded" &&
+    !hasCompleteDownloadedArchive.value,
+);
 
 const primaryActionSpinning = computed(() => {
   if (
@@ -2106,6 +2168,14 @@ const statusCopy = computed(() => {
   if (gameRunning.value) return t("status.gameRunning");
   if (offlinePlayable.value) return t("status.ready");
   if (versionCheckPending.value) return t("status.versionChecking");
+  if (gameChunkImportPending.value && verificationCurrentFileName.value) {
+    const current = repairProgressItems.value?.checked ?? 0;
+    const total = repairProgressItems.value?.total ?? 0;
+    return total > 0
+      ? `正在校验游戏碎片 ${current}/${total}：${verificationCurrentFileName.value}`
+      : `正在校验游戏碎片：${verificationCurrentFileName.value}`;
+  }
+  if (gameChunkImportPending.value) return "正在校验游戏碎片";
   if (detailedVerificationActive.value && verificationCurrentFileName.value) {
     return t("status.checkingFile").replace("{file}", verificationCurrentFileName.value);
   }
@@ -2122,11 +2192,20 @@ const statusCopy = computed(() => {
   if (launcherState.value === "ready" && updateAvailable.value && !offlineMode.value) {
     return remoteGameVersion.value ? `${t("status.updateAvailable")} ${remoteGameVersion.value}` : t("status.updateAvailable");
   }
-  if (launcherState.value === "downloading") return t("status.downloading");
+  if (launcherState.value === "downloading") {
+    return activeGameDownloadSourceName.value
+      ? `下载游戏中：${activeGameDownloadSourceName.value}`
+      : t("status.downloading");
+  }
   if (launcherState.value === "downloaded" || hasCompleteDownloadedArchive.value) return t("status.downloaded");
   if (launcherState.value === "ready") return t("status.ready");
   if (updateDownloadPending.value) return t("status.paused");
-  return downloadedMb.value > 0 ? t("status.paused") : t("status.waiting");
+  if (downloadedMb.value > 0) {
+    return activeGameDownloadSourceName.value
+      ? `下载已暂停：${activeGameDownloadSourceName.value}`
+      : t("status.paused");
+  }
+  return t("status.waiting");
 });
 const downloadEstimateCopy = computed(() => {
   if (launcherState.value !== "downloading") return "";
@@ -2360,6 +2439,39 @@ const officialTrafficBlocked = computed(
 const showOfficialTrafficWarning = computed(
   () => downloadSource.value === "official" && officialTrafficBlocked.value,
 );
+const githubNetworkWarningText = computed(() =>
+  githubNetworkStatus.value ? githubNetworkWarning(githubNetworkStatus.value) : "",
+);
+const showGithubNetworkWarning = computed(
+  () => downloadSource.value === "github" && Boolean(githubNetworkWarningText.value),
+);
+const githubProxyText = computed(() => {
+  if (githubNetworkPending.value) return "正在检测";
+  if (!githubNetworkStatus.value) return "等待检测";
+  return githubNetworkStatus.value.proxyDetected ? "已检测到网络代理" : "未检测到网络代理";
+});
+const dangerConfirmTitle = computed(() => {
+  if (confirmAction.value === "cancelDownload") return t("confirm.cancelDownloadTitle");
+  if (confirmAction.value === "uninstallLauncher") return t("confirm.uninstallLauncherTitle");
+  return t("confirm.deleteTitle");
+});
+const dangerConfirmBody = computed(() => {
+  if (confirmAction.value === "cancelDownload") return t("confirm.cancelDownloadBody");
+  if (confirmAction.value === "uninstallLauncher") return t("confirm.uninstallLauncherBody");
+  return t("confirm.deleteBody");
+});
+const dangerConfirmActionCopy = computed(() => {
+  if (downloadCancelPending.value) return t("action.cancelling");
+  if (confirmAction.value === "cancelDownload") return t("confirm.cancelDownload");
+  if (confirmAction.value === "uninstallLauncher") return t("confirm.uninstallLauncher");
+  return t("confirm.delete");
+});
+const githubLatencyText = computed(() => {
+  if (githubNetworkPending.value) return "正在检测";
+  if (!githubNetworkStatus.value) return "等待检测";
+  if (!githubNetworkStatus.value.reachable || githubNetworkStatus.value.latencyMs === null) return "无法连接";
+  return `${githubNetworkStatus.value.latencyMs} ms`;
+});
 const trafficQuotaPercent = computed(() => {
   const quota = trafficQuota.value;
   if (!quota?.available || quota.totalBytes <= 0) return 0;
@@ -2385,6 +2497,10 @@ const trafficQuotaExpiryText = computed(() => {
 const downloadSourceNameByKey = computed(() =>
   Object.fromEntries(downloadSources.map((source) => [source.key, t(source.nameKey)])) as Record<DownloadSourceKey, string>,
 );
+const activeGameDownloadSourceName = computed(() => {
+  const source = activeGameDownloadSource.value;
+  return source ? downloadSourceNameByKey.value[source] : "";
+});
 const downloadSourceKeyByName = computed(() =>
   Object.fromEntries(downloadSources.map((source) => [t(source.nameKey), source.key])) as Record<string, DownloadSourceKey>,
 );
@@ -2443,7 +2559,8 @@ function resetSettingsScrollbar() {
 watch([showSettings, activeSettingsTab], () => {
   resetSettingsScrollbar();
   if (showSettings.value && activeSettingsTab.value === "download") {
-    void refreshTrafficQuota();
+    if (downloadSource.value === "official") void refreshTrafficQuota();
+    else void refreshGithubNetworkStatus();
   }
   scheduleSettingsScrollbarUpdate();
 });
@@ -2461,6 +2578,7 @@ watch(currentLanguage, (language) => {
 
 watch(downloadSource, (source) => {
   window.localStorage.setItem(DOWNLOAD_SOURCE_STORAGE_KEY, source);
+  if (source === "github") void refreshGithubNetworkStatus();
 }, { flush: "sync" });
 
 watch(downloadLimited, (limited) => {
@@ -2709,6 +2827,7 @@ function buildDownloadStatePayload(state: "paused" | "downloaded" | "ready") {
     installPath: installPath.value,
     selectedInstallBasePath: selectedInstallBasePath.value,
     downloadSource: downloadSource.value,
+    activeDownloadSource: activeGameDownloadSource.value ?? undefined,
     mode:
       launcherState.value === "repairPending"
         ? "repair"
@@ -2810,25 +2929,8 @@ function getRemoteArchiveBytes(info: UpdateManifestPayload) {
   return typeof size === "number" && Number.isFinite(size) && size > 0 ? size : null;
 }
 
-async function queryArchiveContentLength(url: string) {
-  if (!url) return null;
-
-  const response = await fetch(url, { method: "HEAD", cache: "no-store" });
-  if (!response.ok) return null;
-
-  const length = Number(response.headers.get("content-length"));
-  return Number.isFinite(length) && length > 0 ? length : null;
-}
-
 async function fetchRemoteJson<T>(url: string) {
   const text = await invoke<string>("fetch_remote_text", { url });
-  return JSON.parse(text) as T;
-}
-
-async function fetchGitHubReleaseAssetJson<T>(assetId: number) {
-  const url = buildGitHubReleaseAssetApiUrl(githubGameRepository, assetId);
-  if (!url) throw new Error(`invalid github asset id: ${assetId}`);
-  const text = await invoke<string>("fetch_github_release_asset_text", { url });
   return JSON.parse(text) as T;
 }
 
@@ -2922,125 +3024,23 @@ async function refreshTrafficQuota() {
   }
 }
 
+async function refreshGithubNetworkStatus() {
+  if (githubNetworkPending.value) return;
+  githubNetworkPending.value = true;
+  try {
+    githubNetworkStatus.value = await invoke<GithubNetworkStatus>("get_github_network_status");
+  } catch (error) {
+    console.warn("Unable to detect Github network status", error);
+    githubNetworkStatus.value = { proxyDetected: false, reachable: false, latencyMs: null };
+  } finally {
+    githubNetworkPending.value = false;
+  }
+}
+
 function ensureOfficialTrafficAvailable() {
   if (downloadSource.value !== "official" || !officialTrafficBlocked.value) return true;
   showCheckResult(t("traffic.low"));
   return false;
-}
-
-async function resolveUpdateManifestUrl(source: UpdateManifestSource) {
-  if (source.directUrl) return source.directUrl;
-  if (!source.releaseAsset) return "";
-
-  if (source.releaseProvider === "github") {
-    const release = await fetchRemoteJson<GitHubReleasePayload>("https://api.github.com/repos/kirito0000001/CrossingVoid/releases/latest");
-    const asset = release.assets?.find((item) => item.name === source.releaseAsset);
-    if (!asset?.browser_download_url) throw new Error(`github asset not found: ${source.releaseAsset}`);
-
-    return asset.browser_download_url;
-  }
-
-  return "";
-}
-
-async function resolveGitHubPcRelease(source: UpdateManifestSource) {
-  if (!source.releaseAsset || !source.releaseTagPrefix) {
-    throw new Error("github PC release selector is incomplete");
-  }
-
-  const releases = await fetchRemoteJson<GitHubReleasePayload[]>(
-    `https://api.github.com/repos/${githubGameRepository}/releases?per_page=30`,
-  );
-  const selected = selectGitHubPlatformRelease(releases, {
-    tagPrefix: source.releaseTagPrefix,
-    manifestAssetName: source.releaseAsset,
-  });
-  if (selected?.manifestAsset.id) {
-    return {
-      release: selected.release as GitHubReleasePayload,
-      manifestAssetId: selected.manifestAsset.id,
-      manifestAssetName: source.releaseAsset,
-    };
-  }
-
-  const legacyRelease = await fetchRemoteJson<GitHubReleasePayload>(
-    `https://api.github.com/repos/${githubGameRepository}/releases/latest`,
-  );
-  const legacyAsset = legacyRelease.assets?.find((item) => item.name === source.legacyReleaseAsset);
-  if (!legacyAsset?.id) {
-    throw new Error(`github PC release not found: ${source.releaseTagPrefix}* / ${source.releaseAsset}`);
-  }
-  return {
-    release: legacyRelease,
-    manifestAssetId: legacyAsset.id,
-    manifestAssetName: source.legacyReleaseAsset || "update.json",
-  };
-}
-
-function resolveGitHubReleaseFileUrl(release: GitHubReleasePayload, fileName: string) {
-  const asset = release.assets?.find((item) => item.name === fileName);
-  return asset?.id ? buildGitHubReleaseAssetApiUrl(githubGameRepository, asset.id) : "";
-}
-
-async function resolveGitHubArchiveInfo(source: UpdateManifestSource): Promise<DownloadArchiveInfo> {
-  const selection = await resolveGitHubPcRelease(source);
-  const manifest = await fetchGitHubReleaseAssetJson<UpdateManifestPayload>(selection.manifestAssetId);
-  const asset = getUpdateManifestAsset(manifest);
-  if (!asset?.fileName) {
-    throw new Error(`github manifest missing PC archive: ${selection.manifestAssetName}`);
-  }
-
-  const chunks = (asset.chunks ?? [])
-    .filter((chunk) => Boolean(chunk?.fileName))
-    .map((chunk) => {
-      const url = resolveGitHubReleaseFileUrl(selection.release, chunk.fileName);
-      if (!url) throw new Error(`github PC release asset not found: ${chunk.fileName}`);
-      return { ...chunk, url };
-    })
-    .sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
-  const url = resolveGitHubReleaseFileUrl(selection.release, asset.fileName);
-  if (!url && chunks.length === 0) {
-    throw new Error(`github PC archive asset not found: ${asset.fileName}`);
-  }
-
-  return {
-    version: manifest.latest?.version || "",
-    fileName: asset.fileName,
-    url,
-    sha256: asset.sha256 || "",
-    sizeBytes: getRemoteArchiveBytes(manifest) ?? 0,
-    objectKey: asset.objectKey,
-    chunks,
-  };
-}
-
-async function fetchUpdateManifest(source: UpdateManifestSource) {
-  if (source.releaseProvider === "github" && source.releaseAsset) {
-    const release = await fetchRemoteJson<GitHubReleasePayload>("https://api.github.com/repos/kirito0000001/CrossingVoid/releases/latest");
-    const asset = release.assets?.find((item) => item.name === source.releaseAsset);
-    if (!asset?.id) throw new Error(`github asset not found: ${source.releaseAsset}`);
-    return fetchGitHubReleaseAssetJson<UpdateManifestPayload>(asset.id);
-  }
-
-  const updateManifestUrl = await resolveUpdateManifestUrl(source);
-  if (!updateManifestUrl) throw new Error("update manifest url is unavailable");
-  return fetchRemoteJson<UpdateManifestPayload>(updateManifestUrl);
-}
-
-async function resolveReleaseAssetDownloadUrl(source: UpdateManifestSource, fileName: string) {
-  if (!fileName) return "";
-
-  if (source.releaseProvider === "github") {
-    const release = await fetchRemoteJson<GitHubReleasePayload>("https://api.github.com/repos/kirito0000001/CrossingVoid/releases/latest");
-    const asset = release.assets?.find((item) => item.name === fileName);
-    return asset?.id ? buildGitHubReleaseAssetApiUrl(githubGameRepository, asset.id) : "";
-  }
-
-  if (source.directUrl) {
-    return source.directUrl.replace(/update\.json(?:[?#].*)?$/i, fileName);
-  }
-
-  return "";
 }
 
 async function resolveBackendDownloadUrl(version: string, runtime: string, objectKey: string) {
@@ -3053,6 +3053,7 @@ async function resolveBackendDownloadUrl(version: string, runtime: string, objec
       version,
       runtime,
       objectKey,
+      launcherVersion: launcherVersion.value,
     }),
   });
   const sign = JSON.parse(signPayload) as {
@@ -3083,71 +3084,11 @@ async function resolveBackendChunks(version: string, runtime: string, chunks?: B
   return resolved.sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
 }
 
-async function resolveReleaseChunks(source: UpdateManifestSource, chunks?: DownloadArchiveChunk[]) {
-  const items = chunks ?? [];
-  const resolved: DownloadArchiveChunk[] = [];
-  for (const chunk of items) {
-    if (!chunk?.fileName) continue;
-    resolved.push({
-      ...chunk,
-      url: chunk.url || (await resolveReleaseAssetDownloadUrl(source, chunk.fileName)),
-    });
-  }
-
-  return resolved.sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
-}
-
-async function queryBackendArchiveBytes() {
-  const info = await resolveBackendArchiveInfo();
-  return info.sizeBytes || null;
-}
-
-async function resolveBackendArchiveInfo(): Promise<DownloadArchiveInfo> {
-  const payload = await invoke<string>("post_remote_json", {
-    url: `${officialUpdateApiUrl}/check`,
-    body: JSON.stringify({
-      productKey: officialProductKey,
-      currentVersion: "0.0.0",
-      channel: "stable",
-      runtime: officialRuntime,
-    }),
-  });
-
-  const response = JSON.parse(payload) as BackendUpdateCheckResponse;
-  if (!response.success) throw new Error(response.message || "official update check returned failure");
-
-  const manifest = response.manifest;
-  const asset = manifest?.asset;
-  if (!manifest?.version || !asset?.objectKey || !asset.fileName) {
-    throw new Error("official update manifest missing archive asset");
-  }
-
-  const runtime = asset.runtime || officialRuntime;
-  const signUrl = await resolveBackendDownloadUrl(manifest.version, runtime, asset.objectKey);
-  const chunks = await resolveBackendChunks(manifest.version, runtime, asset.chunks);
-
-  return {
-    version: manifest.version,
-    fileName: asset.fileName,
-    url: signUrl,
-    sha256: asset.sha256 || "",
-    sizeBytes: asset.sizeBytes || 0,
-    objectKey: asset.objectKey,
-    chunks,
-  };
-}
-
 async function updateRemoteArchiveInfo() {
   remoteArchivePending.value = true;
   try {
-    const source = updateManifestSources[downloadSource.value];
-    if ("backend" in source && source.backend) {
-      remoteArchiveBytes.value = await queryBackendArchiveBytes();
-      return;
-    }
-
-    const info = await resolveReleaseArchiveInfo();
-    remoteArchiveBytes.value = info.sizeBytes || (await queryArchiveContentLength(info.url));
+    const info = await fetchGameMetadataArchiveInfo();
+    remoteArchiveBytes.value = info.sizeBytes || null;
   } catch (error) {
     console.warn("Unable to query remote archive info", error);
     remoteArchiveBytes.value = null;
@@ -3156,36 +3097,63 @@ async function updateRemoteArchiveInfo() {
   }
 }
 
-async function resolveReleaseArchiveInfo(): Promise<DownloadArchiveInfo> {
-  const source = updateManifestSources[downloadSource.value];
-  if ("backend" in source && source.backend) {
-    return resolveBackendArchiveInfo();
-  }
-  if ("releaseProvider" in source && source.releaseProvider === "github") {
-    return resolveGitHubArchiveInfo(source);
-  }
-
-  const manifest = await fetchUpdateManifest(source);
+async function fetchGameMetadataArchiveInfo(): Promise<DownloadArchiveInfo> {
+  const manifest = await fetchGameMetadataManifest();
   const asset = getUpdateManifestAsset(manifest);
   if (!asset?.fileName) throw new Error("update manifest missing archive file name");
-
-  const url =
-    asset.downloadUrl ||
-    (await resolveReleaseAssetDownloadUrl(source, asset.fileName)) ||
-    ("directUrl" in source && typeof source.directUrl === "string"
-      ? source.directUrl.replace(/update\.json(?:[?#].*)?$/i, asset.fileName)
-      : "");
-  const sizeBytes = getRemoteArchiveBytes(manifest) ?? (await queryArchiveContentLength(url)) ?? 0;
-  const chunks = await resolveReleaseChunks(source, asset.chunks);
   return {
     version: manifest.latest?.version || "",
     fileName: asset.fileName,
-    url,
+    url: "",
     sha256: asset.sha256 || "",
-    sizeBytes,
+    sizeBytes: getRemoteArchiveBytes(manifest) ?? 0,
+    objectKey: asset.objectKey,
+    chunks: asset.chunks ?? [],
+  };
+}
+
+async function fetchGameMetadataManifest(): Promise<UpdateManifestPayload> {
+  const separator = gameMetadataManifestUrl.includes("?") ? "&" : "?";
+  const payload = await fetchRemoteJson<unknown>(`${gameMetadataManifestUrl}${separator}t=${Date.now()}`);
+  return validateGameMetadataManifest(payload);
+}
+
+function validateGameMetadataManifest(payload: unknown): UpdateManifestPayload {
+  if (!payload || typeof payload !== "object") throw new Error("游戏更新清单格式无效。");
+  const manifest = payload as Record<string, unknown>;
+  if (manifest.schemaVersion !== 2) throw new Error("游戏更新清单版本不受支持，请更新启动器。");
+  if (manifest.productKey !== officialProductKey) throw new Error("游戏更新清单产品标识不正确。");
+  if (typeof manifest.downloadReleaseTag !== "string" || !manifest.downloadReleaseTag.trim()) {
+    throw new Error("游戏更新清单缺少 Github 下载标签。");
+  }
+  return payload as UpdateManifestPayload;
+}
+
+async function resolveGameMetadataDownload(source: DownloadSourceKey): Promise<DownloadArchiveInfo> {
+  const manifest = await fetchGameMetadataManifest();
+  const asset = getUpdateManifestAsset(manifest);
+  if (!asset?.fileName) throw new Error("update manifest missing archive file name");
+  const version = manifest.latest?.version || "";
+  const rawChunks = asset.chunks ?? [];
+  const chunks = source === "official"
+    ? await resolveBackendChunks(version, officialRuntime, rawChunks)
+    : rawChunks.map((chunk) => ({
+        ...chunk,
+        url: `https://github.com/${githubGameRepository}/releases/download/${encodeURIComponent(manifest.downloadReleaseTag)}/${encodeURIComponent(githubGameChunkAssetName({ ...chunk, fileName: chunk.githubFileName || chunk.fileName }))}`,
+      }));
+  return {
+    version,
+    fileName: asset.fileName,
+    url: "",
+    sha256: asset.sha256 || "",
+    sizeBytes: getRemoteArchiveBytes(manifest) ?? 0,
     objectKey: asset.objectKey,
     chunks,
   };
+}
+
+async function resolveDownloadArchiveInfo(source: DownloadSourceKey = downloadSource.value): Promise<DownloadArchiveInfo> {
+  return resolveGameMetadataDownload(source);
 }
 
 async function updateAvailableInstallSpace() {
@@ -3231,6 +3199,15 @@ function compareVersions(left: string, right: string) {
 
 function isSafeSemver(value: string) {
   return /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(value.trim());
+}
+
+async function isDevelopmentBuild() {
+  if (import.meta.env.DEV) return true;
+  try {
+    return await invoke<boolean>("is_debug_build");
+  } catch {
+    return false;
+  }
 }
 
 function isDevToolsAvailable() {
@@ -3581,8 +3558,125 @@ function formatUnknownError(error: unknown) {
   return error instanceof Error ? error.message : String(error || "未知错误");
 }
 
+const nativeConsoleError = console.error.bind(console);
+const recentLauncherErrors = new Map<string, number>();
+
+function formatLauncherErrorDetail(error: unknown) {
+  if (error instanceof Error) return error.stack || `${error.name}: ${error.message}`;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error, null, 2);
+  } catch {
+    return String(error || "未知错误");
+  }
+}
+
+function launcherErrorFingerprint(detail: string) {
+  return detail
+    .split(/\r?\n/, 1)[0]
+    .replace(/^(?:Error|TypeError|RangeError):\s*/i, "")
+    .replace(/^[^：]{1,40}：\s*/, "")
+    .trim()
+    .slice(0, 500);
+}
+
+function launcherErrorFileTimestamp(date: Date) {
+  const pad = (value: number, size = 2) => String(value).padStart(size, "0");
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}-${pad(date.getMilliseconds(), 3)}`;
+}
+
+function resolveChineseErrorTitle(context: string) {
+  const mappings: Array<[RegExp, string]> = [
+    [/Game chunk import failed/i, "安装游戏分片失败"],
+    [/Game install failed/i, "安装游戏失败"],
+    [/Game download failed/i, "下载游戏失败"],
+    [/Automatic game file check failed/i, "自动检查游戏文件失败"],
+    [/Unable to verify game integrity/i, "验证游戏完整性失败"],
+    [/Unable to repair game files/i, "修复游戏文件失败"],
+    [/Launcher update check failed/i, "检查启动器更新失败"],
+    [/Launcher update failed/i, "更新启动器失败"],
+    [/Unable to publish game package/i, "发布游戏包失败"],
+    [/Unable to publish remote launcher notice/i, "发布远程公告失败"],
+  ];
+  return mappings.find(([pattern]) => pattern.test(context))?.[1] || "启动器运行错误";
+}
+
+function launcherErrorTitleFromMessage(message: string) {
+  const prefix = message.split(/[：:]/, 1)[0].trim();
+  return prefix && prefix.length <= 32 ? prefix : "启动器运行错误";
+}
+
+function isLauncherErrorMessage(message: string) {
+  return /失败|错误|异常|无法|未找到/.test(message);
+}
+
+async function recordLauncherError(title: string, error: unknown, extraContext = "") {
+  const detail = formatLauncherErrorDetail(error);
+  const fingerprint = launcherErrorFingerprint(detail);
+  const now = Date.now();
+  for (const [key, recordedAt] of recentLauncherErrors) {
+    if (now - recordedAt > 5_000) recentLauncherErrors.delete(key);
+  }
+  if (fingerprint && recentLauncherErrors.has(fingerprint)) return;
+  if (fingerprint) recentLauncherErrors.set(fingerprint, now);
+
+  const occurredAt = new Date(now);
+  const context = [
+    `启动器版本：${launcherVersion.value || "未知"}`,
+    `游戏状态：${launcherState.value}`,
+    `下载源：${downloadSource.value}`,
+    `安装目录：${installPath.value}`,
+    extraContext,
+    `页面地址：${window.location.href}`,
+    `系统信息：${navigator.userAgent}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  try {
+    await invoke<string>("write_launcher_error_log", {
+      title,
+      detail,
+      context,
+      occurredAt: occurredAt.toLocaleString("zh-CN", { hour12: false }),
+      fileTimestamp: launcherErrorFileTimestamp(occurredAt),
+    });
+  } catch (logError) {
+    nativeConsoleError("写入启动器错误日志失败", logError);
+  }
+}
+
+function launcherConsoleError(...args: unknown[]) {
+  nativeConsoleError(...args);
+  const context = typeof args[0] === "string" ? args[0] : "";
+  const error = args.length > 1 ? args[args.length - 1] : args[0];
+  void recordLauncherError(resolveChineseErrorTitle(context), error, `错误来源：${context || "console.error"}`);
+}
+
+function handleUnhandledWindowError(event: ErrorEvent) {
+  void recordLauncherError("未捕获的程序错误", event.error || event.message, `脚本：${event.filename}:${event.lineno}:${event.colno}`);
+}
+
+function handleUnhandledRejection(event: PromiseRejectionEvent) {
+  void recordLauncherError("未处理的异步错误", event.reason, "错误来源：unhandledrejection");
+}
+
+function installLauncherErrorLogging() {
+  console.error = launcherConsoleError;
+  window.addEventListener("error", handleUnhandledWindowError);
+  window.addEventListener("unhandledrejection", handleUnhandledRejection);
+}
+
+function removeLauncherErrorLogging() {
+  console.error = nativeConsoleError;
+  window.removeEventListener("error", handleUnhandledWindowError);
+  window.removeEventListener("unhandledrejection", handleUnhandledRejection);
+}
+
 function showCheckResult(message: string) {
   lastCheckMessage.value = message;
+  if (isLauncherErrorMessage(message)) {
+    void recordLauncherError(launcherErrorTitleFromMessage(message), message, "错误来源：界面提示");
+  }
   if (lastCheckMessageTimer !== undefined) {
     window.clearTimeout(lastCheckMessageTimer);
   }
@@ -3704,7 +3798,7 @@ async function checkGameVersion(options: { manual?: boolean } = {}) {
   versionCheckPending.value = true;
   updateAvailable.value = false;
   try {
-    const [localVersion, archive] = await Promise.all([readLocalGameVersion(), resolveReleaseArchiveInfo()]);
+    const [localVersion, archive] = await Promise.all([readLocalGameVersion(), fetchGameMetadataArchiveInfo()]);
     remoteGameVersion.value = archive.version || "";
     remoteArchiveBytes.value = archive.sizeBytes || remoteArchiveBytes.value;
     updateAvailable.value =
@@ -3734,6 +3828,7 @@ async function openLocalGameFiles() {
     await invoke("open_game_folder", { installPath: installPath.value });
   } catch (error) {
     console.warn("Unable to open game folder", error);
+    showCheckResult(`无法打开游戏目录：${formatUnknownError(error)}`);
   }
 }
 
@@ -3914,6 +4009,26 @@ async function ensureRepairProgressListener() {
   });
 }
 
+async function ensureChunkImportProgressListener() {
+  if (chunkImportProgressUnlisten) return;
+
+  chunkImportProgressUnlisten = await listen<ChunkImportProgressEvent>("game-chunk-import-progress", (event) => {
+    if (!gameChunkImportPending.value) return;
+    const payload = event.payload;
+    repairProgressPercent.value = Math.max(0, Math.min(100, payload.percent || 0));
+    repairProgressItems.value = {
+      checked: Math.max(0, payload.currentChunk || 0),
+      total: Math.max(0, payload.totalChunks || 0),
+      repaired: 0,
+    };
+    verificationCurrentFile.value = payload.fileName || "";
+    verificationProcessedBytes.value = Math.max(0, payload.processedBytes || 0);
+    verificationTotalBytes.value = Math.max(0, payload.totalBytes || 0);
+    verificationCurrentFileBytes.value = Math.max(0, payload.currentChunkBytes || 0);
+    verificationCurrentFileTotalBytes.value = Math.max(0, payload.currentChunkTotalBytes || 0);
+  });
+}
+
 function resetVerificationProgressDetail() {
   verificationCurrentFile.value = "";
   verificationProcessedBytes.value = 0;
@@ -3923,14 +4038,19 @@ function resetVerificationProgressDetail() {
 }
 
 async function downloadGameArchive() {
+  if (!(await ensureLatestLauncherForNetworkDownload())) return;
+  if (gameDownloadActive.value) return;
   if (!ensureOfficialTrafficAvailable()) return;
+  const requestedSource = downloadSource.value;
+  activeGameDownloadSource.value = requestedSource;
   downloadTimeEstimator.reset();
   downloadEstimate.value = { status: "calculating" };
   launcherState.value = "downloading";
   downloadPauseRequested.value = false;
+  gameDownloadActive.value = true;
   try {
     await ensureDownloadProgressListener();
-    const archive = await resolveReleaseArchiveInfo();
+    const archive = await resolveDownloadArchiveInfo(requestedSource);
     activeDownloadBytes.value = archive.sizeBytes || remoteArchiveBytes.value || fallbackRequiredInstallBytes;
     remoteArchiveBytes.value = activeDownloadBytes.value;
     if (downloadedBytes.value <= 0) {
@@ -3964,14 +4084,16 @@ async function downloadGameArchive() {
     launcherState.value = "paused";
     persistDownloadState("paused", "immediate");
   } finally {
+    gameDownloadActive.value = false;
     downloadPauseRequested.value = false;
   }
 }
 
 async function installDownloadedGameArchive() {
+  if (launcherAccessLocked.value) return;
   gameOperationCancelRequested.value = false;
   try {
-    const archive = await resolveReleaseArchiveInfo();
+    const archive = await fetchGameMetadataArchiveInfo();
     activeDownloadBytes.value = archive.sizeBytes || remoteArchiveBytes.value || fallbackRequiredInstallBytes;
     remoteArchiveBytes.value = activeDownloadBytes.value;
     const archiveReady = await invoke<boolean>("validate_downloaded_archive_state", {
@@ -3982,12 +4104,7 @@ async function installDownloadedGameArchive() {
       installStage: installStage.value,
     });
     if (!archiveReady) {
-      launcherState.value = "paused";
-      installStage.value = "downloaded";
-      installProgressPercent.value = 0;
-      installProgressItems.value = null;
-      persistDownloadState("paused", "immediate");
-      return;
+      throw new Error("下载的游戏分片不完整或校验失败。");
     }
 
     launcherState.value = "installing";
@@ -4030,11 +4147,106 @@ async function installDownloadedGameArchive() {
     installProgressPercent.value = 0;
     installProgressItems.value = null;
     persistDownloadState("downloaded", "immediate");
-    if (cancelled) showCheckResult("已取消安装，下载文件已保留。");
+    showSettings.value = false;
+    showInstallConfirm.value = false;
+    showMenu.value = false;
+    if (cancelled) {
+      showCheckResult("已取消安装，下载文件已保留。");
+    } else {
+      showCheckResult(`安装游戏失败：${formatUnknownError(error)}`);
+    }
   } finally {
     downloadPauseRequested.value = false;
     gameOperationCancelRequested.value = false;
   }
+}
+
+async function importGameChunks() {
+  if (gameChunkImportDisabled.value) return;
+  const selected = selectedChunkFolder.value;
+  if (!selected) return;
+  showGameChunkImportGuide.value = false;
+
+  const previousState = launcherState.value;
+  gameChunkImportPending.value = true;
+  try {
+    const archive = await fetchGameMetadataArchiveInfo();
+    await stopActiveDownloadBeforeChunkImport();
+    await ensureChunkImportProgressListener();
+    resetVerificationProgressDetail();
+    repairProgressPercent.value = 0;
+    repairProgressItems.value = null;
+    launcherState.value = "checking";
+    const result = await invoke<{ importedChunks: number; totalChunks: number; complete: boolean }>("import_game_chunks", {
+      installPath: installPath.value,
+      chunks: archive.chunks ?? [],
+      sourcePaths: [selected],
+    });
+    activeDownloadBytes.value = archive.sizeBytes;
+    remoteArchiveBytes.value = archive.sizeBytes;
+    downloadedBytes.value = result.complete ? archive.sizeBytes : 0;
+    downloadedMb.value = bytesToMb(downloadedBytes.value);
+    installStage.value = "downloaded";
+    launcherState.value = result.complete ? "downloaded" : "paused";
+    persistDownloadState(result.complete ? "downloaded" : "paused", "immediate");
+    showSettings.value = false;
+    showCheckResult(
+      result.complete
+        ? `已找到全部 ${result.totalChunks} 个游戏分片，可以开始安装。`
+        : `已找到 ${result.importedChunks}/${result.totalChunks} 个游戏分片，请补齐后重试。`,
+    );
+  } catch (error) {
+    console.error("Game chunk import failed", error);
+    const fallbackState = gameDownloadActive.value ? previousState : "paused";
+    launcherState.value = fallbackState;
+    persistDownloadState(fallbackState === "downloaded" ? "downloaded" : "paused", "immediate");
+    showSettings.value = false;
+    showCheckResult(`安装游戏分片失败：${formatUnknownError(error)}`);
+  } finally {
+    gameChunkImportPending.value = false;
+    selectedChunkFolder.value = "";
+  }
+}
+
+function openGameChunkImportGuide() {
+  if (gameChunkImportDisabled.value) return;
+  selectedChunkFolder.value = "";
+  showGameChunkImportGuide.value = true;
+}
+
+async function chooseGameChunkFolder() {
+  const selected = await open({
+    multiple: false,
+    directory: true,
+    title: "选择游戏碎片所在文件夹",
+  });
+  if (typeof selected === "string") selectedChunkFolder.value = selected;
+}
+
+async function openGameChunkSource(url: string) {
+  try {
+    await openUrl(url);
+  } catch (error) {
+    console.warn("Unable to open game chunk source", error);
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
+
+async function waitForGameDownloadToStop() {
+  const timeoutAt = Date.now() + 30_000;
+  while (gameDownloadActive.value && Date.now() < timeoutAt) {
+    await wait(100);
+  }
+  if (gameDownloadActive.value) {
+    throw new Error("等待当前下载停止超时，请稍后重试。");
+  }
+}
+
+async function stopActiveDownloadBeforeChunkImport() {
+  if (!gameDownloadActive.value) return;
+  downloadPauseRequested.value = true;
+  await invoke("pause_game_download");
+  await waitForGameDownloadToStop();
 }
 
 async function pauseGameDownload() {
@@ -4045,6 +4257,8 @@ async function pauseGameDownload() {
   try {
     await invoke("pause_game_download");
   } catch (error) {
+    downloadPauseRequested.value = false;
+    launcherState.value = "downloading";
     console.warn("Unable to pause game download", error);
   }
 }
@@ -4080,6 +4294,52 @@ async function cancelCurrentGameOperation() {
     gameOperationCancelRequested.value = false;
     console.warn("Unable to cancel game operation", error);
     showCheckResult(`取消操作失败：${formatUnknownError(error)}`);
+  }
+}
+
+function requestCancelGameDownload() {
+  if (!canCancelGameDownload.value) return;
+  confirmAction.value = "cancelDownload";
+  showDeleteGameConfirm.value = true;
+}
+
+async function cancelGameDownload() {
+  if (!canCancelGameDownload.value) return;
+  const hadInstalledGame = Boolean(localGameVersion.value);
+  downloadCancelPending.value = true;
+  downloadPauseRequested.value = true;
+  try {
+    await invoke("pause_game_download");
+    await waitForGameDownloadToStop();
+    await invoke("clear_game_download_artifacts", { installPath: installPath.value });
+    await clearPersistedDownloadStateForPath(installPath.value);
+
+    downloadedBytes.value = 0;
+    downloadedMb.value = 0;
+    activeDownloadBytes.value = null;
+    remoteArchiveBytes.value = null;
+    activeGameDownloadSource.value = null;
+    installStage.value = "downloaded";
+    downloadEstimate.value = { status: "calculating" };
+    pendingRepairSummary.value = null;
+    updateDownloadPending.value = false;
+    launcherState.value = hadInstalledGame ? "ready" : "paused";
+    if (hadInstalledGame) {
+      persistDownloadState("ready", "immediate");
+    } else {
+      updateAvailable.value = false;
+    }
+
+    showDeleteGameConfirm.value = false;
+    showSettings.value = false;
+    showCheckResult("游戏下载已取消，已清理下载碎片和缓存。");
+  } catch (error) {
+    console.warn("Unable to cancel game download", error);
+    showDeleteGameConfirm.value = false;
+    showCheckResult(`取消游戏下载失败：${formatUnknownError(error)}`);
+  } finally {
+    downloadCancelPending.value = false;
+    downloadPauseRequested.value = false;
   }
 }
 
@@ -4144,14 +4404,10 @@ async function relocateInstalledGame() {
 
     if (typeof selected !== "string") return false;
 
-    const nextPath = selected.replace(/[\\/]$/, "");
-    const isReady = await invoke<boolean>("validate_game_install_state", {
-      installPath: nextPath,
-      state: "ready",
-    });
-
-    if (!isReady) {
-      showCheckResult("重新定位失败：未找到 CrossingVoid.version.json");
+    const selectedPath = selected.replace(/[\\/]$/, "");
+    const nextPath = await invoke<string | null>("find_game_installation", { rootPath: selectedPath });
+    if (!nextPath) {
+      showCheckResult("重新定位失败：未在所选文件夹中找到完整游戏。");
       return false;
     }
 
@@ -4182,7 +4438,47 @@ async function relocateInstalledGame() {
   }
 }
 
+async function migrateInstalledGame() {
+  if (gameMigrationPending.value || gameRunning.value || gameSettingsDisabled.value) return;
+
+  try {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      defaultPath: installPath.value,
+      title: t("dialog.chooseMigrationPath"),
+    });
+    if (typeof selected !== "string") return;
+
+    gameMigrationPending.value = true;
+    const previousPath = installPath.value;
+    const nextPath = await invoke<string>("move_game_installation", {
+      sourcePath: previousPath,
+      destinationBasePath: selected.replace(/[\\/]$/, ""),
+    });
+    installPath.value = nextPath;
+    selectedInstallBasePath.value = inferInstallBasePathFromGamePath(nextPath);
+    await clearPersistedDownloadStateForPath(previousPath);
+    persistDownloadState("ready", "immediate");
+    await readLocalGameVersion();
+    showCheckResult(`游戏已迁移至：${nextPath}`);
+    if (!offlineMode.value) {
+      void checkGameVersion({ manual: true });
+    }
+  } catch (error) {
+    console.warn("Unable to migrate installed game", error);
+    showCheckResult(`迁移游戏文件失败：${formatUnknownError(error)}`);
+  } finally {
+    gameMigrationPending.value = false;
+  }
+}
+
 async function handlePrimaryAction() {
+  if (launcherAccessLocked.value) {
+    if (launcherUpdateGate.value === "updateRequired") await installPendingLauncherUpdate();
+    if (launcherUpdateGate.value === "verificationFailed") await checkUpdatesInOrder({ manual: true });
+    return;
+  }
   if (canPauseDeveloperUpload.value) {
     await pauseDeveloperUpload();
     return;
@@ -4257,19 +4553,34 @@ function checkForUpdates() {
 
 async function checkUpdatesInOrder(options: { manual?: boolean } = {}) {
   const hasLauncherUpdate = await checkLauncherUpdate(options);
-  if (!hasLauncherUpdate) {
+  if (!hasLauncherUpdate && launcherUpdateGate.value === "ready") {
     await checkGameVersion(options);
   }
 }
 
+async function ensureLatestLauncherForNetworkDownload() {
+  const updateRequired = await checkLauncherUpdate({ manual: false });
+  if (!updateRequired && launcherUpdateGate.value === "ready") return true;
+  showCheckResult(
+    launcherUpdateGate.value === "verificationFailed"
+      ? "无法确认启动器是否为最新版本，已停止游戏下载。"
+      : "必须先更新到最新启动器才能下载游戏。",
+  );
+  return false;
+}
+
 async function checkLauncherUpdate(options: { manual?: boolean } = {}): Promise<boolean> {
-  if (import.meta.env.DEV) {
+  if (await isDevelopmentBuild()) {
+    launcherUpdateGate.value = "ready";
     if (options.manual) {
       showCheckResult("开发版不参与启动器更新检查。");
     }
     return false;
   }
-  if (offlineMode.value) return false;
+  if (offlineMode.value) {
+    launcherUpdateGate.value = "verificationFailed";
+    return false;
+  }
   if (launcherUpdatePending.value || launcherUpdateActive.value) {
     return launcherUpdateConfirmStage.value === "available" || launcherUpdateActive.value;
   }
@@ -4284,6 +4595,7 @@ async function checkLauncherUpdate(options: { manual?: boolean } = {}): Promise<
     const update = await check();
     if (!update) {
       launcherUpdateStage.value = "idle";
+      launcherUpdateGate.value = "ready";
       if (options.manual) {
         showSettings.value = false;
         showCheckResult("启动器已是最新版本。");
@@ -4296,11 +4608,13 @@ async function checkLauncherUpdate(options: { manual?: boolean } = {}): Promise<
     pendingLauncherUpdate.value = update;
     launcherUpdateConfirmStage.value = "available";
     launcherUpdateStage.value = "idle";
+    launcherUpdateGate.value = "updateRequired";
     showCheckResult(`${t("settings.launcherUpdateReady")} ${update.version}`);
     return true;
   } catch (error) {
     console.error("Launcher update check failed", error);
     launcherUpdateStage.value = "failed";
+    launcherUpdateGate.value = "verificationFailed";
     if (options.manual) {
       showCheckResult("启动器更新检查失败，请稍后重试。");
       window.setTimeout(() => {
@@ -4475,6 +4789,7 @@ async function verifyGameIntegrity() {
 }
 
 async function repairMissingGameFiles() {
+  if (!(await ensureLatestLauncherForNetworkDownload())) return;
   if (launcherState.value !== "repairPending") return;
   if (!ensureOfficialTrafficAvailable()) {
     showSettings.value = true;
@@ -4492,7 +4807,7 @@ async function repairMissingGameFiles() {
   try {
     await ensureDownloadProgressListener();
     await ensureRepairProgressListener();
-    const archive = await resolveReleaseArchiveInfo();
+    const archive = await resolveDownloadArchiveInfo();
     throwIfGameOperationCancelled();
     activeDownloadBytes.value = archive.sizeBytes || remoteArchiveBytes.value || fallbackRequiredInstallBytes;
     remoteArchiveBytes.value = activeDownloadBytes.value;
@@ -4612,6 +4927,10 @@ async function confirmUninstallLauncher() {
 }
 
 function confirmDangerAction() {
+  if (confirmAction.value === "cancelDownload") {
+    void cancelGameDownload();
+    return;
+  }
   if (confirmAction.value === "uninstallLauncher") {
     void confirmUninstallLauncher();
     return;
@@ -4769,9 +5088,9 @@ function handleContextMenu(event: MouseEvent) {
       </nav>
 
       <Transition name="traffic-warning">
-        <div v-if="showOfficialTrafficWarning" class="traffic-warning" role="status">
+        <div v-if="showOfficialTrafficWarning || showGithubNetworkWarning" class="traffic-warning" role="status">
           <CircleAlert :size="18" stroke-width="2.8" />
-          <span>{{ t("traffic.low") }}</span>
+          <span>{{ showOfficialTrafficWarning ? t("traffic.low") : githubNetworkWarningText }}</span>
         </div>
       </Transition>
 
@@ -4995,11 +5314,11 @@ function handleContextMenu(event: MouseEvent) {
           </div>
         </Transition>
         <Transition name="download-progress-fade">
-          <div v-if="compactStatusLine || (lastCheckMessage && !showDownloadProgress)" class="check-result-line">
-            {{ compactStatusLine ? statusCopy : lastCheckMessage }}
+          <div v-if="compactStatusLine || lastCheckMessage" class="check-result-line">
+            {{ lastCheckMessage || statusCopy }}
           </div>
         </Transition>
-        <div class="dock-actions">
+        <div class="dock-actions" :class="{ 'has-chunk-install': showGameChunkImportAction }">
           <button
             class="menu-button"
             type="button"
@@ -5010,6 +5329,16 @@ function handleContextMenu(event: MouseEvent) {
             @mouseleave="!menuActionDisabled && scheduleToolMenuClose()"
           >
             <Menu :size="38" />
+          </button>
+          <button
+            v-if="showGameChunkImportAction"
+            class="primary-action chunk-install-action"
+            type="button"
+            :disabled="gameChunkImportDisabled"
+            @click="openGameChunkImportGuide"
+          >
+            <PackageOpen :size="34" />
+            <span>导入碎片</span>
           </button>
           <button
             class="primary-action"
@@ -5114,6 +5443,46 @@ function handleContextMenu(event: MouseEvent) {
       </div>
     </Transition>
 
+    <Transition name="install-pop">
+      <div
+        v-if="showGameChunkImportGuide"
+        class="install-mask"
+        data-no-drag
+        @click.self="showGameChunkImportGuide = false"
+      >
+        <section class="install-panel chunk-import-panel" aria-label="导入游戏碎片">
+          <button class="install-close" type="button" aria-label="关闭" @click="showGameChunkImportGuide = false">
+            <X :size="23" stroke-width="2.5" />
+          </button>
+          <h2>导入碎片</h2>
+          <p class="chunk-import-description">
+            游戏碎片是将完整游戏包拆分后的文件。你可以从网盘或 QQ群下载，全部下载完成后，选择包含全部游戏碎片的文件夹进行校验和安装。
+          </p>
+          <span class="chunk-import-section-title">获取游戏碎片</span>
+          <div class="chunk-source-actions" aria-label="游戏碎片下载渠道">
+            <button v-for="source in chunkImportSources" :key="source.name" type="button" @click="openGameChunkSource(source.url)">
+              <Download :size="20" />
+              <span>{{ source.name }}</span>
+            </button>
+          </div>
+          <span class="chunk-import-section-title">选择碎片文件夹</span>
+          <div class="install-path-row chunk-folder-row">
+            <span>{{ selectedChunkFolder || "尚未选择游戏碎片文件夹" }}</span>
+            <button type="button" @click="chooseGameChunkFolder">选择</button>
+          </div>
+          <p class="chunk-import-hint">启动器会在所选文件夹及其子文件夹中自动寻找当前版本的游戏碎片。</p>
+          <button
+            class="install-continue chunk-import-continue"
+            type="button"
+            :disabled="!selectedChunkFolder || gameChunkImportPending"
+            @click="importGameChunks"
+          >
+            开始导入
+          </button>
+        </section>
+      </div>
+    </Transition>
+
     <Transition name="settings-layer">
       <div v-if="showSettings" class="modal-mask settings-mask" @click.self="showSettings = false">
         <section class="settings-modal" :aria-label="t('window.settings')">
@@ -5192,6 +5561,9 @@ function handleContextMenu(event: MouseEvent) {
                 <p v-if="downloadSource === 'official'" class="traffic-quota__notice" :class="{ low: officialTrafficBlocked }">
                   {{ t(officialTrafficBlocked ? "traffic.lowHint" : "traffic.supportHint") }}
                 </p>
+                <p v-else class="traffic-quota__notice" :class="{ low: Boolean(githubNetworkWarningText) }">
+                  {{ githubNetworkWarningText || "Github 网络连接正常。" }}
+                </p>
                 <div
                   v-if="downloadSource === 'official'"
                   class="traffic-quota"
@@ -5206,10 +5578,17 @@ function handleContextMenu(event: MouseEvent) {
                   </div>
                   <small v-if="trafficQuotaExpiryText">{{ trafficQuotaExpiryText }}</small>
                 </div>
+                <div v-else class="traffic-quota github-network-status" :class="{ low: Boolean(githubNetworkWarningText) }">
+                  <div class="traffic-quota__header">
+                    <span>Github 网络检测</span>
+                    <strong>延迟 {{ githubLatencyText }}</strong>
+                  </div>
+                  <small>代理：{{ githubProxyText }}</small>
+                </div>
               </div>
 
-              <div class="setting-block">
-                <span class="setting-title">{{ t("settings.downloadSpeed") }}</span>
+               <div class="setting-block">
+                 <span class="setting-title">{{ t("settings.downloadSpeed") }}</span>
                 <button class="radio-row" :class="{ checked: !downloadLimited }" type="button" @click="downloadLimited = false">
                   <span class="radio-dot"></span>
                   <strong>{{ t("settings.unlimited") }}</strong>
@@ -5221,10 +5600,35 @@ function handleContextMenu(event: MouseEvent) {
                   </button>
                   <input v-model="speedLimit" class="speed-input" inputmode="decimal" />
                   <span class="speed-unit">MB/s（1-100）</span>
-                </div>
+                 </div>
+               </div>
+
+               <div v-if="canCancelGameDownload || downloadCancelPending" class="setting-block">
+                 <span class="setting-title">{{ t("settings.cancelDownload") }}</span>
+                 <p class="setting-hint">{{ t("settings.cancelDownloadHint") }}</p>
+                 <div class="game-actions">
+                   <button
+                     class="danger-action"
+                     type="button"
+                     :disabled="downloadCancelPending"
+                     @click="requestCancelGameDownload"
+                   >
+                     <X :size="22" />
+                     <span>{{ downloadCancelPending ? t("action.cancelling") : t("settings.cancelDownload") }}</span>
+                   </button>
+                 </div>
+               </div>
+
+              <div v-if="showGameChunkImportAction" class="setting-block">
+                 <span class="setting-title">本地游戏碎片</span>
+                 <p class="setting-hint">导入从网盘、QQ群或其他位置获取的当前版本游戏碎片。</p>
+                 <button class="light-action" type="button" :disabled="gameChunkImportDisabled" @click="openGameChunkImportGuide">
+                   <HardDriveDownload :size="22" />
+                   <span>导入碎片</span>
+                 </button>
               </div>
 
-                </section>
+                 </section>
 
                 <section v-else-if="activeSettingsTab === 'game'" :key="activeSettingsTab" class="settings-page" data-settings-page="game">
               <label class="setting-block">
@@ -5240,6 +5644,10 @@ function handleContextMenu(event: MouseEvent) {
                 <button type="button" @click="relocateInstalledGame">
                   <RotateCcw :size="22" />
                   <span>{{ t("settings.relocateGame") }}</span>
+                </button>
+                <button type="button" :disabled="gameMigrationPending || gameRunning || gameSettingsDisabled" @click="migrateInstalledGame">
+                  <FolderOpen :size="22" />
+                  <span>{{ gameMigrationPending ? "正在迁移游戏文件" : t("settings.migrateGame") }}</span>
                 </button>
               </div>
 
@@ -5291,11 +5699,11 @@ function handleContextMenu(event: MouseEvent) {
 
               <div class="setting-block">
                 <span class="setting-title">{{ t("settings.launcherLog") }}</span>
-                <button class="light-action" type="button" @click="openLauncherLogFolder">
-                  <FileText :size="22" />
-                  <span>{{ t("settings.openLogFolder") }}</span>
-                </button>
-              </div>
+                 <button class="light-action" type="button" @click="openLauncherLogFolder">
+                   <FileText :size="22" />
+                   <span>{{ t("settings.openLogFolder") }}</span>
+                 </button>
+               </div>
 
               <div class="setting-block">
                 <span class="setting-title">{{ t("settings.termsPolicy") }}</span>
@@ -5449,15 +5857,15 @@ function handleContextMenu(event: MouseEvent) {
           >
             <section
               class="confirm-panel"
-              :aria-label="confirmAction === 'uninstallLauncher' ? t('confirm.uninstallLauncherTitle') : t('confirm.deleteTitle')"
+              :aria-label="dangerConfirmTitle"
             >
-              <h3>{{ confirmAction === "uninstallLauncher" ? t("confirm.uninstallLauncherTitle") : t("confirm.deleteTitle") }}</h3>
-              <p>{{ confirmAction === "uninstallLauncher" ? t("confirm.uninstallLauncherBody") : t("confirm.deleteBody") }}</p>
+              <h3>{{ dangerConfirmTitle }}</h3>
+              <p>{{ dangerConfirmBody }}</p>
               <div class="confirm-actions">
-                <button class="confirm-delete" type="button" @click="confirmDangerAction">
-                  {{ confirmAction === "uninstallLauncher" ? t("confirm.uninstallLauncher") : t("confirm.delete") }}
+                <button class="confirm-delete" type="button" :disabled="downloadCancelPending" @click="confirmDangerAction">
+                  {{ dangerConfirmActionCopy }}
                 </button>
-                <button class="confirm-cancel" type="button" @click="showDeleteGameConfirm = false">
+                <button class="confirm-cancel" type="button" :disabled="downloadCancelPending" @click="showDeleteGameConfirm = false">
                   {{ t("confirm.cancel") }}
                 </button>
               </div>
@@ -5498,6 +5906,35 @@ function handleContextMenu(event: MouseEvent) {
           </header>
           <p>{{ remoteLauncherNotice.content }}</p>
           <button type="button" @click="showRemoteLauncherNotice = false">{{ t("window.close") }}</button>
+        </section>
+      </div>
+    </Transition>
+
+    <Transition name="confirm-pop">
+      <div v-if="launcherAccessLocked && !showGameChunkImportGuide" class="confirm-mask launcher-update-mask" data-no-drag>
+        <section class="confirm-panel launcher-update-panel" aria-label="启动器更新">
+          <h3>{{ launcherUpdateActive ? launcherUpdateStatusCopy : launcherUpdateGate === "verificationFailed" ? "无法确认启动器版本" : launcherUpdateGate === "checking" ? "正在检查启动器更新" : "启动器需要更新" }}</h3>
+          <p v-if="launcherUpdateActive">{{ launcherUpdateProgressDetail || "请勿关闭启动器。" }}</p>
+          <p v-else-if="launcherUpdateGate === 'updateRequired'">必须更新到 {{ launcherUpdateVersion || "最新版本" }} 后才能下载或启动游戏。</p>
+          <p v-else-if="launcherUpdateGate === 'verificationFailed'">启动器版本检查失败。为保证下载与游戏版本匹配，请重新检查。</p>
+          <p v-else>正在确认当前启动器是否为最新版本。</p>
+          <div v-if="launcherUpdateActive" class="launcher-update-progress" aria-live="polite">
+            <div class="launcher-update-progress-meta">
+              <span>{{ launcherUpdateStatusCopy }}</span>
+              <strong>{{ launcherUpdateProgressPercent }}%</strong>
+            </div>
+            <div class="progress-track">
+              <div class="progress-fill active" :style="{ width: `${launcherUpdateProgressPercent}%` }"></div>
+            </div>
+          </div>
+          <div v-if="launcherUpdateGate !== 'checking'" class="confirm-actions confirm-actions-single">
+            <button class="confirm-delete" type="button" :disabled="launcherUpdateActive" @click="launcherUpdateGate === 'updateRequired' ? installPendingLauncherUpdate() : checkUpdatesInOrder({ manual: true })">
+              {{ launcherUpdateActive ? "正在更新" : launcherUpdateGate === "updateRequired" ? "立即更新" : "重新检查" }}
+            </button>
+            <button class="confirm-cancel" type="button" :disabled="launcherUpdateActive" @click="openGameChunkImportGuide">
+              导入碎片
+            </button>
+          </div>
         </section>
       </div>
     </Transition>
@@ -6792,6 +7229,10 @@ a,
   justify-content: end;
 }
 
+.dock-actions.has-chunk-install {
+  grid-template-columns: 59px 189px 189px;
+}
+
 .menu-button {
   width: 59px;
   height: 59px;
@@ -7109,6 +7550,89 @@ a,
 
 .install-space-row .danger {
   color: #ff706a;
+}
+
+.chunk-import-panel {
+  width: 850px;
+  min-height: 450px;
+  padding: 36px 44px 90px;
+}
+
+.chunk-import-panel h2 {
+  margin-bottom: 12px;
+  font-size: 28px;
+}
+
+.chunk-import-description,
+.chunk-import-hint {
+  margin: 0;
+  font-weight: 750;
+  line-height: 1.55;
+}
+
+.chunk-import-description {
+  max-width: 760px;
+  color: rgba(255, 255, 255, 0.86);
+  font-size: 20px;
+}
+
+.chunk-import-section-title {
+  display: block;
+  margin-top: 18px;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 18px;
+  font-weight: 950;
+}
+
+.chunk-source-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 9px 0 0;
+}
+
+.chunk-source-actions button {
+  height: 54px;
+  border: 1px solid color-mix(in srgb, var(--cv-panel-accent) 44%, rgba(255, 255, 255, 0.16));
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: rgba(255, 255, 255, 0.9);
+  background: color-mix(in srgb, var(--cv-theme-support) 84%, transparent);
+  font-size: 17px;
+  font-weight: 900;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+
+.chunk-source-actions button:hover {
+  border-color: var(--cv-panel-accent);
+  color: #fff;
+  background: color-mix(in srgb, var(--cv-theme-support) 70%, var(--cv-theme-accent) 30%);
+}
+
+.chunk-folder-row {
+  width: 770px;
+  height: 64px;
+  margin-top: 9px;
+}
+
+.chunk-import-hint {
+  margin-top: 8px;
+  color: rgba(255, 255, 255, 0.74);
+  font-size: 17px;
+}
+
+.chunk-import-continue {
+  right: 44px;
+  bottom: 28px;
+}
+
+.chunk-import-continue:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+  filter: grayscale(0.45);
 }
 
 .dev-package-panel {
@@ -7449,6 +7973,10 @@ a,
     opacity 90ms cubic-bezier(0.2, 0.8, 0.2, 1),
     transform 105ms cubic-bezier(0.2, 0.8, 0.2, 1);
   will-change: opacity, transform;
+}
+
+.dock-actions.has-chunk-install ~ .tool-menu {
+  right: 402px;
 }
 
 .settings-title-motion-leave-active {
@@ -8351,6 +8879,44 @@ a,
 
 .switch.on span {
   transform: translateX(26px);
+}
+
+.confirm-actions-single {
+  grid-template-columns: 196px;
+}
+
+.launcher-update-mask {
+  z-index: 420;
+}
+
+.launcher-update-panel {
+  min-height: 288px;
+}
+
+.launcher-update-progress {
+  margin: -10px 0 26px;
+}
+
+.launcher-update-progress-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 9px;
+  color: rgba(48, 53, 59, 0.76);
+  font-size: 14px;
+  font-weight: 850;
+}
+
+.launcher-update-progress-meta strong {
+  color: var(--cv-accent-title);
+  font-family: "UnispaceCV", "Microsoft YaHei UI", sans-serif;
+  font-size: 16px;
+}
+
+.launcher-update-panel .confirm-delete:disabled {
+  cursor: wait;
+  opacity: 0.7;
 }
 
 @media (prefers-reduced-motion: reduce) {

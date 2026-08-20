@@ -62,4 +62,13 @@ describe("launcher publishing", () => {
     expect(giteePackageBuilder).toContain(expectedRepository);
     expect(tauriConfig).toContain(`${expectedRepository}/raw/master/launcher/latest.json`);
   });
+
+  it("never recursively deletes the configured launcher output directory", () => {
+    expect(giteePackageBuilder).not.toContain(
+      "Remove-Item -LiteralPath $resolvedReleaseDir -Recurse -Force",
+    );
+    expect(giteePackageBuilder).toContain(
+      "New-Item -ItemType Directory -Path $resolvedReleaseDir -Force",
+    );
+  });
 });

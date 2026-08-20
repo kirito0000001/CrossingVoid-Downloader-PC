@@ -5,6 +5,15 @@ export function buildGitHubReleaseAssetApiUrl(repository: string, assetId: numbe
   return `https://api.github.com/repos/${normalizedRepository}/releases/assets/${assetId}`;
 }
 
+export function githubGameChunkAssetName(chunk: { index?: number; fileName: string }) {
+  const match = /^CrossingVoid电脑端\.碎片(\d{3})$/.exec(chunk.fileName);
+  if (!match) return chunk.fileName;
+  const suffixIndex = Number.parseInt(match[1], 10);
+  const index = chunk.index ?? suffixIndex;
+  if (!Number.isSafeInteger(index) || index <= 0 || index > 999 || index !== suffixIndex) return chunk.fileName;
+  return `CrossingVoid.${String(index).padStart(3, "0")}`;
+}
+
 export type GitHubReleaseAssetSummary = {
   id?: number;
   name?: string;

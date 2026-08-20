@@ -20,6 +20,7 @@ src-tauri/private/
 *.pfx
 
 # Release packages and signatures are published artifacts, not source files.
+ReleaseAssets/
 *.exe
 *.msi
 *.msix

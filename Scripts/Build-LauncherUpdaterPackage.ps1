@@ -80,10 +80,6 @@ function Initialize-ReleasePackageDir {
         throw "启动器新包输出目录不能和中间产物目录相同：$StagingDir"
     }
 
-    if (Test-Path -LiteralPath $resolvedReleaseDir) {
-        Remove-Item -LiteralPath $resolvedReleaseDir -Recurse -Force
-    }
-
     New-Item -ItemType Directory -Path $resolvedReleaseDir -Force | Out-Null
 
     return [ordered]@{

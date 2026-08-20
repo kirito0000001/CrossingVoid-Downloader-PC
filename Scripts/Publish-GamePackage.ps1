@@ -29,8 +29,7 @@ if ($null -ne (Get-Variable -Name PSStyle -ErrorAction SilentlyContinue)) {
     $PSStyle.OutputRendering = "PlainText"
 }
 
-$unrealRoot = Join-Path (Split-Path -Parent $ProjectRoot) "CrossingVoid"
-$publishScript = Join-Path $unrealRoot "Scripts\上传三端游戏到阿里云OSS.ps1"
+$publishScript = Join-Path $PSScriptRoot "Publish-GamePackageCore.ps1"
 if (!(Test-Path -LiteralPath $publishScript -PathType Leaf)) {
     throw "没有找到游戏发布脚本：$publishScript"
 }
@@ -55,3 +54,23 @@ $startPayload = [ordered]@{
     -PackageOutputRoot $PackageOutputRoot `
     -ReleaseVersion $ReleaseVersion `
     -ReleaseTitle $ReleaseTitle
+
+if ($LASTEXITCODE -ne 0) {
+    throw "游戏包上传失败，exit code $LASTEXITCODE"
+}
+
+$metadataPublisher = Join-Path $PSScriptRoot "Publish-GameMetadataGitee.ps1"
+if (!(Test-Path -LiteralPath $metadataPublisher -PathType Leaf)) {
+    throw "没有找到 Gitee 游戏清单同步脚本：$metadataPublisher"
+}
+
+$metadataPayload = [ordered]@{
+    stage = "gitee-manifest"
+    percent = 96
+    message = "同步 Gitee 游戏版本信息"
+}
+[Console]::Out.WriteLine("::progress" + ($metadataPayload | ConvertTo-Json -Compress))
+& $metadataPublisher -Platform $Platform -Channel $Channel -ReleaseVersion $ReleaseVersion
+if ($LASTEXITCODE -ne 0) {
+    throw "Gitee 游戏清单同步失败，exit code $LASTEXITCODE"
+}

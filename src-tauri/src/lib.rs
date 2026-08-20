@@ -1,21 +1,23 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 #[cfg(debug_assertions)]
 use std::io::{BufRead, BufReader};
 use std::io::{Read, Write};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(debug_assertions)]
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+#[cfg(debug_assertions)]
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(debug_assertions)]
 use std::thread;
-use std::time::{Duration, Instant};
-#[cfg(debug_assertions)]
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager};
 #[cfg(windows)]
@@ -36,6 +38,10 @@ const DOWNLOAD_CANCELLED_ERROR: &str = "DOWNLOAD_CANCELLED";
 #[cfg(debug_assertions)]
 const DEV_SCRIPT_PAUSED: &str = "DEV_SCRIPT_PAUSED";
 const DOWNLOAD_RETRY_ATTEMPTS: u32 = 3;
+const MAX_ERROR_LOG_TOTAL_BYTES: u64 = 10 * 1024 * 1024;
+const MAX_ERROR_LOG_DETAIL_BYTES: usize = 256 * 1024;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,6 +58,14 @@ struct DownloadProgress {
     downloaded_bytes: u64,
     total_bytes: u64,
     percent: f64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GithubNetworkStatus {
+    proxy_detected: bool,
+    reachable: bool,
+    latency_ms: Option<u64>,
 }
 
 struct DownloadThrottle {
@@ -95,9 +109,31 @@ impl DownloadThrottle {
 struct ArchiveChunk {
     index: Option<u32>,
     file_name: String,
+    #[serde(default)]
     url: String,
     sha256: Option<String>,
     size_bytes: Option<u64>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportGameChunksResult {
+    imported_chunks: u64,
+    total_chunks: u64,
+    complete: bool,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChunkImportProgress {
+    current_chunk: u64,
+    total_chunks: u64,
+    file_name: String,
+    processed_bytes: u64,
+    total_bytes: u64,
+    current_chunk_bytes: u64,
+    current_chunk_total_bytes: u64,
+    percent: f64,
 }
 
 #[derive(Clone, Serialize)]
@@ -203,6 +239,11 @@ fn greet(name: &str) -> String {
 }
 
 #[tauri::command]
+fn is_debug_build() -> bool {
+    cfg!(debug_assertions)
+}
+
+#[tauri::command]
 fn get_available_space(path: String) -> Result<u64, String> {
     platform_available_space(&path)
 }
@@ -293,6 +334,13 @@ fn clear_download_state_file(install_path: String) -> Result<(), String> {
         })?;
     }
     Ok(())
+}
+
+#[tauri::command]
+fn clear_game_download_artifacts(install_path: String) -> Result<(), String> {
+    let download_dir = PathBuf::from(&install_path).join("_download");
+    remove_download_artifacts(&download_dir)?;
+    clear_download_state_file(install_path)
 }
 
 #[tauri::command]
@@ -497,6 +545,31 @@ fn open_launcher_log_folder(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn write_launcher_error_log(
+    app: AppHandle,
+    title: String,
+    detail: String,
+    context: Option<String>,
+    occurred_at: String,
+    file_timestamp: String,
+) -> Result<String, String> {
+    let log_dir = launcher_log_dir(&app)?;
+    let file_name = launcher_error_log_file_name(&title, &file_timestamp);
+    let detail = truncate_utf8(&detail, MAX_ERROR_LOG_DETAIL_BYTES);
+    let context = truncate_utf8(context.as_deref().unwrap_or(""), 64 * 1024);
+    let content = format!(
+        "标题：{}\n发生时间：{}\n\n错误详情：\n{}\n\n运行状态：\n{}\n",
+        title.trim(),
+        occurred_at.trim(),
+        detail,
+        context
+    );
+    write_text_log_file(&log_dir, &file_name, &content)?;
+    prune_launcher_error_logs(&log_dir)?;
+    Ok(log_dir.join(file_name).to_string_lossy().to_string())
+}
+
+#[tauri::command]
 fn dev_open_project_folder() -> Result<(), String> {
     #[cfg(not(debug_assertions))]
     {
@@ -512,6 +585,143 @@ fn dev_open_project_folder() -> Result<(), String> {
 #[tauri::command]
 fn validate_game_install_state(install_path: String, state: String) -> Result<bool, String> {
     validate_install_state(&install_path, &state)
+}
+
+#[tauri::command]
+async fn find_game_installation(root_path: String) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        find_game_installation_internal(Path::new(&root_path))
+            .map(|path| path.map(|value| value.to_string_lossy().to_string()))
+    })
+    .await
+    .map_err(|error| format!("Game location search task failed: {}", error))?
+}
+
+#[tauri::command]
+async fn move_game_installation(source_path: String, destination_base_path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        move_game_installation_internal(Path::new(&source_path), Path::new(&destination_base_path))
+            .map(|path| path.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|error| format!("Game migration task failed: {}", error))?
+}
+
+fn move_game_installation_internal(source: &Path, destination_base: &Path) -> Result<PathBuf, String> {
+    if !validate_install_state(source.to_string_lossy().as_ref(), "ready")? {
+        return Err("当前目录不是完整游戏，无法迁移。".to_string());
+    }
+    if !destination_base.is_dir() {
+        return Err(format!("新的安装位置不存在：{}", destination_base.display()));
+    }
+
+    let source = source
+        .canonicalize()
+        .map_err(|error| format!("无法读取当前游戏目录 {}: {}", source.display(), error))?;
+    let destination_base_canonical = destination_base
+        .canonicalize()
+        .map_err(|error| format!("无法读取新的安装位置 {}: {}", destination_base.display(), error))?;
+    let game_directory_name = source
+        .file_name()
+        .ok_or_else(|| "无法识别当前游戏目录名称。".to_string())?;
+    let destination = destination_base.join(game_directory_name);
+    let canonical_destination = destination_base_canonical.join(game_directory_name);
+
+    if canonical_destination == source {
+        return Err("新的安装位置与当前游戏目录相同。".to_string());
+    }
+    if canonical_destination.starts_with(&source) {
+        return Err("新的安装位置不能位于当前游戏目录内。".to_string());
+    }
+    if destination.exists() {
+        return Err(format!("新的安装位置已存在同名游戏目录：{}", destination.display()));
+    }
+
+    match fs::rename(&source, &destination) {
+        Ok(()) => Ok(destination),
+        Err(rename_error) if rename_error.raw_os_error() == Some(17) => {
+            copy_game_directory(&source, &destination)?;
+            if !validate_install_state(destination.to_string_lossy().as_ref(), "ready")? {
+                let _ = fs::remove_dir_all(&destination);
+                return Err("迁移后的游戏文件不完整，已取消迁移。".to_string());
+            }
+            fs::remove_dir_all(&source).map_err(|error| {
+                format!(
+                    "游戏文件已复制到 {}，但无法删除旧目录 {}: {}",
+                    destination.display(),
+                    source.display(),
+                    error
+                )
+            })?;
+            Ok(destination)
+        }
+        Err(error) => Err(format!("迁移游戏文件失败：{}", error)),
+    }
+}
+
+fn copy_game_directory(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir_all(destination)
+        .map_err(|error| format!("无法创建迁移目录 {}: {}", destination.display(), error))?;
+    let copy_result = (|| {
+        for entry in fs::read_dir(source)
+            .map_err(|error| format!("无法读取游戏目录 {}: {}", source.display(), error))?
+        {
+            let entry = entry.map_err(|error| format!("无法读取游戏文件: {}", error))?;
+            let source_path = entry.path();
+            let destination_path = destination.join(entry.file_name());
+            let file_type = entry
+                .file_type()
+                .map_err(|error| format!("无法读取游戏文件属性 {}: {}", source_path.display(), error))?;
+            if file_type.is_symlink() {
+                return Err(format!("游戏目录包含不支持迁移的链接：{}", source_path.display()));
+            }
+            if file_type.is_dir() {
+                copy_game_directory(&source_path, &destination_path)?;
+            } else if file_type.is_file() {
+                fs::copy(&source_path, &destination_path).map_err(|error| {
+                    format!("无法复制游戏文件 {}: {}", source_path.display(), error)
+                })?;
+            }
+        }
+        Ok(())
+    })();
+    if copy_result.is_err() {
+        let _ = fs::remove_dir_all(destination);
+    }
+    copy_result
+}
+
+fn find_game_installation_internal(root: &Path) -> Result<Option<PathBuf>, String> {
+    if !root.is_dir() {
+        return Err(format!("Selected game location is not a directory: {}", root.display()));
+    }
+
+    const MAX_SCANNED_DIRECTORIES: usize = 10_000;
+    let mut pending = VecDeque::from([root.to_path_buf()]);
+    let mut scanned = 0usize;
+    while let Some(directory) = pending.pop_front() {
+        scanned += 1;
+        if scanned > MAX_SCANNED_DIRECTORIES {
+            return Err("重新定位搜索范围过大，请选择更接近游戏目录的文件夹。".to_string());
+        }
+        if validate_install_state(directory.to_string_lossy().as_ref(), "ready")? {
+            return Ok(Some(directory));
+        }
+
+        let mut children = match fs::read_dir(&directory) {
+            Ok(entries) => entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    entry.file_type().ok().filter(|kind| kind.is_dir() && !kind.is_symlink())?;
+                    Some(entry.path())
+                })
+                .collect::<Vec<_>>(),
+            Err(_) => continue,
+        };
+        children.sort();
+        pending.extend(children);
+    }
+    Ok(None)
 }
 
 #[tauri::command]
@@ -689,10 +899,7 @@ fn validate_downloaded_archive_state(
 #[tauri::command]
 async fn fetch_remote_text(url: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(8))
-            .timeout_read(std::time::Duration::from_secs(8))
-            .build();
+        let agent = build_http_agent(&url, Duration::from_secs(8), Duration::from_secs(8));
         let response = agent
             .get(&url)
             .set("User-Agent", "CrossingVoidLauncher/0.1")
@@ -710,10 +917,7 @@ async fn fetch_remote_text(url: String) -> Result<String, String> {
 #[tauri::command]
 async fn fetch_github_release_asset_text(url: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let agent = ureq::AgentBuilder::new()
-            .timeout_connect(std::time::Duration::from_secs(8))
-            .timeout_read(std::time::Duration::from_secs(15))
-            .build();
+        let agent = build_http_agent(&url, Duration::from_secs(8), Duration::from_secs(15));
         let response = agent
             .get(&url)
             .set("User-Agent", "CrossingVoidLauncher/0.1")
@@ -729,6 +933,145 @@ async fn fetch_github_release_asset_text(url: String) -> Result<String, String> 
     })
     .await
     .map_err(|error| format!("GitHub release asset request task failed: {}", error))?
+}
+
+#[tauri::command]
+async fn get_github_network_status() -> GithubNetworkStatus {
+    tauri::async_runtime::spawn_blocking(|| {
+        let proxy_url = system_proxy_url();
+        let proxy_detected = proxy_url.is_some();
+        let started = Instant::now();
+        let reachable = build_http_agent_with_proxy(
+            Duration::from_secs(5),
+            Duration::from_secs(8),
+            proxy_url.as_deref(),
+        )
+        .get("https://github.com/")
+        .set("User-Agent", "CrossingVoidLauncher/0.1")
+        .call()
+        .is_ok();
+        GithubNetworkStatus {
+            proxy_detected,
+            reachable,
+            latency_ms: reachable.then(|| started.elapsed().as_millis() as u64),
+        }
+    })
+    .await
+    .unwrap_or(GithubNetworkStatus {
+        proxy_detected: false,
+        reachable: false,
+        latency_ms: None,
+    })
+}
+
+fn build_http_agent(url: &str, connect_timeout: Duration, read_timeout: Duration) -> ureq::Agent {
+    let proxy_url = is_github_url(url).then(system_proxy_url).flatten();
+    build_http_agent_with_proxy(connect_timeout, read_timeout, proxy_url.as_deref())
+}
+
+fn build_http_agent_with_proxy(
+    connect_timeout: Duration,
+    read_timeout: Duration,
+    proxy_url: Option<&str>,
+) -> ureq::Agent {
+    let mut builder = ureq::AgentBuilder::new()
+        .timeout_connect(connect_timeout)
+        .timeout_read(read_timeout);
+    if let Some(proxy_url) = proxy_url {
+        if let Ok(proxy) = ureq::Proxy::new(proxy_url) {
+            builder = builder.proxy(proxy);
+        }
+    }
+    builder.build()
+}
+
+fn is_github_url(url: &str) -> bool {
+    url.starts_with("https://github.com/")
+        || url.starts_with("https://api.github.com/")
+        || url.starts_with("https://objects.githubusercontent.com/")
+        || url.starts_with("https://release-assets.githubusercontent.com/")
+}
+
+fn system_proxy_url() -> Option<String> {
+    ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"]
+        .iter()
+        .find_map(|key| {
+            std::env::var(key)
+                .ok()
+                .and_then(|value| normalize_proxy_url(&value))
+        })
+        .or_else(windows_internet_proxy_url)
+}
+
+#[cfg(windows)]
+fn windows_internet_proxy_url() -> Option<String> {
+    let mut enabled_command = hidden_windows_command("reg.exe");
+    let enabled = enabled_command
+        .args([
+            "query",
+            "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+            "/v",
+            "ProxyEnable",
+        ])
+        .output()
+        .ok()
+        .filter(|result| result.status.success())
+        .map(|result| String::from_utf8_lossy(&result.stdout).contains("0x1"))
+        .unwrap_or(false);
+    if !enabled {
+        return None;
+    }
+    let mut server_command = hidden_windows_command("reg.exe");
+    let output = server_command
+        .args([
+            "query",
+            "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+            "/v",
+            "ProxyServer",
+        ])
+        .output();
+    output
+        .ok()
+        .filter(|result| result.status.success())
+        .and_then(|result| {
+            String::from_utf8_lossy(&result.stdout)
+                .lines()
+                .find(|line| line.contains("ProxyServer"))
+                .and_then(|line| line.split_whitespace().last())
+                .and_then(normalize_proxy_url)
+        })
+}
+
+#[cfg(windows)]
+fn hidden_windows_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+#[cfg(not(windows))]
+fn windows_internet_proxy_url() -> Option<String> {
+    None
+}
+
+fn normalize_proxy_url(value: &str) -> Option<String> {
+    let candidate = value
+        .split(';')
+        .find_map(|item| {
+            let item = item.trim();
+            item.strip_prefix("https=")
+                .or_else(|| item.strip_prefix("HTTPS="))
+                .map(str::trim)
+        })
+        .or_else(|| value.split(';').next().map(str::trim))?;
+    if candidate.is_empty() {
+        return None;
+    }
+    if candidate.contains("://") {
+        Some(candidate.to_string())
+    } else {
+        Some(format!("http://{}", candidate))
+    }
 }
 
 #[tauri::command]
@@ -771,6 +1114,139 @@ async fn download_game_archive(
     })
     .await
     .map_err(|error| format!("Download task failed: {}", error))?
+}
+
+#[tauri::command]
+async fn import_game_chunks(
+    app: AppHandle,
+    install_path: String,
+    chunks: Vec<ArchiveChunk>,
+    source_paths: Vec<String>,
+) -> Result<ImportGameChunksResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if chunks.is_empty() {
+            return Err("当前游戏清单没有可导入的碎片。".to_string());
+        }
+
+        let download_dir = PathBuf::from(install_path).join("_download");
+        let mut imported_sources = Vec::new();
+
+        for source_path in source_paths {
+            let source = PathBuf::from(source_path);
+            if source.is_dir() {
+                imported_sources.extend(collect_imported_chunk_files(&source, &chunks)?);
+            } else if source.is_file() {
+                imported_sources.push(source);
+            } else {
+                return Err(format!("选择的游戏分片路径不存在：{}", source.display()));
+            }
+        }
+        if imported_sources.is_empty() {
+            return Err("所选文件夹中没有找到当前版本的游戏分片。".to_string());
+        }
+
+        let mut sources_by_manifest_name = HashMap::new();
+        for source in imported_sources {
+            let source_name = sanitize_file_name(&source.to_string_lossy())
+                .ok_or_else(|| "Imported chunk file name is empty".to_string())?;
+            let expected = resolve_imported_chunk(&source_name, &chunks)
+                .ok_or_else(|| "Imported chunk is not part of the current manifest".to_string())?;
+            let destination_name = sanitize_file_name(&expected.file_name)
+                .ok_or_else(|| "Manifest chunk file name is empty".to_string())?;
+            sources_by_manifest_name
+                .entry(destination_name)
+                .or_insert((source, source_name));
+        }
+
+        let mut candidates = Vec::new();
+        for (destination_name, (source, source_name)) in sources_by_manifest_name {
+            if source.starts_with(&download_dir) {
+                return Err("请选择启动器下载缓存以外的游戏分片文件夹。".to_string());
+            }
+            let expected = resolve_imported_chunk(&destination_name, &chunks)
+                .ok_or_else(|| "Imported chunk is not part of the current manifest".to_string())?;
+            let metadata = fs::metadata(&source)
+                .map_err(|error| format!("Unable to inspect imported chunk {}: {}", source.display(), error))?;
+            if !metadata.is_file() {
+                return Err(format!("Imported chunk is not a file: {}", source.display()));
+            }
+            if let Some(expected_size) = expected.size_bytes {
+                if metadata.len() != expected_size {
+                    return Err(format!("Imported chunk size mismatch: {}", source_name));
+                }
+            }
+            candidates.push((
+                destination_name,
+                source,
+                source_name,
+                metadata.len(),
+                expected.sha256.clone(),
+            ));
+        }
+        candidates.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let total_chunks = candidates.len() as u64;
+        let total_bytes = candidates
+            .iter()
+            .map(|candidate| candidate.3)
+            .sum::<u64>()
+            .max(1);
+        let mut processed_bytes = 0u64;
+        let mut validated_sources = Vec::new();
+        for (index, (destination_name, source, source_name, file_size, expected_hash)) in
+            candidates.into_iter().enumerate()
+        {
+            let current_chunk = index as u64 + 1;
+            let emit_progress = |current_chunk_bytes: u64| {
+                let absolute_bytes = processed_bytes
+                    .saturating_add(current_chunk_bytes.min(file_size))
+                    .min(total_bytes);
+                let _ = app.emit(
+                    "game-chunk-import-progress",
+                    ChunkImportProgress {
+                        current_chunk,
+                        total_chunks,
+                        file_name: source_name.clone(),
+                        processed_bytes: absolute_bytes,
+                        total_bytes,
+                        current_chunk_bytes: current_chunk_bytes.min(file_size),
+                        current_chunk_total_bytes: file_size,
+                        percent: absolute_bytes as f64 / total_bytes as f64 * 100.0,
+                    },
+                );
+            };
+            emit_progress(0);
+            if let Some(expected_hash) = expected_hash.as_deref() {
+                let normalized_expected = expected_hash.trim().to_ascii_lowercase();
+                let actual = calculate_file_sha256_with_progress(&source, emit_progress)?;
+                if !normalized_expected.is_empty() && actual != normalized_expected {
+                    return Err(format!("Imported chunk SHA256 mismatch: {}", source_name));
+                }
+            } else {
+                emit_progress(file_size);
+            }
+            processed_bytes = processed_bytes.saturating_add(file_size).min(total_bytes);
+            validated_sources.push((destination_name, source));
+        }
+
+        remove_download_artifacts(&download_dir)?;
+        fs::create_dir_all(&download_dir).map_err(|error| {
+            format!("Unable to create import directory {}: {}", download_dir.display(), error)
+        })?;
+        let mut imported_chunks = 0u64;
+        for (destination_name, source) in validated_sources {
+            let destination = download_dir.join(destination_name);
+            fs::copy(&source, &destination).map_err(|error| {
+                format!("Unable to import chunk {}: {}", source.display(), error)
+            })?;
+            imported_chunks = imported_chunks.saturating_add(1);
+        }
+
+        let complete = validate_staged_archive(&download_dir.parent().unwrap_or(&download_dir).to_string_lossy(), 0, "", &chunks, Some("downloaded"))?;
+        Ok(ImportGameChunksResult { imported_chunks, total_chunks: chunks.len() as u64, complete })
+    })
+    .await
+    .map_err(|error| format!("Import task failed: {}", error))?
 }
 
 #[tauri::command]
@@ -1121,10 +1597,7 @@ fn download_file_once(
     archive_path: &Path,
     expected_size: u64,
 ) -> Result<(), String> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(12))
-        .timeout_read(std::time::Duration::from_secs(30))
-        .build();
+    let agent = build_http_agent(url, Duration::from_secs(12), Duration::from_secs(30));
     let mut resume_from = existing_download_size(archive_path, expected_size)?;
     let mut request = configure_download_request(agent.get(url), url);
     let range_header;
@@ -1513,10 +1986,7 @@ fn download_file_with_offset_once(
         return Ok(());
     }
 
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(12))
-        .timeout_read(std::time::Duration::from_secs(30))
-        .build();
+    let agent = build_http_agent(url, Duration::from_secs(12), Duration::from_secs(30));
     let mut request = configure_download_request(agent.get(url), url);
     let range_header;
     if resume_from > 0 {
@@ -2277,6 +2747,80 @@ fn sanitize_file_name(file_name: &str) -> Option<String> {
     }
 }
 
+fn github_chunk_index(file_name: &str) -> Option<u32> {
+    let suffix = file_name.strip_prefix("CrossingVoid.")?;
+    if suffix.len() != 3 || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    suffix.parse::<u32>().ok().filter(|index| *index > 0)
+}
+
+fn resolve_imported_chunk<'a>(
+    source_name: &str,
+    chunks: &'a [ArchiveChunk],
+) -> Option<&'a ArchiveChunk> {
+    if let Some(chunk) = chunks.iter().find(|chunk| {
+        sanitize_file_name(&chunk.file_name).as_deref() == Some(source_name)
+    }) {
+        return Some(chunk);
+    }
+
+    let github_index = github_chunk_index(source_name)?;
+    chunks
+        .iter()
+        .find(|chunk| chunk.index == Some(github_index))
+}
+
+fn collect_imported_chunk_files(
+    root: &Path,
+    chunks: &[ArchiveChunk],
+) -> Result<Vec<PathBuf>, String> {
+    if !root.is_dir() {
+        return Err(format!("选择的游戏分片文件夹不存在：{}", root.display()));
+    }
+
+    const MAX_SCANNED_ENTRIES: usize = 10_000;
+    let mut pending = VecDeque::from([root.to_path_buf()]);
+    let mut found = Vec::new();
+    let mut scanned = 0usize;
+    while let Some(directory) = pending.pop_front() {
+        let mut entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries.filter_map(Result::ok).collect::<Vec<_>>(),
+            Err(error) if directory == root => {
+                return Err(format!("无法读取游戏分片文件夹 {}：{}", root.display(), error));
+            }
+            Err(_) => continue,
+        };
+        entries.sort_by_key(|entry| entry.file_name());
+
+        for entry in entries {
+            scanned += 1;
+            if scanned > MAX_SCANNED_ENTRIES {
+                return Err("游戏分片文件夹内容过多，请选择更接近分片的位置。".to_string());
+            }
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(_) => continue,
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                pending.push_back(entry.path());
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if resolve_imported_chunk(&file_name, chunks).is_some() {
+                found.push(entry.path());
+            }
+        }
+    }
+    Ok(found)
+}
+
 fn download_state_file_path(install_path: &str) -> PathBuf {
     PathBuf::from(install_path)
         .join("_download")
@@ -2287,6 +2831,78 @@ fn launcher_log_dir(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_log_dir()
         .map_err(|error| format!("Unable to resolve launcher log directory: {}", error))
+}
+
+fn launcher_error_log_file_name(title: &str, file_timestamp: &str) -> String {
+    let mut safe_title = title
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_control() || matches!(character, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
+                '_'
+            } else {
+                character
+            }
+        })
+        .take(48)
+        .collect::<String>();
+    safe_title = safe_title.trim_matches([' ', '.']).to_string();
+    if safe_title.is_empty() {
+        safe_title = "启动器运行错误".to_string();
+    }
+    let safe_timestamp = file_timestamp
+        .chars()
+        .filter(|character| character.is_ascii_digit() || *character == '-')
+        .collect::<String>();
+    let safe_timestamp = if safe_timestamp.is_empty() {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis().to_string())
+            .unwrap_or_else(|_| "unknown-time".to_string())
+    } else {
+        safe_timestamp
+    };
+    format!("错误-{}-{}.log", safe_title, safe_timestamp)
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+fn prune_launcher_error_logs(log_dir: &Path) -> Result<(), String> {
+    let mut files = fs::read_dir(log_dir)
+        .map_err(|error| format!("Unable to inspect launcher log directory {}: {}", log_dir.display(), error))?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with("错误-") || !name.ends_with(".log") {
+                return None;
+            }
+            let metadata = entry.metadata().ok()?;
+            if !metadata.is_file() {
+                return None;
+            }
+            Some((entry.path(), metadata.len(), metadata.modified().ok()))
+        })
+        .collect::<Vec<_>>();
+    files.sort_by_key(|(_, _, modified)| *modified);
+    let mut total_bytes = files.iter().map(|(_, size, _)| *size).sum::<u64>();
+    for (path, size, _) in files {
+        if total_bytes <= MAX_ERROR_LOG_TOTAL_BYTES {
+            break;
+        }
+        fs::remove_file(&path)
+            .map_err(|error| format!("Unable to prune launcher error log {}: {}", path.display(), error))?;
+        total_bytes = total_bytes.saturating_sub(size);
+    }
+    Ok(())
 }
 
 #[cfg(debug_assertions)]
@@ -2577,7 +3193,6 @@ fn run_dev_launcher_script_blocking(
     })
 }
 
-#[cfg(debug_assertions)]
 fn write_text_log_file(log_dir: &Path, file_name: &str, content: &str) -> Result<(), String> {
     fs::create_dir_all(log_dir).map_err(|error| {
         format!(
@@ -3352,16 +3967,10 @@ fn open_folder(path: &Path) -> Result<(), String> {
     if !path.is_dir() {
         return Err(format!("Folder not found: {}", path.display()));
     }
-    let status = Command::new("explorer")
+    Command::new("explorer")
         .arg(path)
-        .status()
+        .spawn()
         .map_err(|error| format!("Unable to open folder {}: {}", path.display(), error))?;
-    if !status.success() {
-        return Err(format!(
-            "Explorer failed with exit code {:?}",
-            status.code()
-        ));
-    }
     Ok(())
 }
 
@@ -3570,9 +4179,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             greet,
+            is_debug_build,
             get_available_space,
             fetch_remote_text,
             fetch_github_release_asset_text,
+            get_github_network_status,
             post_remote_json,
             pause_game_download,
             cancel_game_operation,
@@ -3580,7 +4191,10 @@ pub fn run() {
             read_download_state_file,
             write_download_state_file,
             clear_download_state_file,
+            clear_game_download_artifacts,
             validate_game_install_state,
+            find_game_installation,
+            move_game_installation,
             migrate_mislabeled_game_version,
             read_game_version_file,
             open_game_folder,
@@ -3596,6 +4210,7 @@ pub fn run() {
             check_game_manifest_files,
             validate_downloaded_archive_state,
             download_game_archive,
+            import_game_chunks,
             install_downloaded_game_archive,
             dev_get_launcher_version,
             dev_set_launcher_version,
@@ -3603,6 +4218,7 @@ pub fn run() {
             dev_run_launcher_script,
             dev_pause_script,
             open_launcher_log_folder,
+            write_launcher_error_log,
             dev_open_project_folder
         ])
         .run(tauri::generate_context!())
@@ -3613,6 +4229,122 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_archive_chunk(index: u32, file_name: &str) -> ArchiveChunk {
+        ArchiveChunk {
+            index: Some(index),
+            file_name: file_name.to_string(),
+            url: String::new(),
+            sha256: None,
+            size_bytes: None,
+        }
+    }
+
+    #[test]
+    fn imported_chunk_resolves_manifest_name_and_github_numeric_alias() {
+        let chunks = vec![
+            test_archive_chunk(1, "CrossingVoid电脑端.碎片001"),
+            test_archive_chunk(2, "CrossingVoid电脑端.碎片002"),
+        ];
+
+        assert_eq!(
+            resolve_imported_chunk("CrossingVoid电脑端.碎片001", &chunks)
+                .map(|chunk| chunk.index),
+            Some(Some(1))
+        );
+        assert_eq!(
+            resolve_imported_chunk("CrossingVoid.002", &chunks).map(|chunk| chunk.index),
+            Some(Some(2))
+        );
+    }
+
+    #[test]
+    fn imported_chunk_rejects_unrelated_numeric_files() {
+        let chunks = vec![test_archive_chunk(1, "CrossingVoid电脑端.碎片001")];
+
+        assert!(resolve_imported_chunk("OtherGame.001", &chunks).is_none());
+        assert!(resolve_imported_chunk("CrossingVoid.999", &chunks).is_none());
+        assert!(resolve_imported_chunk("CrossingVoid.exe", &chunks).is_none());
+    }
+
+    #[test]
+    fn cancelling_download_removes_cache_without_touching_installed_game_files() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "cv-launcher-cancel-download-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let download_dir = root.join("_download");
+        fs::create_dir_all(&download_dir).expect("create download cache");
+        fs::write(root.join("CrossingVoid.exe"), b"installed").expect("write installed game file");
+        fs::write(download_dir.join("CrossingVoid.001"), b"partial").expect("write partial chunk");
+        fs::write(download_dir.join("download-state.json"), b"{}").expect("write download state");
+
+        clear_game_download_artifacts(root.to_string_lossy().into_owned())
+            .expect("clear game download artifacts");
+
+        assert!(!download_dir.exists());
+        assert_eq!(
+            fs::read(root.join("CrossingVoid.exe")).expect("read installed game file"),
+            b"installed"
+        );
+        fs::remove_dir_all(root).expect("remove cancel test directory");
+    }
+
+    #[test]
+    fn imported_chunk_folder_scan_finds_nested_manifest_and_github_names() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "cv-launcher-chunk-folder-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let nested = root.join("网盘下载");
+        fs::create_dir_all(&nested).expect("create nested chunk directory");
+        fs::write(root.join("说明.txt"), "ignore").expect("write unrelated file");
+        fs::write(root.join("CrossingVoid电脑端.碎片001"), "one")
+            .expect("write manifest chunk");
+        fs::write(nested.join("CrossingVoid.002"), "two").expect("write github chunk");
+
+        let chunks = vec![
+            test_archive_chunk(1, "CrossingVoid电脑端.碎片001"),
+            test_archive_chunk(2, "CrossingVoid电脑端.碎片002"),
+        ];
+        let found = collect_imported_chunk_files(&root, &chunks).expect("scan chunk folder");
+
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().any(|path| path.ends_with("CrossingVoid电脑端.碎片001")));
+        assert!(found.iter().any(|path| path.ends_with("CrossingVoid.002")));
+        fs::remove_dir_all(root).expect("remove chunk folder");
+    }
+
+    #[test]
+    fn archive_chunk_accepts_missing_url_for_local_installation() {
+        let chunk: ArchiveChunk = serde_json::from_value(serde_json::json!({
+            "index": 1,
+            "fileName": "CrossingVoid电脑端.碎片001",
+            "sha256": "abc",
+            "sizeBytes": 123
+        }))
+        .expect("deserialize local chunk without url");
+
+        assert_eq!(chunk.url, "");
+    }
+
+    #[test]
+    fn launcher_error_log_file_name_keeps_chinese_title_and_removes_invalid_characters() {
+        assert_eq!(
+            launcher_error_log_file_name("安装游戏/分片失败:参数错误", "20260820-130500-123"),
+            "错误-安装游戏_分片失败_参数错误-20260820-130500-123.log"
+        );
+    }
 
     #[test]
     fn developer_version_is_saved_without_touching_watched_manifests() {
@@ -3829,6 +4561,64 @@ mod tests {
     }
 
     #[test]
+    fn find_game_installation_scans_below_selected_directory() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "cv-launcher-relocate-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let incomplete = root.join("old");
+        let game = root.join("release").join("CrossingVoid");
+        fs::create_dir_all(&incomplete).expect("create incomplete directory");
+        fs::create_dir_all(&game).expect("create nested game directory");
+        fs::write(incomplete.join("CrossingVoid.exe"), []).expect("write incomplete executable");
+        fs::write(game.join("CrossingVoid.version.json"), "{}").expect("write version marker");
+        fs::write(game.join("CrossingVoid.manifest.json"), "{\"files\":[]}").expect("write manifest");
+        fs::write(game.join("CrossingVoid.exe"), []).expect("write executable");
+
+        assert_eq!(
+            find_game_installation_internal(&root).expect("scan selected directory"),
+            Some(game)
+        );
+        fs::remove_dir_all(root).expect("remove relocate test directory");
+    }
+
+    #[test]
+    fn move_game_installation_moves_complete_game_to_new_install_base() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "cv-launcher-move-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let source = root.join("old").join("CrossingVoid");
+        let destination_base = root.join("new");
+        fs::create_dir_all(&source).expect("create source game directory");
+        fs::create_dir_all(&destination_base).expect("create destination base directory");
+        fs::write(source.join("CrossingVoid.version.json"), "{}").expect("write version marker");
+        fs::write(source.join("CrossingVoid.manifest.json"), "{\"files\":[]}").expect("write manifest");
+        fs::write(source.join("CrossingVoid.exe"), []).expect("write executable");
+        fs::write(source.join("saved.dat"), "game data").expect("write game data");
+
+        let destination = move_game_installation_internal(&source, &destination_base)
+            .expect("move complete game");
+
+        assert_eq!(destination, destination_base.join("CrossingVoid"));
+        assert!(!source.exists());
+        assert_eq!(fs::read_to_string(destination.join("saved.dat")).expect("read moved file"), "game data");
+        assert!(validate_install_state(destination.to_string_lossy().as_ref(), "ready").expect("validate moved game"));
+
+        fs::remove_dir_all(root).expect("remove move test directory");
+    }
+
+    #[test]
     fn mislabeled_windows_release_is_migrated_without_redownloading_game_files() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -3980,6 +4770,18 @@ mod tests {
         assert!(!is_github_release_asset_api_url(
             "https://github.com/kirito0000001/CrossingVoid/releases/download/V0.5.13/CrossingVoid.zip.part001"
         ));
+    }
+
+    #[test]
+    fn normalizes_windows_proxy_server_for_github_requests() {
+        assert_eq!(
+            normalize_proxy_url("127.0.0.1:7897"),
+            Some("http://127.0.0.1:7897".to_string())
+        );
+        assert_eq!(
+            normalize_proxy_url("http=127.0.0.1:7890;https=127.0.0.1:7897"),
+            Some("http://127.0.0.1:7897".to_string())
+        );
     }
 
     #[test]
