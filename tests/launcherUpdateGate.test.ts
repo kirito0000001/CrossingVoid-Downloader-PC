@@ -11,11 +11,11 @@ describe("mandatory launcher update gate", () => {
     expect(appSource.indexOf("await checkUpdatesInOrder({ manual: false })")).toBeLessThan(appSource.lastIndexOf("hideBootSplash()"));
   });
 
-  it("blocks game operations until launcher verification succeeds", () => {
-    expect(appSource).toContain('const launcherAccessLocked = computed(() => launcherUpdateGate.value !== "ready")');
-    expect(appSource).toContain("if (launcherAccessLocked.value) return;");
-    expect(appSource).toContain('v-if="launcherAccessLocked && !showGameChunkImportGuide"');
-    expect(appSource).toContain("启动器需要更新");
+  it("blocks network operations without blocking an installed local game", () => {
+    expect(appSource).toContain("const launcherNetworkLocked = computed");
+    expect(appSource).toContain("localGamePlayableWhileNetworkLocked");
+    expect(appSource).not.toContain('v-if="launcherAccessLocked && !showGameChunkImportGuide"');
+    expect(appSource).not.toContain("const launcherAccessLocked = computed");
   });
 
   it("bypasses launcher updates in Vite and native Debug development builds", () => {
@@ -37,16 +37,11 @@ describe("mandatory launcher update gate", () => {
       .toContain("fn is_debug_build() -> bool");
   });
 
-  it("shows update progress inside the mandatory update dialog", () => {
-    const mandatoryDialog = appSource.slice(
-      appSource.indexOf('v-if="launcherAccessLocked && !showGameChunkImportGuide"'),
-      appSource.indexOf("</section>", appSource.indexOf('v-if="launcherAccessLocked && !showGameChunkImportGuide"')),
-    );
-
-    expect(mandatoryDialog).toContain("launcherUpdateStatusCopy");
-    expect(mandatoryDialog).toContain("launcherUpdateProgressPercent");
-    expect(mandatoryDialog).toContain("launcherUpdateProgressDetail");
-    expect(mandatoryDialog).toContain(':disabled="launcherUpdateActive"');
+  it("shows launcher update progress in the shared progress dock", () => {
+    expect(appSource).toContain("launcherUpdateStatusCopy");
+    expect(appSource).toContain("launcherUpdateProgressPercent");
+    expect(appSource).toContain("launcherUpdateProgressDetail");
+    expect(appSource).not.toContain("launcher-update-mask");
   });
 
   it("rechecks the latest launcher at every network game download boundary", () => {

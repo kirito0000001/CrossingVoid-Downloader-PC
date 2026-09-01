@@ -22,11 +22,17 @@ function Write-DevProgress {
     param([string]$Stage, [double]$Percent, [string]$Message)
 
     $payload = [ordered]@{
+        type = 'progress'
         stage = $Stage
         percent = [Math]::Max(0, [Math]::Min(100, $Percent))
         message = $Message
     }
-    Write-Output ("::progress" + ($payload | ConvertTo-Json -Compress))
+    Write-Output ("::axtools " + ($payload | ConvertTo-Json -Compress))
+}
+
+function Set-DevCancellationMode {
+    param([ValidateSet('stop','locked')][string]$Mode,[string]$Message)
+    Write-Output ("::axtools " + ([ordered]@{ type='cancellation'; mode=$Mode; message=$Message } | ConvertTo-Json -Compress))
 }
 
 function Get-GiteeApiUrl {
@@ -143,7 +149,7 @@ $GiteeAccessToken = Get-GiteeAccessToken -CurrentValue $GiteeAccessToken
 
 function Invoke-GiteeApi {
     param(
-        [ValidateSet("Get", "Post", "Put", "Patch")]
+        [ValidateSet("Get", "Post", "Put", "Patch", "Delete")]
         [string]$Method,
         [string]$Path,
         [hashtable]$Body
@@ -226,7 +232,8 @@ function Add-GiteeReleaseAsset {
             Write-Host "  已存在同名同大小附件，跳过：$($file.Name)" -ForegroundColor DarkGray
             return
         }
-        throw "Gitee Release 已有同名但大小不同的附件：$($file.Name)。请使用新的版本号。"
+        Write-DevProgress -Stage "checkpoint-reset" -Percent 70 -Message "断点附件不匹配，正在重新上传 $($file.Name)"
+        Invoke-GiteeApi -Method Delete -Path ("releases/{0}/attach_files/{1}" -f $ReleaseId, $existing[0].id) -Body @{} | Out-Null
     }
 
     $curl = Get-Command curl.exe -ErrorAction SilentlyContinue
@@ -284,8 +291,9 @@ if ($manualPublish -and ([string]::IsNullOrWhiteSpace($InstallerPath) -or [strin
 }
 
 if (!$SkipBuild -and !$manualPublish) {
+    Set-DevCancellationMode -Mode 'stop' -Message '正在构建发布包；停止后会保留已完成产物。'
     Write-DevProgress -Stage "build" -Percent 5 -Message "构建启动器"
-    & $buildScript -ProjectRoot $ProjectRoot -OutputDir $ReleasePackageDir -IntermediateOutputDir $IntermediateOutputDir -GiteeRepository $GiteeRepository
+    & $buildScript -ProjectRoot $ProjectRoot -OutputDir $ReleasePackageDir -IntermediateOutputDir $IntermediateOutputDir -GiteeRepository $GiteeRepository -ProgressStart 5 -ProgressEnd 55
     if ($LASTEXITCODE -ne 0) {
         throw "启动器构建失败，exit code $LASTEXITCODE"
     }
@@ -361,12 +369,14 @@ if ($DryRun) {
     Write-Host "DryRun：将发布 $installerPath、$signaturePath 和 launcher/latest.json 到 $GiteeRepository。" -ForegroundColor Yellow
 }
 else {
+    Set-DevCancellationMode -Mode 'stop' -Message '正在续传发布附件；停止后可再次点击继续。'
     $release = Ensure-GiteeRelease -Tag $tag -Title $notes -Notes $notes
     $existingAssets = Get-GiteeReleaseAssets -ReleaseId ([int]$release.id)
     Write-DevProgress -Stage "upload" -Percent 75 -Message "上传安装包到 Gitee"
     Add-GiteeReleaseAsset -ReleaseId ([int]$release.id) -Path $installerPath -ExistingAssets $existingAssets
     $existingAssets = Get-GiteeReleaseAssets -ReleaseId ([int]$release.id)
     Add-GiteeReleaseAsset -ReleaseId ([int]$release.id) -Path $signaturePath -ExistingAssets $existingAssets
+    Set-DevCancellationMode -Mode 'locked' -Message '附件已完成，正在提交版本清单，不可停止。'
     Write-DevProgress -Stage "manifest" -Percent 92 -Message "更新 Gitee 版本信息"
     Publish-GiteeRepositoryFile -LocalPath $latestManifestPath -RepositoryPath "launcher/latest.json" -CommitMessage "Update launcher to $($manifest.version)"
 }
@@ -383,7 +393,9 @@ Write-DevProgress -Stage "oss-compatibility" -Percent 96 -Message "同步旧版�
     -SkipBuild `
     -InstallerPath $installerPath `
     -ManifestPath $backendCompatibilityManifestPath `
-    -DryRun:$DryRun
+    -DryRun:$DryRun `
+    -ProgressStart 96 `
+    -ProgressEnd 99
 
 Write-DevProgress -Stage "completed" -Percent 100 -Message "Gitee 发布完成"
 Write-Host "Gitee Release：https://gitee.com/$GiteeRepository/releases/tag/$tag"

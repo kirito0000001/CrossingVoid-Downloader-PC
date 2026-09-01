@@ -4,12 +4,26 @@ dist/
 dist-ssr/
 dist-launcher-update/
 dist-launcher-update-debug/
+coverage/
+.nyc_output/
+.vite/
+.vitest/
+.cache/
+test-results/
+playwright-report/
+blob-report/
+*.tsbuildinfo
+*.lcov
+.eslintcache
+.stylelintcache
 *.local
 
 # Tauri and Rust generated output
 src-tauri/target/
 src-tauri/gen/
-src-tauri/.cargo/config.toml
+src-tauri/.cargo/
+target/
+*.rs.bk
 
 # Private updater material. The public key used by the application is embedded
 # in tauri.conf.json; the signing private key must never enter source control.
@@ -28,6 +42,10 @@ ReleaseAssets/
 *.7z
 *.rar
 *.sig
+*.dmg
+*.deb
+*.rpm
+*.AppImage
 !src-tauri/resources/VC_redist.x64.exe
 
 # Runtime state, game packages, logs, and local configuration
@@ -35,6 +53,13 @@ Logs/
 logs/
 Saved/
 *.log
+*.tmp
+*.temp
+*.bak
+*.old
+*.orig
+*.rej
+*.stackdump
 .env
 .env.*
 !.env.example
@@ -51,6 +76,13 @@ lerna-debug.log*
 .DS_Store
 Thumbs.db
 Desktop.ini
+ehthumbs.db
+*.user
+*.userosscache
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.VC.opendb
 *.suo
 *.ntvs*
 *.njsproj

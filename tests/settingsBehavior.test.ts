@@ -51,15 +51,27 @@ describe("launcher behavior settings", () => {
   it("moves an installed game into a newly selected install location", () => {
     const migration = appSource.slice(
       appSource.indexOf("async function migrateInstalledGame()"),
+      appSource.indexOf("async function confirmGameMigration()"),
+    );
+    const confirmation = appSource.slice(
+      appSource.indexOf("async function confirmGameMigration()"),
       appSource.indexOf("async function handlePrimaryAction()"),
     );
 
     expect(migration).toContain("async function migrateInstalledGame()");
-    expect(migration).toContain("defaultPath: installPath.value");
-    expect(migration).toContain('invoke<string>("move_game_installation"');
+    expect(migration).toContain('installDialogMode.value = "migration"');
+    expect(migration).toContain("showInstallConfirm.value = true");
+    expect(migration).not.toContain('invoke<string>("move_game_installation"');
+    expect(confirmation).toContain('invoke<string>("move_game_installation"');
+    expect(confirmation).toContain("selectedInstallBasePath.value");
+    expect(appSource).toContain('invoke<number>("get_game_migration_size"');
+    expect(appSource).toContain('installDialogMode.value === "migration" && migrationChangesVolume.value');
     expect(migration).not.toContain("!hasLocalInstalledGame.value");
     expect(appSource).toContain('t("settings.migrateGame")');
     expect(appSource).not.toContain(':disabled="gameMigrationPending || !hasLocalInstalledGame || gameRunning"');
+    expect(appSource).toContain("installDialogTitle");
+    expect(appSource).toContain("installDialogConfirmText");
+    expect(appSource).toContain("installDialogMode === 'install' || migrationChangesVolume");
     expect(appSource).toContain('showCheckResult(`无法打开游戏目录：${formatUnknownError(error)}`)');
   });
 

@@ -42,6 +42,7 @@
     ],
     "windows": {
       "nsis": {
+        "installerHooks": "installer-hooks.nsh",
         "installerIcon": "icons/installer.ico",
         "uninstallerIcon": "icons/installer.ico"
       }
@@ -51,7 +52,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://gitee.com/xiaojie578/CrossingVoid-Downloader-PC/raw/master/launcher/latest.json"
+        "https://www.crossingvoid.top/api/toolbox-updates/tauri/crossingvoid-launcher-pc/windows/x86_64/{{current_version}}"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ0MjZFQzczMDUxRDZENzMKUldSemJSMEZjK3dtUktya2FUNFc0Q3VCcG5COGlTTnZlSzdoT0ltazIwRmxqOHZvUFY4SEN5eWcK",
       "windows": {

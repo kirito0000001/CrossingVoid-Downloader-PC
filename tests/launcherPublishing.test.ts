@@ -16,6 +16,7 @@ const giteePackageBuilder = readFileSync(
   "utf8",
 );
 const tauriConfig = readFileSync(resolve(process.cwd(), "src-tauri/tauri.conf.json"), "utf8");
+const installerHooks = readFileSync(resolve(process.cwd(), "src-tauri/installer-hooks.nsh"), "utf8");
 
 describe("launcher publishing", () => {
   it("keeps the legacy PC product while publishing a canonical PC manifest", () => {
@@ -55,12 +56,11 @@ describe("launcher publishing", () => {
     expect(giteePublisher).toContain("Convert-ToRfc3339Timestamp $release.publishedAt");
   });
 
-  it("keeps PC launcher updates in the PC-only Gitee repository", () => {
-    const expectedRepository = "xiaojie578/CrossingVoid-Downloader-PC";
-
-    expect(giteePublisher).toContain(expectedRepository);
-    expect(giteePackageBuilder).toContain(expectedRepository);
-    expect(tauriConfig).toContain(`${expectedRepository}/raw/master/launcher/latest.json`);
+  it("checks PC launcher updates through the stable website manifest", () => {
+    expect(tauriConfig).toContain(
+      "https://www.crossingvoid.top/api/toolbox-updates/tauri/crossingvoid-launcher-pc/windows/x86_64/{{current_version}}",
+    );
+    expect(tauriConfig).not.toContain("gitee.com");
   });
 
   it("never recursively deletes the configured launcher output directory", () => {
@@ -70,5 +70,14 @@ describe("launcher publishing", () => {
     expect(giteePackageBuilder).toContain(
       "New-Item -ItemType Directory -Path $resolvedReleaseDir -Force",
     );
+  });
+
+  it("waits for the old launcher process to exit before an update overwrites files", () => {
+    expect(tauriConfig).toContain('"installerHooks": "installer-hooks.nsh"');
+    expect(installerHooks).toContain("NSIS_HOOK_PREINSTALL");
+    expect(installerHooks).toContain("$UpdateMode");
+    expect(installerHooks).toContain("FindProcessCurrentUser");
+    expect(installerHooks).toContain("Sleep 250");
+    expect(installerHooks).toContain("$R8 < 20");
   });
 });

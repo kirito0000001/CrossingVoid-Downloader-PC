@@ -17,6 +17,18 @@ import { githubNetworkWarning, type GithubNetworkStatus } from "./githubNetwork"
 import { githubGameChunkAssetName } from "./githubRelease";
 import { canPromoteInstalledGame, shouldPreserveSavedOperation } from "./downloadStatePolicy";
 import {
+  buildGameInstallPath,
+  DEFAULT_GAME_INSTALL_PATH,
+  DEFAULT_GAME_STORAGE_ROOT,
+  inferGameStorageRoot,
+  isSameWindowsVolume,
+} from "./gameInstallPath";
+import {
+  canLaunchLocalGame,
+  canUseLauncherNetwork,
+  type LauncherUpdateGate,
+} from "./launcherNetworkPolicy";
+import {
   CircleAlert,
   ChevronLeft,
   Check,
@@ -53,6 +65,7 @@ type LauncherState =
 type RepairOperationStage = "idle" | "preparing" | "downloading" | "repairing" | "verifying";
 type SettingsTab = "preferences" | "download" | "game" | "about" | "developer";
 type NewsTab = "characters" | "notice" | "video";
+type InstallDialogMode = "install" | "migration";
 type LauncherLanguage = "zh-Hans" | "zh-Hant" | "en" | "ja";
 type DownloadSourceKey = "official" | "github";
 type LauncherUpdateStage = "idle" | "checking" | "downloading" | "installing" | "restarting" | "failed";
@@ -388,12 +401,14 @@ type TranslationKey =
   | "side.expand"
   | "side.collapse"
   | "install.title"
+  | "install.migrationTitle"
   | "install.close"
   | "install.change"
   | "install.requiredSpace"
   | "install.availableSpace"
   | "install.desktopShortcut"
   | "install.continue"
+  | "install.confirmMigration"
   | "space.querying"
   | "space.checking"
   | "space.unavailable"
@@ -604,12 +619,14 @@ const translations: Record<LauncherLanguage, Record<TranslationKey, string>> = {
     "side.expand": "展开左侧栏",
     "side.collapse": "收起左侧栏",
     "install.title": "选择安装路径",
+    "install.migrationTitle": "选择迁移路径",
     "install.close": "关闭",
     "install.change": "更改",
     "install.requiredSpace": "所需空间",
     "install.availableSpace": "可用空间",
     "install.desktopShortcut": "桌面快捷方式",
     "install.continue": "继续安装",
+    "install.confirmMigration": "确认迁移",
     "space.querying": "正在查询",
     "space.checking": "检测中",
     "space.unavailable": "无法检测",
@@ -784,12 +801,14 @@ const translations: Record<LauncherLanguage, Record<TranslationKey, string>> = {
     "side.expand": "展開左側欄",
     "side.collapse": "收起左側欄",
     "install.title": "選擇安裝路徑",
+    "install.migrationTitle": "選擇遷移路徑",
     "install.close": "關閉",
     "install.change": "更改",
     "install.requiredSpace": "所需空間",
     "install.availableSpace": "可用空間",
     "install.desktopShortcut": "桌面捷徑",
     "install.continue": "繼續安裝",
+    "install.confirmMigration": "確認遷移",
     "space.querying": "正在查詢",
     "space.checking": "檢測中",
     "space.unavailable": "無法檢測",
@@ -964,12 +983,14 @@ const translations: Record<LauncherLanguage, Record<TranslationKey, string>> = {
     "side.expand": "Expand sidebar",
     "side.collapse": "Collapse sidebar",
     "install.title": "Choose Install Path",
+    "install.migrationTitle": "Choose Migration Path",
     "install.close": "Close",
     "install.change": "Change",
     "install.requiredSpace": "Required",
     "install.availableSpace": "Available",
     "install.desktopShortcut": "Desktop shortcut",
     "install.continue": "Continue",
+    "install.confirmMigration": "Move Game",
     "space.querying": "Querying",
     "space.checking": "Checking",
     "space.unavailable": "Unavailable",
@@ -1144,12 +1165,14 @@ const translations: Record<LauncherLanguage, Record<TranslationKey, string>> = {
     "side.expand": "左サイドバーを展開",
     "side.collapse": "左サイドバーを折りたたむ",
     "install.title": "インストール先を選択",
+    "install.migrationTitle": "移行先を選択",
     "install.close": "閉じる",
     "install.change": "変更",
     "install.requiredSpace": "必要容量",
     "install.availableSpace": "空き容量",
     "install.desktopShortcut": "デスクトップショートカット",
     "install.continue": "続行",
+    "install.confirmMigration": "移行する",
     "space.querying": "確認中",
     "space.checking": "確認中",
     "space.unavailable": "確認できません",
@@ -1271,6 +1294,7 @@ const activeCharacterBanner = ref(0);
 const showSettings = ref(false);
 const showDeleteGameConfirm = ref(false);
 const showInstallConfirm = ref(false);
+const installDialogMode = ref<InstallDialogMode>("install");
 const showGameChunkImportGuide = ref(false);
 const selectedChunkFolder = ref("");
 const showDevPackageConfirm = ref(false);
@@ -1295,9 +1319,8 @@ const gameMigrationPending = ref(false);
 const launcherUpdatePending = ref(false);
 const launcherUpdateStage = ref<LauncherUpdateStage>("idle");
 const launcherUpdateConfirmStage = ref<LauncherUpdateConfirmStage>("idle");
-type LauncherUpdateGate = "checking" | "ready" | "updateRequired" | "verificationFailed";
 const launcherUpdateGate = ref<LauncherUpdateGate>("checking");
-const launcherAccessLocked = computed(() => launcherUpdateGate.value !== "ready");
+const launcherNetworkLocked = computed(() => !canUseLauncherNetwork(launcherUpdateGate.value));
 // Tauri's Update instance owns private state and must not be wrapped in a Vue Proxy.
 const pendingLauncherUpdate = shallowRef<Update | null>(null);
 const launcherUpdateVersion = ref("");
@@ -1352,16 +1375,14 @@ let pendingDownloadStatePayload: PersistedDownloadState | null = null;
 let restoredDiskDownloadState = false;
 const leftCollapsed = ref(false);
 const autoRepair = ref(typeof window === "undefined" || window.localStorage.getItem(AUTO_REPAIR_STORAGE_KEY) !== "0");
-const GAME_DIRECTORY_NAME = "CrossingVoid";
-const DEFAULT_LAUNCHER_ROOT = "D:\\TFAC-hz64";
-const DEFAULT_GAME_INSTALL_PATH = `${DEFAULT_LAUNCHER_ROOT}\\${GAME_DIRECTORY_NAME}`;
 const installPath = ref(savedDownloadState?.installPath || DEFAULT_GAME_INSTALL_PATH);
-const selectedInstallBasePath = ref(savedDownloadState?.selectedInstallBasePath || DEFAULT_LAUNCHER_ROOT);
+const selectedInstallBasePath = ref(savedDownloadState?.selectedInstallBasePath || DEFAULT_GAME_STORAGE_ROOT);
 const createDesktopShortcut = ref(true);
 const fallbackRequiredInstallBytes = 5 * 1024 * 1024 * 1024;
 const remoteArchiveBytes = ref<number | null>(null);
 const remoteArchivePending = ref(false);
 const availableInstallBytes = ref<number | null>(null);
+const migrationRequiredBytes = ref<number | null>(null);
 const availableSpacePending = ref(false);
 const launcherLanguage = computed({
   get: () => languageLabels[currentLanguage.value],
@@ -1378,7 +1399,7 @@ const downloadSources = [
   descriptionKey: TranslationKey;
 }>;
 const officialUpdateApiUrl = "https://www.crossingvoid.top/api/toolbox-updates";
-const gameMetadataManifestUrl = "https://gitee.com/xiaojie578/CrossingVoid-Downloader-PC/raw/master/game/windows-latest.json";
+const gameMetadataManifestUrl = "https://www.crossingvoid.top/manifests/game/windows-latest.json";
 const remoteLauncherNoticeUrl = "https://www.crossingvoid.top/launcher-notice.json";
 const officialProductKey = "crossingvoid-game";
 const officialRuntime = "Windows";
@@ -1795,11 +1816,6 @@ onMounted(() => {
       windowFocusUnlisten = await appWindow.onFocusChanged((event) => {
         if (event.payload) void refreshExternalInstallState();
       });
-      await Promise.all([
-        refreshTrafficQuota(),
-        refreshRemoteLauncherNotice(),
-        ...(downloadSource.value === "github" ? [refreshGithubNetworkStatus()] : []),
-      ]);
       await nextTick();
 
       bootSplashStatus.value = "准备界面资源";
@@ -1807,10 +1823,17 @@ onMounted(() => {
     } catch (error) {
       console.warn("Launcher boot initialization failed", error);
     } finally {
-      if (trafficQuotaRefreshTimer === undefined) {
+      await checkUpdatesInOrder({ manual: false });
+      if (!launcherNetworkLocked.value) {
+        await Promise.all([
+          refreshTrafficQuota(),
+          refreshRemoteLauncherNotice(),
+          ...(downloadSource.value === "github" ? [refreshGithubNetworkStatus()] : []),
+        ]);
+      }
+      if (!launcherNetworkLocked.value && trafficQuotaRefreshTimer === undefined) {
         trafficQuotaRefreshTimer = window.setInterval(() => void refreshTrafficQuota(), 5 * 60 * 1000);
       }
-      await checkUpdatesInOrder({ manual: false });
       hideBootSplash();
     }
   })();
@@ -1922,6 +1945,9 @@ const hasCompleteDownloadedArchive = computed(() => {
   return launcherState.value !== "ready" && totalBytes > 0 && downloadedBytes.value >= totalBytes;
 });
 const offlinePlayable = computed(() => offlineMode.value && Boolean(localGameVersion.value));
+const localGamePlayableWhileNetworkLocked = computed(() =>
+  canLaunchLocalGame(launcherUpdateGate.value, hasLocalInstalledGame.value),
+);
 const showDownloadProgress = computed(() =>
   developerTaskActive.value ||
   launcherUpdateActive.value ||
@@ -2064,6 +2090,7 @@ const actionCopy = computed(() => {
   }
   if (developerTaskActive.value) return developerTaskStatus(developerTaskKind.value);
   if (launcherUpdateActive.value) return t("action.updateLauncher");
+  if (localGamePlayableWhileNetworkLocked.value) return t("action.launchGame");
   if (launcherUpdateConfirmStage.value === "available") return t("action.updateLauncherReady");
   if (gameLaunchPending.value) return t("action.launchingGame");
   if (gameRunning.value) return t("action.gameRunning");
@@ -2095,6 +2122,7 @@ const actionIcon = computed(() => {
   if (gameOperationCancelRequested.value || canCancelCurrentGameOperation.value) return X;
   if (developerTaskActive.value) return RefreshCw;
   if (launcherUpdateActive.value) return RefreshCw;
+  if (localGamePlayableWhileNetworkLocked.value) return Gamepad2;
   if (launcherUpdateConfirmStage.value === "available") return HardDriveDownload;
   if (gameLaunchPending.value) return RefreshCw;
   if (gameRunning.value) return Gamepad2;
@@ -2294,26 +2322,46 @@ const hasActiveDownloadTask = computed(
     updateDownloadPending.value ||
     (launcherState.value === "paused" && downloadedBytes.value > 0 && !offlinePlayable.value),
 );
-const canCheckGameUpdates = computed(() => hasLocalInstalledGame.value && !hasActiveDownloadTask.value);
+const canCheckGameUpdates = computed(() =>
+  hasLocalInstalledGame.value && !hasActiveDownloadTask.value && !launcherNetworkLocked.value,
+);
 const canVerifyGameIntegrity = computed(
   () =>
     !hasActiveDownloadTask.value &&
     launcherState.value !== "checking" &&
     launcherState.value !== "repairing",
 );
-const finalInstallPath = computed(() => buildFinalInstallPath(selectedInstallBasePath.value));
+const finalInstallPath = computed(() => buildGameInstallPath(selectedInstallBasePath.value));
+const migrationChangesVolume = computed(() =>
+  !isSameWindowsVolume(installPath.value, finalInstallPath.value),
+);
+const installDialogTitle = computed(() =>
+  t(installDialogMode.value === "migration" ? "install.migrationTitle" : "install.title"),
+);
+const installDialogConfirmText = computed(() =>
+  t(installDialogMode.value === "migration" ? "install.confirmMigration" : "install.continue"),
+);
 const availableSpaceCopy = computed(() => {
   if (availableSpacePending.value) return t("space.checking");
   if (availableInstallBytes.value == null) return t("space.unavailable");
   return formatBytes(availableInstallBytes.value);
 });
-const requiredInstallBytes = computed(() => (remoteArchiveBytes.value ?? fallbackRequiredInstallBytes) * 2);
+const requiredInstallBytes = computed(() =>
+  installDialogMode.value === "migration"
+    ? migrationRequiredBytes.value ?? 0
+    : (remoteArchiveBytes.value ?? fallbackRequiredInstallBytes) * 2,
+);
 const requiredSpaceCopy = computed(() => {
+  if (installDialogMode.value === "migration" && migrationRequiredBytes.value == null) return t("space.querying");
   if (remoteArchivePending.value && remoteArchiveBytes.value == null) return t("space.querying");
   return formatBytes(requiredInstallBytes.value);
 });
 const isInstallSpaceLow = computed(
-  () => availableInstallBytes.value != null && availableInstallBytes.value < requiredInstallBytes.value,
+  () =>
+    (installDialogMode.value === "install" || migrationChangesVolume.value) &&
+    requiredInstallBytes.value > 0 &&
+    availableInstallBytes.value != null &&
+    availableInstallBytes.value < requiredInstallBytes.value,
 );
 
 function cancelToolMenuClose() {
@@ -2630,28 +2678,13 @@ watch([installPath, selectedInstallBasePath, downloadSource], () => {
 
 watch([showInstallConfirm, finalInstallPath], ([visible]) => {
   if (!visible) return;
-  void updateAvailableInstallSpace();
+  void refreshInstallDialogSpace();
 });
 
 watch([showInstallConfirm, downloadSource], ([visible]) => {
-  if (!visible) return;
+  if (!visible || installDialogMode.value !== "install") return;
   void updateRemoteArchiveInfo();
 });
-
-function buildFinalInstallPath(basePath: string) {
-  const normalized = basePath.trim();
-  if (!normalized) return DEFAULT_GAME_INSTALL_PATH;
-  if (new RegExp(`${GAME_DIRECTORY_NAME}[\\\\/]?$`, "i").test(normalized)) return normalized.replace(/[\\/]$/, "");
-  return `${normalized.replace(/[\\/]$/, "")}\\${GAME_DIRECTORY_NAME}`;
-}
-
-function inferInstallBasePathFromGamePath(gamePath: string) {
-  const normalized = gamePath.trim().replace(/[\\/]$/, "");
-  if (!normalized) return DEFAULT_LAUNCHER_ROOT;
-  if (!new RegExp(`${GAME_DIRECTORY_NAME}$`, "i").test(normalized)) return normalized;
-  const parent = normalized.replace(new RegExp(`[\\\\/]${GAME_DIRECTORY_NAME}$`, "i"), "");
-  return parent || normalized;
-}
 
 function formatBytes(bytes: number) {
   const kb = bytes / 1024;
@@ -2800,7 +2833,7 @@ async function refreshExternalInstallState() {
   if (!restored) return false;
 
   await readLocalGameVersion();
-  if (!offlineMode.value) await checkGameVersion({ manual: false });
+  if (!offlineMode.value && !launcherNetworkLocked.value) await checkGameVersion({ manual: false });
   return true;
 }
 
@@ -2962,6 +2995,7 @@ async function fetchRemoteLauncherNotice() {
 }
 
 async function refreshRemoteLauncherNotice() {
+  if (launcherNetworkLocked.value) return;
   try {
     const notice = await fetchRemoteLauncherNotice();
     remoteLauncherNotice.value = notice;
@@ -2992,6 +3026,7 @@ async function refreshDeveloperRemoteNotice() {
 }
 
 async function refreshTrafficQuota() {
+  if (launcherNetworkLocked.value) return;
   if (trafficQuotaPending.value) return;
   trafficQuotaPending.value = true;
   try {
@@ -3025,6 +3060,7 @@ async function refreshTrafficQuota() {
 }
 
 async function refreshGithubNetworkStatus() {
+  if (launcherNetworkLocked.value) return;
   if (githubNetworkPending.value) return;
   githubNetworkPending.value = true;
   try {
@@ -3208,6 +3244,22 @@ async function isDevelopmentBuild() {
   } catch {
     return false;
   }
+}
+
+async function refreshInstallDialogSpace() {
+  migrationRequiredBytes.value = null;
+  const requests: Promise<unknown>[] = [updateAvailableInstallSpace()];
+  if (installDialogMode.value === "migration" && migrationChangesVolume.value) {
+    requests.push(
+      invoke<number>("get_game_migration_size", { installPath: installPath.value })
+        .then((bytes) => { migrationRequiredBytes.value = bytes; })
+        .catch((error) => {
+          console.warn("Unable to calculate game migration size", error);
+          migrationRequiredBytes.value = null;
+        }),
+    );
+  }
+  await Promise.all(requests);
 }
 
 function isDevToolsAvailable() {
@@ -4090,7 +4142,6 @@ async function downloadGameArchive() {
 }
 
 async function installDownloadedGameArchive() {
-  if (launcherAccessLocked.value) return;
   gameOperationCancelRequested.value = false;
   try {
     const archive = await fetchGameMetadataArchiveInfo();
@@ -4375,14 +4426,16 @@ async function chooseInstallPath() {
     const selected = await open({
       directory: true,
       multiple: false,
-      defaultPath: installPath.value,
-      title: t("dialog.chooseInstallPath"),
+      defaultPath: installDialogMode.value === "migration" ? selectedInstallBasePath.value : installPath.value,
+      title: t(installDialogMode.value === "migration" ? "dialog.chooseMigrationPath" : "dialog.chooseInstallPath"),
     });
 
     if (typeof selected !== "string") return false;
 
     selectedInstallBasePath.value = selected;
-    installPath.value = buildFinalInstallPath(selected);
+    if (installDialogMode.value === "install") {
+      installPath.value = buildGameInstallPath(selected);
+    }
     persistDownloadState(currentPersistableState(), "immediate");
     return true;
   } catch (error) {
@@ -4413,7 +4466,7 @@ async function relocateInstalledGame() {
 
     const previousPath = installPath.value;
     installPath.value = nextPath;
-    selectedInstallBasePath.value = inferInstallBasePathFromGamePath(nextPath);
+    selectedInstallBasePath.value = inferGameStorageRoot(nextPath);
     downloadedBytes.value = 0;
     downloadedMb.value = 0;
     activeDownloadBytes.value = null;
@@ -4441,28 +4494,34 @@ async function relocateInstalledGame() {
 async function migrateInstalledGame() {
   if (gameMigrationPending.value || gameRunning.value || gameSettingsDisabled.value) return;
 
-  try {
-    const selected = await open({
-      directory: true,
-      multiple: false,
-      defaultPath: installPath.value,
-      title: t("dialog.chooseMigrationPath"),
-    });
-    if (typeof selected !== "string") return;
+  installDialogMode.value = "migration";
+  selectedInstallBasePath.value = inferGameStorageRoot(installPath.value);
+  showInstallConfirm.value = true;
+}
 
+async function confirmGameMigration() {
+  if (gameMigrationPending.value || gameRunning.value || gameSettingsDisabled.value) return;
+  const destinationPath = finalInstallPath.value;
+  if (destinationPath.toLowerCase() === installPath.value.replace(/[\\/]$/, "").toLowerCase()) {
+    showCheckResult("新的迁移位置与当前游戏位置相同，请先更改路径。");
+    return;
+  }
+
+  try {
     gameMigrationPending.value = true;
+    showInstallConfirm.value = false;
     const previousPath = installPath.value;
     const nextPath = await invoke<string>("move_game_installation", {
       sourcePath: previousPath,
-      destinationBasePath: selected.replace(/[\\/]$/, ""),
+      destinationBasePath: selectedInstallBasePath.value.replace(/[\\/]$/, ""),
     });
     installPath.value = nextPath;
-    selectedInstallBasePath.value = inferInstallBasePathFromGamePath(nextPath);
+    selectedInstallBasePath.value = inferGameStorageRoot(nextPath);
     await clearPersistedDownloadStateForPath(previousPath);
     persistDownloadState("ready", "immediate");
     await readLocalGameVersion();
     showCheckResult(`游戏已迁移至：${nextPath}`);
-    if (!offlineMode.value) {
+    if (!offlineMode.value && !launcherNetworkLocked.value) {
       void checkGameVersion({ manual: true });
     }
   } catch (error) {
@@ -4474,11 +4533,6 @@ async function migrateInstalledGame() {
 }
 
 async function handlePrimaryAction() {
-  if (launcherAccessLocked.value) {
-    if (launcherUpdateGate.value === "updateRequired") await installPendingLauncherUpdate();
-    if (launcherUpdateGate.value === "verificationFailed") await checkUpdatesInOrder({ manual: true });
-    return;
-  }
   if (canPauseDeveloperUpload.value) {
     await pauseDeveloperUpload();
     return;
@@ -4495,12 +4549,21 @@ async function handlePrimaryAction() {
     await cancelCurrentGameOperation();
     return;
   }
+  if (launcherState.value === "checking" || launcherState.value === "installing" || launcherState.value === "repairing") return;
+  await refreshExternalInstallState();
+  if (localGamePlayableWhileNetworkLocked.value) {
+    await launchInstalledGame();
+    return;
+  }
   if (launcherUpdateConfirmStage.value === "available") {
     await installPendingLauncherUpdate();
     return;
   }
-  if (launcherState.value === "checking" || launcherState.value === "installing" || launcherState.value === "repairing") return;
-  await refreshExternalInstallState();
+  if (launcherNetworkLocked.value) {
+    if (launcherUpdateGate.value === "verificationFailed") await checkUpdatesInOrder({ manual: true });
+    else showCheckResult("当前启动器仅可使用本地功能，请先更新启动器后再使用网络功能。");
+    return;
+  }
   if (offlinePlayable.value) {
     await launchInstalledGame();
     return;
@@ -4538,8 +4601,8 @@ async function handlePrimaryAction() {
   }
 
   if (downloadedMb.value <= 0) {
+    installDialogMode.value = "install";
     showInstallConfirm.value = true;
-    void updateAvailableInstallSpace();
     return;
   }
 
@@ -4714,7 +4777,7 @@ async function verifyGameIntegrity() {
   const previousState = launcherState.value;
   const previousRepairSummary = pendingRepairSummary.value;
   pendingRepairSummary.value = null;
-  if (!offlineMode.value) {
+  if (!offlineMode.value && !launcherNetworkLocked.value) {
     await checkGameVersion({ manual: true });
     if (updateAvailable.value) return;
   }
@@ -5413,21 +5476,22 @@ function handleContextMenu(event: MouseEvent) {
         data-no-drag
         @click.self="showInstallConfirm = false"
       >
-        <section class="install-panel" :aria-label="t('install.title')">
+        <section class="install-panel" :aria-label="installDialogTitle">
           <button class="install-close" type="button" :aria-label="t('install.close')" @click="showInstallConfirm = false">
             <X :size="23" stroke-width="2.5" />
           </button>
-          <h2>{{ t("install.title") }}</h2>
+          <h2>{{ installDialogTitle }}</h2>
           <div class="install-path-row">
             <span>{{ finalInstallPath }}</span>
             <button type="button" @click="chooseInstallPath">{{ t("install.change") }}</button>
           </div>
           <div class="install-space-row">
-            <span>{{ t("install.requiredSpace") }}：{{ requiredSpaceCopy }}</span>
-            <i></i>
+            <span v-if="installDialogMode === 'install' || migrationChangesVolume">{{ t("install.requiredSpace") }}：{{ requiredSpaceCopy }}</span>
+            <i v-if="installDialogMode === 'install' || migrationChangesVolume"></i>
             <span :class="{ danger: isInstallSpaceLow }">{{ t("install.availableSpace") }}：{{ availableSpaceCopy }}</span>
           </div>
           <button
+            v-if="installDialogMode === 'install'"
             class="install-option"
             :class="{ checked: createDesktopShortcut }"
             type="button"
@@ -5436,8 +5500,13 @@ function handleContextMenu(event: MouseEvent) {
             <span class="check-box"><Check :size="21" stroke-width="3.2" /></span>
             <strong>{{ t("install.desktopShortcut") }}</strong>
           </button>
-          <button class="install-continue" type="button" @click="confirmInstallPathAndDownload">
-            {{ t("install.continue") }}
+          <button
+            class="install-continue"
+            type="button"
+            :disabled="gameMigrationPending"
+            @click="installDialogMode === 'migration' ? confirmGameMigration() : confirmInstallPathAndDownload()"
+          >
+            {{ installDialogConfirmText }}
           </button>
         </section>
       </div>
@@ -5910,34 +5979,6 @@ function handleContextMenu(event: MouseEvent) {
       </div>
     </Transition>
 
-    <Transition name="confirm-pop">
-      <div v-if="launcherAccessLocked && !showGameChunkImportGuide" class="confirm-mask launcher-update-mask" data-no-drag>
-        <section class="confirm-panel launcher-update-panel" aria-label="启动器更新">
-          <h3>{{ launcherUpdateActive ? launcherUpdateStatusCopy : launcherUpdateGate === "verificationFailed" ? "无法确认启动器版本" : launcherUpdateGate === "checking" ? "正在检查启动器更新" : "启动器需要更新" }}</h3>
-          <p v-if="launcherUpdateActive">{{ launcherUpdateProgressDetail || "请勿关闭启动器。" }}</p>
-          <p v-else-if="launcherUpdateGate === 'updateRequired'">必须更新到 {{ launcherUpdateVersion || "最新版本" }} 后才能下载或启动游戏。</p>
-          <p v-else-if="launcherUpdateGate === 'verificationFailed'">启动器版本检查失败。为保证下载与游戏版本匹配，请重新检查。</p>
-          <p v-else>正在确认当前启动器是否为最新版本。</p>
-          <div v-if="launcherUpdateActive" class="launcher-update-progress" aria-live="polite">
-            <div class="launcher-update-progress-meta">
-              <span>{{ launcherUpdateStatusCopy }}</span>
-              <strong>{{ launcherUpdateProgressPercent }}%</strong>
-            </div>
-            <div class="progress-track">
-              <div class="progress-fill active" :style="{ width: `${launcherUpdateProgressPercent}%` }"></div>
-            </div>
-          </div>
-          <div v-if="launcherUpdateGate !== 'checking'" class="confirm-actions confirm-actions-single">
-            <button class="confirm-delete" type="button" :disabled="launcherUpdateActive" @click="launcherUpdateGate === 'updateRequired' ? installPendingLauncherUpdate() : checkUpdatesInOrder({ manual: true })">
-              {{ launcherUpdateActive ? "正在更新" : launcherUpdateGate === "updateRequired" ? "立即更新" : "重新检查" }}
-            </button>
-            <button class="confirm-cancel" type="button" :disabled="launcherUpdateActive" @click="openGameChunkImportGuide">
-              导入碎片
-            </button>
-          </div>
-        </section>
-      </div>
-    </Transition>
   </main>
 </template>
 
@@ -8883,40 +8924,6 @@ a,
 
 .confirm-actions-single {
   grid-template-columns: 196px;
-}
-
-.launcher-update-mask {
-  z-index: 420;
-}
-
-.launcher-update-panel {
-  min-height: 288px;
-}
-
-.launcher-update-progress {
-  margin: -10px 0 26px;
-}
-
-.launcher-update-progress-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 9px;
-  color: rgba(48, 53, 59, 0.76);
-  font-size: 14px;
-  font-weight: 850;
-}
-
-.launcher-update-progress-meta strong {
-  color: var(--cv-accent-title);
-  font-family: "UnispaceCV", "Microsoft YaHei UI", sans-serif;
-  font-size: 16px;
-}
-
-.launcher-update-panel .confirm-delete:disabled {
-  cursor: wait;
-  opacity: 0.7;
 }
 
 @media (prefers-reduced-motion: reduce) {

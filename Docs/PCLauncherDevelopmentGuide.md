@@ -261,13 +261,14 @@ crossing-void.launcher.hide-after-game-launch
 Tauri 更新端点：
 
 ```text
-https://gitee.com/xiaojie578/CrossingVoid-Downloader-PC/raw/master/launcher/latest.json
+https://www.crossingvoid.top/api/toolbox-updates/tauri/crossingvoid-launcher-pc/windows/x86_64/{{current_version}}
 ```
 
 仓库职责必须分开：
 
 - GitHub `CrossingVoid-Downloader-PC`：源码。
-- Gitee `CrossingVoid-Downloader-PC`：PC 启动器安装包、签名和最新版清单。
+- `crossingvoid.top`：PC 启动器版本检查与 Tauri 更新清单。
+- Gitee `CrossingVoid-Downloader-PC`：历史发布资产；客户端不得再读取其 Raw 文件。
 - Gitee Android 仓库：Android 启动器，不得混回 PC 仓库。
 
 更新流程：

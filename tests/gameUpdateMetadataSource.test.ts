@@ -5,9 +5,9 @@ import { describe, expect, it } from "vitest";
 const appSource = readFileSync(resolve(process.cwd(), "src/App.vue"), "utf8");
 
 describe("game update metadata source", () => {
-  it("reads version metadata from Gitee before an official-source download is requested", () => {
+  it("reads version metadata from the stable website before a download is requested", () => {
     expect(appSource).toContain(
-      'const gameMetadataManifestUrl = "https://gitee.com/xiaojie578/CrossingVoid-Downloader-PC/raw/master/game/windows-latest.json";',
+      'const gameMetadataManifestUrl = "https://www.crossingvoid.top/manifests/game/windows-latest.json";',
     );
     expect(appSource).toContain("fetchGameMetadataArchiveInfo");
 
@@ -19,7 +19,7 @@ describe("game update metadata source", () => {
     expect(checkGameVersionSource).not.toContain("resolveBackendArchiveInfo()");
   });
 
-  it("uses the same Gitee manifest for both GitHub and OSS game downloads", () => {
+  it("uses the same website manifest for both GitHub and OSS game downloads", () => {
     const resolverSource = appSource.slice(
       appSource.indexOf("async function resolveGameMetadataDownload"),
       appSource.indexOf("async function updateAvailableInstallSpace"),

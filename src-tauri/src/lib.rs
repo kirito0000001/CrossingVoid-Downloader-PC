@@ -249,6 +249,18 @@ fn get_available_space(path: String) -> Result<u64, String> {
 }
 
 #[tauri::command]
+async fn get_game_migration_size(install_path: String) -> Result<u64, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let game_path = Path::new(&install_path)
+            .canonicalize()
+            .map_err(|error| format!("无法读取当前游戏目录 {}: {}", install_path, error))?;
+        directory_size(&game_migration_source(&game_path))
+    })
+    .await
+    .map_err(|error| format!("游戏迁移空间统计失败: {}", error))?
+}
+
+#[tauri::command]
 fn pause_game_download() {
     DOWNLOAD_CANCELLED.store(true, Ordering::SeqCst);
 }
@@ -615,48 +627,117 @@ fn move_game_installation_internal(source: &Path, destination_base: &Path) -> Re
         return Err(format!("新的安装位置不存在：{}", destination_base.display()));
     }
 
-    let source = source
+    let source_game = source
         .canonicalize()
         .map_err(|error| format!("无法读取当前游戏目录 {}: {}", source.display(), error))?;
     let destination_base_canonical = destination_base
         .canonicalize()
         .map_err(|error| format!("无法读取新的安装位置 {}: {}", destination_base.display(), error))?;
-    let game_directory_name = source
+    let game_directory_name = source_game
         .file_name()
         .ok_or_else(|| "无法识别当前游戏目录名称。".to_string())?;
-    let destination = destination_base.join(game_directory_name);
-    let canonical_destination = destination_base_canonical.join(game_directory_name);
+    let source_to_move = game_migration_source(&source_game);
+    let moves_container = source_to_move != source_game;
+    let destination_container = destination_base.join("TFAC-hz64");
+    let destination_game = destination_container.join(game_directory_name);
+    let destination_to_move = if moves_container {
+        destination_container.clone()
+    } else {
+        destination_game.clone()
+    };
+    let canonical_destination_game = destination_base_canonical
+        .join("TFAC-hz64")
+        .join(game_directory_name);
+    let canonical_destination_to_move = if moves_container {
+        destination_base_canonical.join("TFAC-hz64")
+    } else {
+        canonical_destination_game
+    };
 
-    if canonical_destination == source {
+    if canonical_destination_to_move == source_to_move {
         return Err("新的安装位置与当前游戏目录相同。".to_string());
     }
-    if canonical_destination.starts_with(&source) {
+    if canonical_destination_to_move.starts_with(&source_to_move) {
         return Err("新的安装位置不能位于当前游戏目录内。".to_string());
     }
-    if destination.exists() {
-        return Err(format!("新的安装位置已存在同名游戏目录：{}", destination.display()));
+    if destination_to_move.exists() {
+        return Err(format!(
+            "新的安装位置已存在同名游戏目录：{}",
+            destination_to_move.display()
+        ));
+    }
+    if !moves_container {
+        fs::create_dir_all(&destination_container).map_err(|error| {
+            format!(
+                "无法创建新的游戏容器目录 {}: {}",
+                destination_container.display(),
+                error
+            )
+        })?;
     }
 
-    match fs::rename(&source, &destination) {
-        Ok(()) => Ok(destination),
+    match fs::rename(&source_to_move, &destination_to_move) {
+        Ok(()) => Ok(destination_game),
         Err(rename_error) if rename_error.raw_os_error() == Some(17) => {
-            copy_game_directory(&source, &destination)?;
-            if !validate_install_state(destination.to_string_lossy().as_ref(), "ready")? {
-                let _ = fs::remove_dir_all(&destination);
+            copy_game_directory(&source_to_move, &destination_to_move)?;
+            if !validate_install_state(destination_game.to_string_lossy().as_ref(), "ready")? {
+                let _ = fs::remove_dir_all(&destination_to_move);
                 return Err("迁移后的游戏文件不完整，已取消迁移。".to_string());
             }
-            fs::remove_dir_all(&source).map_err(|error| {
+            fs::remove_dir_all(&source_to_move).map_err(|error| {
                 format!(
                     "游戏文件已复制到 {}，但无法删除旧目录 {}: {}",
-                    destination.display(),
-                    source.display(),
+                    destination_to_move.display(),
+                    source_to_move.display(),
                     error
                 )
             })?;
-            Ok(destination)
+            Ok(destination_game)
         }
         Err(error) => Err(format!("迁移游戏文件失败：{}", error)),
     }
+}
+
+fn game_migration_source(game_path: &Path) -> PathBuf {
+    let Some(parent) = game_path.parent() else {
+        return game_path.to_path_buf();
+    };
+    let is_container = parent
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("TFAC-hz64"));
+    if is_container {
+        parent.to_path_buf()
+    } else {
+        game_path.to_path_buf()
+    }
+}
+
+fn directory_size(root: &Path) -> Result<u64, String> {
+    let mut total = 0u64;
+    for entry in fs::read_dir(root)
+        .map_err(|error| format!("无法读取迁移目录 {}: {}", root.display(), error))?
+    {
+        let entry = entry.map_err(|error| format!("无法读取迁移文件: {}", error))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("无法读取迁移文件属性 {}: {}", entry.path().display(), error))?;
+        if file_type.is_symlink() {
+            return Err(format!("迁移目录包含不支持的链接：{}", entry.path().display()));
+        }
+        if file_type.is_dir() {
+            total = total
+                .checked_add(directory_size(&entry.path())?)
+                .ok_or_else(|| "迁移目录大小超过支持范围。".to_string())?;
+        } else if file_type.is_file() {
+            total = total
+                .checked_add(entry.metadata().map_err(|error| {
+                    format!("无法读取迁移文件大小 {}: {}", entry.path().display(), error)
+                })?.len())
+                .ok_or_else(|| "迁移目录大小超过支持范围。".to_string())?;
+        }
+    }
+    Ok(total)
 }
 
 fn copy_game_directory(source: &Path, destination: &Path) -> Result<(), String> {
@@ -4181,6 +4262,7 @@ pub fn run() {
             greet,
             is_debug_build,
             get_available_space,
+            get_game_migration_size,
             fetch_remote_text,
             fetch_github_release_asset_text,
             get_github_network_status,
@@ -4598,7 +4680,8 @@ mod tests {
             std::process::id(),
             unique
         ));
-        let source = root.join("old").join("CrossingVoid");
+        let source_container = root.join("old").join("TFAC-hz64");
+        let source = source_container.join("CrossingVoid");
         let destination_base = root.join("new");
         fs::create_dir_all(&source).expect("create source game directory");
         fs::create_dir_all(&destination_base).expect("create destination base directory");
@@ -4606,13 +4689,23 @@ mod tests {
         fs::write(source.join("CrossingVoid.manifest.json"), "{\"files\":[]}").expect("write manifest");
         fs::write(source.join("CrossingVoid.exe"), []).expect("write executable");
         fs::write(source.join("saved.dat"), "game data").expect("write game data");
+        fs::write(source_container.join("platform-extra.dat"), "extra data")
+            .expect("write container extra file");
 
         let destination = move_game_installation_internal(&source, &destination_base)
             .expect("move complete game");
 
-        assert_eq!(destination, destination_base.join("CrossingVoid"));
-        assert!(!source.exists());
+        assert_eq!(
+            destination,
+            destination_base.join("TFAC-hz64").join("CrossingVoid")
+        );
+        assert!(!source_container.exists());
         assert_eq!(fs::read_to_string(destination.join("saved.dat")).expect("read moved file"), "game data");
+        assert_eq!(
+            fs::read_to_string(destination_base.join("TFAC-hz64").join("platform-extra.dat"))
+                .expect("read moved container extra file"),
+            "extra data"
+        );
         assert!(validate_install_state(destination.to_string_lossy().as_ref(), "ready").expect("validate moved game"));
 
         fs::remove_dir_all(root).expect("remove move test directory");

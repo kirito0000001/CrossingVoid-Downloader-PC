@@ -17,7 +17,9 @@
     [switch]$SkipBuild,
     [switch]$SkipOss,
     [switch]$SkipServer,
-    [switch]$DryRun
+    [switch]$DryRun,
+    [double]$ProgressStart = 0,
+    [double]$ProgressEnd = 100
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,11 +34,12 @@ function Write-DevProgress {
     )
 
     $payload = [ordered]@{
+        type = 'progress'
         stage = $Stage
-        percent = [Math]::Max(0, [Math]::Min(100, $Percent))
+        percent = $ProgressStart + (($ProgressEnd - $ProgressStart) * ([Math]::Max(0, [Math]::Min(100, $Percent)) / 100))
         message = $Message
     }
-    Write-Output ("::progress" + ($payload | ConvertTo-Json -Compress))
+    Write-Output ("::axtools " + ($payload | ConvertTo-Json -Compress))
 }
 
 function Get-OssutilCommand {

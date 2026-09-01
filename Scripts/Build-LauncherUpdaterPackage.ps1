@@ -6,7 +6,9 @@
     [string]$ProductKey = "crossingvoid-launcher",
     [string]$DisplayName = "零境启动器",
     [string]$OutputDir = "D:\启动器新包",
-    [string]$IntermediateOutputDir = (Join-Path $ProjectRoot "dist-launcher-update")
+    [string]$IntermediateOutputDir = (Join-Path $ProjectRoot "dist-launcher-update"),
+    [double]$ProgressStart = 0,
+    [double]$ProgressEnd = 100
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,11 +23,12 @@ function Write-DevProgress {
     )
 
     $payload = [ordered]@{
+        type = 'progress'
         stage = $Stage
-        percent = [Math]::Max(0, [Math]::Min(100, $Percent))
+        percent = $ProgressStart + (($ProgressEnd - $ProgressStart) * ([Math]::Max(0, [Math]::Min(100, $Percent)) / 100))
         message = $Message
     }
-    Write-Output ("::progress" + ($payload | ConvertTo-Json -Compress))
+    Write-Output ("::axtools " + ($payload | ConvertTo-Json -Compress))
 }
 
 function Get-JsonValue {

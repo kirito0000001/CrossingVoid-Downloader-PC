@@ -57,11 +57,8 @@ describe("game chunk import", () => {
 
     expect(disabledSource).not.toContain("launcherAccessLocked");
     expect(importSource).not.toContain("launcherAccessLocked");
-    const mandatoryPanel = appSource.slice(
-      appSource.indexOf('class="confirm-panel launcher-update-panel"'),
-      appSource.indexOf("</section>", appSource.indexOf('class="confirm-panel launcher-update-panel"')),
-    );
-    expect(mandatoryPanel).toContain('@click="openGameChunkImportGuide"');
+    expect(appSource).toContain('@click="openGameChunkImportGuide"');
+    expect(appSource).not.toContain('class="confirm-panel launcher-update-panel"');
   });
 
   it("shows an import guide with folder selection and four external download sources", () => {
