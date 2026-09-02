@@ -53,12 +53,24 @@ Vitest + Rust unit tests
 ```text
 src/App.vue
 src/components/LauncherSelect.vue
+src/components/PlatformGameRail.vue
 src/downloadStatePolicy.ts
 src/downloadTimeEstimator.ts
 src/githubRelease.ts
+src/platform/gameCatalog.ts
+src/platform/platformLauncher.ts
 ```
 
 Vue 层负责界面、翻译、可见状态、操作编排和本地偏好。`App.vue` 目前较大，修改前应先用 `rg` 找到具体状态、计算属性和操作函数，避免凭界面文字直接改错分支。
+
+平台导航的 seam 位于 `src/platform`：
+
+- `gameCatalog.ts` 只保存稳定游戏 ID、顺序、名称、图标、启动品牌和背景资源路径。
+- `platformLauncher.ts` 统一管理当前游戏、左侧详情折叠和 `localStorage` 恢复；调用方只使用 `selectGame / setDetailsCollapsed / toggleDetails`。
+- `PlatformGameRail.vue` 只渲染目录并发出选择事件，不读取任何游戏业务状态。
+- 零境是当前第一个已实现页面。其他游戏未接入前不得复制零境下载状态；第二个真实游戏接入后，再从实际差异提炼游戏下载、安装和更新 Adapter。
+
+启动时必须先同步读取上次游戏 ID，使加载图标与首个页面一致。非零境页面只检查平台启动器自身更新，不得后台请求零境游戏版本、流量、代理或公告。
 
 ### 3.2 Rust 原生层
 

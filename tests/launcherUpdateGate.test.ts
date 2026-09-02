@@ -7,8 +7,16 @@ const appSource = readFileSync(resolve(process.cwd(), "src/App.vue"), "utf8");
 describe("mandatory launcher update gate", () => {
   it("checks the launcher before revealing normal game actions", () => {
     expect(appSource).toContain('const launcherUpdateGate = ref<LauncherUpdateGate>("checking")');
-    expect(appSource).toContain("await checkUpdatesInOrder({ manual: false })");
-    expect(appSource.indexOf("await checkUpdatesInOrder({ manual: false })")).toBeLessThan(appSource.lastIndexOf("hideBootSplash()"));
+    const platformInitialization = appSource.slice(
+      appSource.indexOf("async function initializePlatformPage"),
+      appSource.indexOf("async function selectPlatformGame"),
+    );
+    expect(platformInitialization).toContain("await checkLauncherUpdate({ manual: false })");
+    expect(platformInitialization).toContain("await checkGameVersion({ manual: false })");
+    expect(platformInitialization.indexOf("checkLauncherUpdate")).toBeLessThan(
+      platformInitialization.indexOf("checkGameVersion"),
+    );
+    expect(appSource.indexOf("await initializePlatformPage()")).toBeLessThan(appSource.lastIndexOf("hideBootSplash()"));
   });
 
   it("blocks network operations without blocking an installed local game", () => {

@@ -8,6 +8,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import LauncherSelect from "./components/LauncherSelect.vue";
+import PlatformGameRail from "./components/PlatformGameRail.vue";
+import PlatformGameOverview from "./components/PlatformGameOverview.vue";
 import {
   DownloadTimeEstimator,
   formatEtaClock,
@@ -28,6 +30,13 @@ import {
   canUseLauncherNetwork,
   type LauncherUpdateGate,
 } from "./launcherNetworkPolicy";
+import { createPlatformLauncher } from "./platform/platformLauncher";
+import type { PlatformGameId } from "./platform/gameCatalog";
+import {
+  activateGameOverviewItem,
+  openGameOverview,
+  type GameOverviewSelection,
+} from "./platform/gameOverviewSelection";
 import {
   CircleAlert,
   ChevronLeft,
@@ -1277,11 +1286,30 @@ async function restoreDownloadStateFromDisk() {
 }
 
 const savedDownloadState = readPersistedDownloadState();
+const platformLauncher = createPlatformLauncher(
+  typeof window === "undefined" ? null : window.localStorage,
+);
+const activeGame = platformLauncher.activeGame;
+const activeGameId = platformLauncher.activeGameId;
+const leftCollapsed = platformLauncher.detailsCollapsed;
+const gameOverviewVisible = platformLauncher.gameOverviewVisible;
+const platformGames = platformLauncher.games;
+const overviewPreviewGameId = ref<PlatformGameId>(activeGameId.value);
+const overviewSelection = ref<GameOverviewSelection>(openGameOverview(activeGameId.value));
+const isCrossingVoidActive = computed(() => activeGameId.value === "crossing-void");
+const showPlatformGameRail = computed(
+  () => !gameOverviewVisible.value && (leftCollapsed.value || !isCrossingVoidActive.value),
+);
 const savedDownloadedBytes = persistedNumber(savedDownloadState?.downloadedBytes);
 const savedTotalBytes = persistedNumber(savedDownloadState?.totalBytes);
 const launcherVersion = ref(__APP_VERSION__);
 const bundledOnSetManifest = ref<OnSetManifest | null>(null);
-const keepBootSplashVisibleForLayout = false;
+const keepBootSplashVisibleForLayout =
+  import.meta.env.DEV &&
+  typeof window !== "undefined" &&
+  new URLSearchParams(window.location.search).has("holdBoot");
+const bootSplashMinimumDurationMs = 1800;
+const bootSplashStartedAt = Date.now();
 const bootSplashVisible = ref(true);
 const bootSplashStatus = ref("Now Loading...");
 const launcherState = ref<LauncherState>(savedDownloadState ? normalizePersistedState(savedDownloadState) : "paused");
@@ -1373,7 +1401,6 @@ let devScriptProgressUnlisten: UnlistenFn | undefined;
 let devScriptFinishedUnlisten: UnlistenFn | undefined;
 let pendingDownloadStatePayload: PersistedDownloadState | null = null;
 let restoredDiskDownloadState = false;
-const leftCollapsed = ref(false);
 const autoRepair = ref(typeof window === "undefined" || window.localStorage.getItem(AUTO_REPAIR_STORAGE_KEY) !== "0");
 const installPath = ref(savedDownloadState?.installPath || DEFAULT_GAME_INSTALL_PATH);
 const selectedInstallBasePath = ref(savedDownloadState?.selectedInstallBasePath || DEFAULT_GAME_STORAGE_ROOT);
@@ -1581,7 +1608,7 @@ function stopCharacterBannerRotation() {
   characterBannerTimer = undefined;
 }
 
-startCharacterBannerRotation();
+if (isCrossingVoidActive.value) startCharacterBannerRotation();
 
 onBeforeUnmount(() => {
   removeLauncherErrorLogging();
@@ -1751,8 +1778,12 @@ function handlePromoImageError() {
 
 async function preloadBootImages() {
   const imageSources = new Set<string>();
-  imageSources.add("/launcher/hero-bg.jpeg");
-  imageSources.add("/launcher/logo_white.png");
+  if (activeGame.value.backgroundSrc) imageSources.add(activeGame.value.backgroundSrc);
+  if (activeGame.value.bootLogoSrc) imageSources.add(activeGame.value.bootLogoSrc);
+  if (!isCrossingVoidActive.value) {
+    await Promise.all([...imageSources].map((src) => preloadImage(src)));
+    return;
+  }
   imageSources.add(videoFallbackBanner);
   imageSources.add(noticeBoard.value.banner);
   characterProfiles.value.forEach((profile) => imageSources.add(profile.banner));
@@ -1765,6 +1796,11 @@ async function preloadBootImages() {
 }
 
 async function loadBootResources() {
+  if (!isCrossingVoidActive.value) {
+    bootSplashStatus.value = `正在进入 ${activeGame.value.name}`;
+    await Promise.all([waitForBootFonts(1600), preloadBootImages()]);
+    return;
+  }
   bootSplashStatus.value = "读取主题配置";
   await loadOnSetColors();
   bootSplashStatus.value = "加载角色轮播";
@@ -1782,10 +1818,66 @@ function hideBootSplash() {
   if (bootSplashTimer !== undefined) {
     window.clearTimeout(bootSplashTimer);
   }
+  const remainingDuration = Math.max(
+    0,
+    bootSplashMinimumDurationMs - (Date.now() - bootSplashStartedAt),
+  );
   bootSplashTimer = window.setTimeout(() => {
     bootSplashVisible.value = false;
     bootSplashTimer = undefined;
-  }, 120);
+  }, remainingDuration + 180);
+}
+
+async function initializePlatformPage() {
+  const hasLauncherUpdate = await checkLauncherUpdate({ manual: false });
+  if (hasLauncherUpdate || launcherUpdateGate.value !== "ready" || !isCrossingVoidActive.value) return;
+  await checkGameVersion({ manual: false });
+  await Promise.all([
+    refreshTrafficQuota(),
+    refreshRemoteLauncherNotice(),
+    ...(downloadSource.value === "github" ? [refreshGithubNetworkStatus()] : []),
+  ]);
+  if (trafficQuotaRefreshTimer === undefined) {
+    trafficQuotaRefreshTimer = window.setInterval(() => void refreshTrafficQuota(), 5 * 60 * 1000);
+  }
+}
+
+async function selectPlatformGame(id: PlatformGameId) {
+  if (activeGameId.value === id && !gameOverviewVisible.value) return;
+  platformLauncher.selectGame(id);
+  showSettings.value = false;
+  showMenu.value = false;
+  showInstallConfirm.value = false;
+  showGameChunkImportGuide.value = false;
+  if (id === "crossing-void") {
+    startCharacterBannerRotation();
+    await loadBootResources();
+    await initializePlatformPage();
+  } else {
+    stopCharacterBannerRotation();
+  }
+}
+
+function openPlatformGameOverview() {
+  overviewSelection.value = openGameOverview(activeGameId.value);
+  overviewPreviewGameId.value = overviewSelection.value.previewGameId;
+  platformLauncher.setGameOverviewVisible(true);
+  showSettings.value = false;
+  showMenu.value = false;
+}
+
+async function activateOverviewGame(id: PlatformGameId) {
+  const result = activateGameOverviewItem(overviewSelection.value, id);
+  overviewSelection.value = result.state;
+  overviewPreviewGameId.value = result.state.previewGameId;
+  if (result.action === "select") {
+    return;
+  }
+  await selectPlatformGame(id);
+}
+
+function togglePlatformDetails() {
+  platformLauncher.toggleDetails();
 }
 
 onMounted(() => {
@@ -1814,7 +1906,7 @@ onMounted(() => {
       await readLocalGameVersion();
       await refreshGameRunningState();
       windowFocusUnlisten = await appWindow.onFocusChanged((event) => {
-        if (event.payload) void refreshExternalInstallState();
+        if (event.payload && isCrossingVoidActive.value) void refreshExternalInstallState();
       });
       await nextTick();
 
@@ -1823,17 +1915,7 @@ onMounted(() => {
     } catch (error) {
       console.warn("Launcher boot initialization failed", error);
     } finally {
-      await checkUpdatesInOrder({ manual: false });
-      if (!launcherNetworkLocked.value) {
-        await Promise.all([
-          refreshTrafficQuota(),
-          refreshRemoteLauncherNotice(),
-          ...(downloadSource.value === "github" ? [refreshGithubNetworkStatus()] : []),
-        ]);
-      }
-      if (!launcherNetworkLocked.value && trafficQuotaRefreshTimer === undefined) {
-        trafficQuotaRefreshTimer = window.setInterval(() => void refreshTrafficQuota(), 5 * 60 * 1000);
-      }
+      await initializePlatformPage();
       hideBootSplash();
     }
   })();
@@ -2606,7 +2688,7 @@ function resetSettingsScrollbar() {
 
 watch([showSettings, activeSettingsTab], () => {
   resetSettingsScrollbar();
-  if (showSettings.value && activeSettingsTab.value === "download") {
+  if (isCrossingVoidActive.value && showSettings.value && activeSettingsTab.value === "download") {
     if (downloadSource.value === "official") void refreshTrafficQuota();
     else void refreshGithubNetworkStatus();
   }
@@ -2626,6 +2708,7 @@ watch(currentLanguage, (language) => {
 
 watch(downloadSource, (source) => {
   window.localStorage.setItem(DOWNLOAD_SOURCE_STORAGE_KEY, source);
+  if (!isCrossingVoidActive.value) return;
   if (source === "github") void refreshGithubNetworkStatus();
 }, { flush: "sync" });
 
@@ -2828,6 +2911,7 @@ async function restoreReadyInstallFromFiles() {
 }
 
 async function refreshExternalInstallState() {
+  if (!isCrossingVoidActive.value) return false;
   if (launcherState.value === "ready") return true;
   const restored = await restoreReadyInstallFromFiles();
   if (!restored) return false;
@@ -2995,7 +3079,7 @@ async function fetchRemoteLauncherNotice() {
 }
 
 async function refreshRemoteLauncherNotice() {
-  if (launcherNetworkLocked.value) return;
+  if (!isCrossingVoidActive.value || launcherNetworkLocked.value) return;
   try {
     const notice = await fetchRemoteLauncherNotice();
     remoteLauncherNotice.value = notice;
@@ -3026,7 +3110,7 @@ async function refreshDeveloperRemoteNotice() {
 }
 
 async function refreshTrafficQuota() {
-  if (launcherNetworkLocked.value) return;
+  if (!isCrossingVoidActive.value || launcherNetworkLocked.value) return;
   if (trafficQuotaPending.value) return;
   trafficQuotaPending.value = true;
   try {
@@ -3060,7 +3144,7 @@ async function refreshTrafficQuota() {
 }
 
 async function refreshGithubNetworkStatus() {
-  if (launcherNetworkLocked.value) return;
+  if (!isCrossingVoidActive.value || launcherNetworkLocked.value) return;
   if (githubNetworkPending.value) return;
   githubNetworkPending.value = true;
   try {
@@ -3845,7 +3929,7 @@ async function markUnavailableInstalledGame() {
 }
 
 async function checkGameVersion(options: { manual?: boolean } = {}) {
-  if (offlineMode.value || launcherState.value !== "ready" || versionCheckPending.value) return;
+  if (!isCrossingVoidActive.value || offlineMode.value || launcherState.value !== "ready" || versionCheckPending.value) return;
 
   versionCheckPending.value = true;
   updateAvailable.value = false;
@@ -5102,8 +5186,8 @@ function handleContextMenu(event: MouseEvent) {
     @selectstart.prevent
     @mousedown="startWindowDrag"
   >
-    <img class="background" src="/launcher/hero-bg.jpeg" alt="" />
-    <div class="cinematic-shade"></div>
+    <img v-if="!gameOverviewVisible && activeGame.backgroundSrc" class="background" :src="activeGame.backgroundSrc" alt="" />
+    <div v-if="!gameOverviewVisible" class="cinematic-shade"></div>
     <div class="scanlines"></div>
     <div class="drag-surface"></div>
 
@@ -5111,7 +5195,8 @@ function handleContextMenu(event: MouseEvent) {
       <section v-if="bootSplashVisible" class="boot-splash">
         <div class="boot-splash__grain"></div>
         <div class="boot-splash__center">
-          <img class="boot-splash__logo" src="/launcher/logo_white.png" alt="零境启动器" />
+          <img v-if="activeGame.bootLogoSrc" class="boot-splash__logo" :src="activeGame.bootLogoSrc" :alt="activeGame.name" />
+          <span v-else class="boot-splash__placeholder" aria-hidden="true">{{ activeGame.shortLabel }}</span>
           <div class="boot-splash__line">
             <span></span>
           </div>
@@ -5122,11 +5207,12 @@ function handleContextMenu(event: MouseEvent) {
     </Transition>
 
     <header class="titlebar">
-      <section class="brand">
-        <img class="brand-logo" src="/launcher/logo_white.png" alt="零境交错" />
+      <section v-if="!gameOverviewVisible" class="brand">
+        <img v-if="activeGame.brandLogoSrc" class="brand-logo" :src="activeGame.brandLogoSrc" :alt="activeGame.name" />
+        <strong v-else class="brand-placeholder">{{ activeGame.name }}</strong>
       </section>
 
-      <nav class="quick-links" :aria-label="t('nav.quickLinks')">
+      <nav v-if="isCrossingVoidActive && !gameOverviewVisible" class="quick-links" :aria-label="t('nav.quickLinks')">
         <button
           v-for="item in quickLinks"
           :key="item.key"
@@ -5151,7 +5237,7 @@ function handleContextMenu(event: MouseEvent) {
       </nav>
 
       <Transition name="traffic-warning">
-        <div v-if="showOfficialTrafficWarning || showGithubNetworkWarning" class="traffic-warning" role="status">
+        <div v-if="isCrossingVoidActive && !gameOverviewVisible && (showOfficialTrafficWarning || showGithubNetworkWarning)" class="traffic-warning" role="status">
           <CircleAlert :size="18" stroke-width="2.8" />
           <span>{{ showOfficialTrafficWarning ? t("traffic.low") : githubNetworkWarningText }}</span>
         </div>
@@ -5159,6 +5245,7 @@ function handleContextMenu(event: MouseEvent) {
 
       <section class="window-actions">
         <button
+          v-if="isCrossingVoidActive && !gameOverviewVisible"
           class="source-pill"
           type="button"
           @click="showSettings = true; activeSettingsTab = 'download'"
@@ -5167,7 +5254,7 @@ function handleContextMenu(event: MouseEvent) {
           <strong>{{ t(selectedDownloadSource.nameKey) }}</strong>
           <em class="button-tooltip source-tooltip">{{ selectedDownloadSourceDescription }}</em>
         </button>
-        <button class="plain-icon" type="button" :aria-label="t('window.settings')" @click="showSettings = true">
+        <button v-if="!gameOverviewVisible" class="plain-icon" type="button" :aria-label="t('window.settings')" @click="showSettings = true">
           <Settings :size="22" stroke-width="2.6" />
           <span class="button-tooltip">{{ t("window.settings") }}</span>
         </button>
@@ -5182,7 +5269,29 @@ function handleContextMenu(event: MouseEvent) {
       </section>
     </header>
 
-    <section class="left-stack" :class="{ collapsed: leftCollapsed }">
+    <PlatformGameRail
+      v-if="showPlatformGameRail"
+      :games="platformGames"
+      :active-id="activeGameId"
+      :overview-active="gameOverviewVisible"
+      @select="selectPlatformGame"
+      @overview="openPlatformGameOverview"
+    />
+
+    <PlatformGameOverview
+      v-if="gameOverviewVisible"
+      :games="platformGames"
+      :preview-id="overviewPreviewGameId"
+      @select="activateOverviewGame"
+    />
+
+    <section v-else-if="!isCrossingVoidActive" class="platform-placeholder-page" :aria-label="activeGame.name">
+      <span>{{ activeGame.shortLabel }}</span>
+      <h1>{{ activeGame.name }}</h1>
+      <p>页面资源尚未接入</p>
+    </section>
+
+    <section v-if="isCrossingVoidActive && !gameOverviewVisible" class="left-stack" :class="{ collapsed: leftCollapsed }">
       <article class="promo-panel" :class="{ video: activeNewsTab === 'video' }">
         <div class="tab-row">
           <button
@@ -5304,7 +5413,7 @@ function handleContextMenu(event: MouseEvent) {
       </article>
     </section>
 
-    <section class="right-launcher">
+    <section v-if="isCrossingVoidActive && !gameOverviewVisible" class="right-launcher">
       <section class="hero-copy" :class="{ raised: showDownloadProgress }">
         <h2>{{ t("brand.title") }}</h2>
         <div class="collab-line">
@@ -5455,16 +5564,17 @@ function handleContextMenu(event: MouseEvent) {
     </section>
 
     <button
+      v-if="isCrossingVoidActive && !gameOverviewVisible"
       class="side-handle"
       :class="{ collapsed: leftCollapsed }"
       type="button"
       :title="leftCollapsed ? t('side.expand') : t('side.collapse')"
-      @click="leftCollapsed = !leftCollapsed"
+      @click="togglePlatformDetails"
     >
       <ChevronLeft :size="30" stroke-width="3.2" />
     </button>
 
-    <section class="version-corner" aria-label="version info">
+    <section v-if="isCrossingVoidActive && !gameOverviewVisible" class="version-corner" aria-label="version info">
       <span>{{ t("settings.gameVersion") }}：{{ displayedGameVersion }}</span>
       <span>{{ t("settings.launcherVersion") }}：{{ launcherVersion }}</span>
     </section>
@@ -6129,8 +6239,10 @@ a,
 }
 
 .boot-splash {
-  position: absolute;
+  position: fixed;
   inset: 0;
+  width: 100vw;
+  height: 100vh;
   z-index: 500;
   display: grid;
   place-items: center;
@@ -6181,7 +6293,7 @@ a,
   display: grid;
   justify-items: center;
   gap: 18px;
-  transform: translate(-100px, -56px);
+  transform: none;
 }
 
 .boot-splash__logo {
@@ -6193,6 +6305,20 @@ a,
     drop-shadow(0 12px 18px rgba(0, 0, 0, 0.62))
     drop-shadow(0 0 20px color-mix(in srgb, var(--cv-accent-title) 25%, transparent));
   animation: boot-logo-breathe 2.4s ease-in-out infinite;
+}
+
+.boot-splash__placeholder {
+  width: 92px;
+  height: 92px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  border-radius: 6px;
+  background: rgba(4, 10, 15, 0.78);
+  color: var(--cv-accent-title);
+  font-size: 34px;
+  font-weight: 950;
+  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.42);
 }
 
 .boot-splash__line {
@@ -6383,6 +6509,271 @@ a,
   gap: 10px;
   min-width: 0;
   z-index: 100;
+}
+
+.brand-placeholder {
+  max-width: 230px;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.94);
+  font-size: 20px;
+  font-weight: 950;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: 0 4px 14px rgba(0, 0, 0, 0.68);
+}
+
+.platform-placeholder-page {
+  position: absolute;
+  inset: 72px 0 0;
+  z-index: 2;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 12px;
+  background: rgba(2, 7, 11, 0.72);
+  text-align: center;
+}
+
+.platform-placeholder-page > span {
+  width: 76px;
+  height: 76px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 6px;
+  color: var(--cv-accent-title);
+  font-size: 28px;
+  font-weight: 950;
+}
+
+.platform-placeholder-page h1 {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.95);
+  font-size: 34px;
+  letter-spacing: 0;
+}
+
+.platform-placeholder-page p {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.52);
+  font-size: 15px;
+  font-weight: 800;
+}
+
+.platform-game-overview {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  overflow: hidden;
+  background: #080b0e;
+}
+
+.platform-game-overview__background,
+.platform-game-overview__shade {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.platform-game-overview__background {
+  object-fit: cover;
+  animation: platform-overview-background-in 280ms ease-out;
+}
+
+.platform-game-overview__background.fallback {
+  filter: saturate(0.45) brightness(0.58);
+}
+
+.platform-game-overview__shade {
+  background:
+    linear-gradient(90deg, rgba(3, 6, 9, 0.84), rgba(3, 6, 9, 0.08) 58%, rgba(3, 6, 9, 0.16)),
+    linear-gradient(0deg, rgba(3, 6, 9, 0.9), transparent 48%);
+}
+
+.platform-game-overview header {
+  position: absolute;
+  left: 92px;
+  top: 86px;
+  z-index: 1;
+  max-width: 460px;
+}
+
+.platform-game-overview header span {
+  color: var(--cv-accent-title);
+  font-family: "UnispaceCV", sans-serif;
+  font-size: 14px;
+  font-weight: 900;
+}
+
+.platform-game-overview header p {
+  max-width: 360px;
+  margin: 10px 0 0;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 15px;
+  font-weight: 750;
+  line-height: 1.5;
+}
+
+.platform-game-overview h1 {
+  margin: 5px 0 0;
+  color: #fff;
+  font-size: 28px;
+  letter-spacing: 0;
+}
+
+.platform-game-covers {
+  position: absolute;
+  left: 10%;
+  right: auto;
+  bottom: 230px;
+  height: 92px;
+  width: 80%;
+  min-height: 92px;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  justify-content: center;
+  padding: 0 32px;
+  gap: 12px;
+  overflow-x: hidden;
+  overflow-y: visible;
+  z-index: 2;
+  scrollbar-width: none;
+  overscroll-behavior-inline: contain;
+}
+
+.platform-game-covers.is-scrollable {
+  display: flex;
+  grid-template-columns: none;
+  justify-content: flex-start;
+  left: 5%;
+  width: 90%;
+  padding: 0 32px;
+  overflow-x: auto;
+}
+
+.platform-game-covers.is-scrollable .platform-game-cover {
+  width: 160px;
+  flex: 0 0 160px;
+}
+
+.platform-game-covers::-webkit-scrollbar {
+  display: none;
+}
+
+.platform-game-cover {
+  position: relative;
+  width: 160px;
+  flex: none;
+  min-width: 0;
+  max-width: 100px;
+  justify-self: center;
+  height: 68px;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  background: rgba(12, 19, 24, 0.92);
+  color: #fff;
+  text-align: left;
+  box-shadow: 0 20px 44px rgba(0, 0, 0, 0.32);
+  transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.platform-game-cover.has-background {
+  background: transparent;
+}
+
+.platform-game-cover:hover,
+.platform-game-cover.active {
+  transform: translateY(-9px);
+  border-color: var(--cv-download-progress-end);
+  box-shadow: 0 28px 58px rgba(0, 0, 0, 0.44), 0 0 0 2px var(--cv-download-progress-border);
+}
+
+.platform-game-cover img,
+.platform-game-cover__placeholder {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.platform-game-cover img {
+  object-fit: cover;
+}
+
+.platform-game-cover__placeholder {
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.14);
+  font-family: "SJBangshu", sans-serif;
+  font-size: 46px;
+}
+
+.platform-game-cover::after {
+  display: none;
+}
+
+.platform-game-cover strong {
+  position: absolute;
+  left: 12px;
+  right: 10px;
+  bottom: 11px;
+  z-index: 1;
+  overflow: hidden;
+  font-size: 14px;
+  font-weight: 950;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.9);
+}
+
+.platform-game-cover__selected {
+  position: absolute;
+  left: 50%;
+  top: 43%;
+  z-index: 2;
+  width: 68px;
+  min-height: 52px;
+  display: grid;
+  place-items: center;
+  gap: 5px;
+  color: #fff;
+  transform: translate(-50%, -50%);
+  filter: drop-shadow(0 4px 9px rgba(0, 0, 0, 0.82));
+}
+
+.platform-game-cover__selected img {
+  position: static;
+  width: 36px;
+  height: 36px;
+  object-fit: contain;
+}
+
+.platform-game-cover__selected b {
+  font-size: 22px;
+  line-height: 1;
+}
+
+.platform-game-cover__selected em {
+  position: static;
+  color: #fff;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+@keyframes platform-overview-background-in {
+  from {
+    opacity: 0.72;
+    transform: scale(1.015);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 .traffic-warning {
