@@ -1,0 +1,110 @@
+/* 复选/单选控件：设置弹窗和安装弹窗共用，所以放在全局而不是某个组件里。 */
+
+.check-row,
+.radio-row {
+  width: fit-content;
+  min-height: 40px;
+  padding: 0;
+  border: 0;
+  display: grid;
+  grid-template-columns: 36px auto;
+  align-items: center;
+  gap: 13px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.88);
+  font-size: 19px;
+  font-weight: 950;
+  transition: color 160ms ease;
+}
+
+.check-row:hover {
+  color: var(--cv-check-accent);
+}
+
+.check-box {
+  width: 29px;
+  height: 29px;
+  display: grid;
+  place-items: center;
+  border: 3px solid color-mix(in srgb, var(--cv-check-accent) 34%, rgba(255, 255, 255, 0.5));
+  border-radius: 5px;
+  color: #fff;
+  background: color-mix(in srgb, var(--cv-theme-support) 72%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, white 8%, transparent);
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms cubic-bezier(0.2, 0.86, 0.22, 1);
+}
+
+.check-box svg {
+  opacity: 0;
+  transform: scale(0.58) rotate(-10deg);
+  transition:
+    opacity 130ms ease,
+    transform 170ms cubic-bezier(0.2, 0.86, 0.22, 1);
+}
+
+.check-row.checked .check-box,
+.install-option.checked .check-box {
+  border-color: var(--cv-check-accent);
+  color: #fff;
+  background: linear-gradient(135deg, var(--cv-check-accent), var(--cv-check-accent-dark));
+  box-shadow:
+    0 0 0 3px var(--cv-check-accent-glow),
+    inset 0 0 0 1px color-mix(in srgb, white 22%, transparent);
+  transform: scale(1.04);
+}
+
+.check-row.checked .check-box svg,
+.install-option.checked .check-box svg {
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
+}
+
+.radio-dot {
+  position: relative;
+  width: 29px;
+  height: 29px;
+  border: 3px solid color-mix(in srgb, var(--cv-check-accent) 34%, rgba(255, 255, 255, 0.5));
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--cv-theme-support) 72%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, white 8%, transparent);
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms cubic-bezier(0.2, 0.86, 0.22, 1);
+}
+
+.radio-row.checked .radio-dot {
+  border-color: var(--cv-check-accent);
+  background: color-mix(in srgb, var(--cv-check-accent-dark) 42%, var(--cv-theme-support) 58%);
+  box-shadow:
+    0 0 0 3px var(--cv-check-accent-glow),
+    inset 0 0 0 1px color-mix(in srgb, white 18%, transparent);
+  transform: scale(1.04);
+}
+
+.radio-dot::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--cv-check-accent);
+  box-shadow: 0 0 0 3px var(--cv-check-accent-glow);
+  opacity: 0;
+  transform: scale(0.45);
+  transition:
+    opacity 130ms ease,
+    transform 170ms cubic-bezier(0.2, 0.86, 0.22, 1);
+}
+
+.radio-row.checked .radio-dot::after {
+  opacity: 1;
+  transform: scale(1);
+}

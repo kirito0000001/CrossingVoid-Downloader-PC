@@ -13,13 +13,13 @@ const releaseSource = readFileSync(
 
 describe("developer game publishing", () => {
   it("offers separate PC and Android package actions with shared release metadata", () => {
-    expect(appSource).toContain("上传游戏本体");
-    expect(appSource).toContain("上传 PC 游戏包");
-    expect(appSource).toContain("上传 Android 游戏包");
-    expect(appSource).toContain("上传 PC 测试服游戏包");
-    expect(appSource).toContain("上传 Android 测试服游戏包");
-    expect(appSource).toContain('v-model="developerGameVersion"');
-    expect(appSource).toContain('v-model="developerGameTitle"');
+    expect(launcherSource).toContain("上传游戏本体");
+    expect(launcherSource).toContain("上传 PC 游戏包");
+    expect(launcherSource).toContain("上传 Android 游戏包");
+    expect(launcherSource).toContain("上传 PC 测试服游戏包");
+    expect(launcherSource).toContain("上传 Android 测试服游戏包");
+    expect(launcherSource).toContain('v-model="developerGameVersion"');
+    expect(launcherSource).toContain('v-model="developerGameTitle"');
     expect(launcherSource).toContain('DEV_GAME_VERSION_STORAGE_KEY) || "V0.5.12"');
   });
 

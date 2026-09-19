@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { launcherSource } from "./helpers/launcherSources";
+
 const appSource = readFileSync(resolve(process.cwd(), "src/App.vue"), "utf8");
 const nativeSource = readFileSync(resolve(process.cwd(), "src-tauri/src/lib.rs"), "utf8");
 
@@ -22,9 +24,9 @@ describe("launcher behavior settings", () => {
 
   it("offers destructive download cancellation separately from pause", () => {
     expect(appSource).toContain('confirmAction.value = "cancelDownload"');
-    expect(appSource).toContain('t("settings.cancelDownload")');
+    expect(launcherSource).toContain('t("settings.cancelDownload")');
     expect(appSource).toContain('t("confirm.cancelDownloadBody")');
-    expect(appSource).toContain('@click="requestCancelGameDownload"');
+    expect(launcherSource).toContain('@click="requestCancelGameDownload"');
   });
 
   it("runs the lightweight automatic repair check before launching", () => {
@@ -67,7 +69,7 @@ describe("launcher behavior settings", () => {
     expect(appSource).toContain('invoke<number>("get_game_migration_size"');
     expect(appSource).toContain('installDialogMode.value === "migration" && migrationChangesVolume.value');
     expect(migration).not.toContain("!hasLocalInstalledGame.value");
-    expect(appSource).toContain('t("settings.migrateGame")');
+    expect(launcherSource).toContain('t("settings.migrateGame")');
     expect(appSource).not.toContain(':disabled="gameMigrationPending || !hasLocalInstalledGame || gameRunning"');
     expect(appSource).toContain("installDialogTitle");
     expect(appSource).toContain("installDialogConfirmText");

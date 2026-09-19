@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 
-import { appSource, launcherStyleSource } from "./helpers/launcherSources";
+import { appSource, launcherSource, launcherStyleSource } from "./helpers/launcherSources";
 
 describe("launcher page transitions", () => {
   it("animates news, settings title, and settings content without waiting for an outgoing page", () => {
     expect(appSource).toContain('<Transition name="news-page-motion">');
-    expect(appSource).toContain('<Transition name="settings-title-motion">');
-    expect(appSource).toContain('<Transition name="settings-page-motion">');
+    expect(launcherSource).toContain('<Transition name="settings-title-motion">');
+    expect(launcherSource).toContain('<Transition name="settings-page-motion">');
     expect(appSource).not.toMatch(/<Transition\s+name="(?:news-page|settings-title|settings-page)-motion"\s+mode="out-in"/);
   });
 

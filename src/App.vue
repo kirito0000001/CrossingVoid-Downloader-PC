@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowRef, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -7,7 +7,6 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
-import LauncherSelect from "./components/LauncherSelect.vue";
 import PlatformGameRail from "./components/PlatformGameRail.vue";
 import PlatformGameOverview from "./components/PlatformGameOverview.vue";
 import PlatformPlaceholderPage from "./components/PlatformPlaceholderPage.vue";
@@ -49,26 +48,19 @@ import {
   type TranslationKey,
 } from "./i18n/launcherText";
 import {
-  CircleAlert,
-  ChevronLeft,
   Check,
-  ArrowLeft,
+  ChevronLeft,
+  CircleAlert,
   Download,
-  FileText,
-  FolderOpen,
   Gamepad2,
   HardDriveDownload,
   Info,
-  BellOff,
   Menu,
-  Megaphone,
   Minus,
   PackageOpen,
   Pause,
   RefreshCw,
-  RotateCcw,
   Settings,
-  Trash2,
   Wrench,
   X,
 } from "lucide-vue-next";
@@ -123,7 +115,9 @@ import {
   SPEED_LIMIT_STORAGE_KEY,
   USE_DX11_STORAGE_KEY,
 } from "./storageKeys";
+import SettingsPanel from "./components/SettingsPanel.vue";
 import { useSettingsScrollbar } from "./composables/useSettingsScrollbar";
+import { settingsContextKey } from "./settings/settingsContext";
 import { useDeveloperConsole } from "./dev/useDeveloperConsole";
 
 
@@ -3529,6 +3523,83 @@ function handleContextMenu(event: MouseEvent) {
     showMenu.value = false;
   }
 }
+const settingsContext = {
+  activeSettingsTab,
+  autoRepair,
+  canCancelGameDownload,
+  checkLauncherUpdate,
+  closeToTray,
+  confirmDangerAction,
+  dangerConfirmActionCopy,
+  dangerConfirmBody,
+  dangerConfirmTitle,
+  developerGameTitle,
+  developerGameVersion,
+  developerNoticeContent,
+  developerNoticeLevel,
+  developerNoticePending,
+  developerNoticeStatus,
+  developerNoticeTitle,
+  developerTaskActive,
+  developerTaskPending,
+  developerVersionHint,
+  developerVersionInput,
+  downloadCancelPending,
+  downloadLimited,
+  downloadSource,
+  downloadSourceDisabled,
+  downloadSourceModel,
+  downloadSourceOptions,
+  gameChunkImportDisabled,
+  gameMigrationPending,
+  gameRunning,
+  gameSettingsDisabled,
+  githubLatencyText,
+  githubNetworkWarningText,
+  githubProxyText,
+  hideAfterGameLaunch,
+  installPath,
+  launcherLanguage,
+  launcherLanguages,
+  launcherUpdatePending,
+  launcherVersion,
+  migrateInstalledGame,
+  officialTrafficBlocked,
+  openDeveloperProjectFolder,
+  openGameChunkImportGuide,
+  openLauncherLogFolder,
+  openLocalGameFiles,
+  publishDeveloperGamePackage,
+  publishDeveloperLauncherPackage,
+  publishDeveloperRemoteNotice,
+  relocateInstalledGame,
+  requestCancelGameDownload,
+  requestDeleteGame,
+  requestUninstallLauncher,
+  saveDeveloperLauncherVersion,
+  selectedDownloadSourceDescription,
+  selectSettingsTab,
+  settingsScrollbarFrameStyle,
+  settingsScrollbarThumbTop,
+  settingsScrollEl,
+  settingsScrollSpacer,
+  settingsTabs,
+  settingsTitle,
+  showDeleteGameConfirm,
+  showDevPackageConfirm,
+  showGameChunkImportAction,
+  showSettings,
+  showSettingsScrollbar,
+  speedLimit,
+  t,
+  trafficQuota,
+  trafficQuotaExpiryText,
+  trafficQuotaPercent,
+  trafficQuotaRemainingText,
+  updateSettingsScrollbar,
+};
+provide(settingsContextKey, settingsContext);
+
 </script>
 
 <template>
@@ -4003,395 +4074,7 @@ function handleContextMenu(event: MouseEvent) {
     </Transition>
 
     <Transition name="settings-layer">
-      <div v-if="showSettings" class="modal-mask settings-mask" @click.self="showSettings = false">
-        <section class="settings-modal" :aria-label="t('window.settings')">
-        <aside class="settings-sidebar">
-          <button
-            v-for="tab in settingsTabs"
-            :key="tab.key"
-            class="settings-tab"
-            :class="{ active: activeSettingsTab === tab.key, disabled: tab.key === 'game' && gameSettingsDisabled }"
-            type="button"
-            :disabled="tab.key === 'game' && gameSettingsDisabled"
-            @click="selectSettingsTab(tab.key)"
-          >
-            <component :is="tab.icon" :size="22" stroke-width="3" />
-            <span>{{ t(tab.labelKey) }}</span>
-          </button>
-        </aside>
-
-        <section class="settings-content">
-          <header class="settings-header">
-            <div class="settings-title-stage">
-              <Transition name="settings-title-motion">
-                <h2 :key="activeSettingsTab">{{ settingsTitle }}</h2>
-              </Transition>
-            </div>
-          </header>
-
-          <div class="settings-divider" aria-hidden="true"></div>
-
-          <div class="settings-scroll-frame">
-            <div ref="settingsScrollEl" class="settings-scroll" data-no-drag @scroll="updateSettingsScrollbar">
-              <div class="settings-page-stage">
-                <Transition name="settings-page-motion">
-                <section v-if="activeSettingsTab === 'preferences'" :key="activeSettingsTab" class="settings-page" data-settings-page="preferences">
-              <div class="setting-block">
-                <span class="setting-title">{{ t("settings.launcherLanguage") }}</span>
-                <p class="setting-hint">{{ t("settings.launcherLanguageHint") }}</p>
-                <LauncherSelect v-model="launcherLanguage" :options="launcherLanguages" />
-              </div>
-
-              <div class="setting-block">
-                <span class="setting-title">{{ t("settings.closeWindow") }}</span>
-                <button class="radio-row" :class="{ checked: !closeToTray }" type="button" @click="closeToTray = false">
-                  <span class="radio-dot"></span>
-                  <strong>{{ t("settings.exitLauncher") }}</strong>
-                </button>
-                <button class="radio-row" :class="{ checked: closeToTray }" type="button" @click="closeToTray = true">
-                  <span class="radio-dot"></span>
-                  <strong>{{ t("settings.minimizeToTray") }}</strong>
-                </button>
-              </div>
-
-              <div class="setting-block">
-                <span class="setting-title">{{ t("settings.display") }}</span>
-                <button
-                  class="check-row"
-                  :class="{ checked: hideAfterGameLaunch }"
-                  type="button"
-                  @click="hideAfterGameLaunch = !hideAfterGameLaunch"
-                >
-                  <span class="check-box"><Check :size="22" stroke-width="3.2" /></span>
-                  <strong>{{ t("settings.hideAfterGameLaunch") }}</strong>
-                </button>
-              </div>
-                </section>
-
-                <section v-else-if="activeSettingsTab === 'download'" :key="activeSettingsTab" class="settings-page" data-settings-page="download">
-              <div class="setting-block">
-                <span class="setting-title">{{ t("settings.downloadSource") }}</span>
-                <p class="setting-hint">{{ selectedDownloadSourceDescription }}</p>
-                <LauncherSelect
-                  v-model="downloadSourceModel"
-                  :options="downloadSourceOptions"
-                  :disabled="downloadSourceDisabled"
-                />
-                <p v-if="downloadSource === 'official'" class="traffic-quota__notice" :class="{ low: officialTrafficBlocked }">
-                  {{ t(officialTrafficBlocked ? "traffic.lowHint" : "traffic.supportHint") }}
-                </p>
-                <p v-else class="traffic-quota__notice" :class="{ low: Boolean(githubNetworkWarningText) }">
-                  {{ githubNetworkWarningText || "Github 网络连接正常。" }}
-                </p>
-                <div
-                  v-if="downloadSource === 'official'"
-                  class="traffic-quota"
-                  :class="{ low: officialTrafficBlocked, unavailable: trafficQuota && !trafficQuota.available }"
-                >
-                  <div class="traffic-quota__header">
-                    <span>{{ t("traffic.title") }}</span>
-                    <strong>{{ trafficQuotaRemainingText }}</strong>
-                  </div>
-                  <div v-if="trafficQuota?.available" class="traffic-quota__track" aria-hidden="true">
-                    <span :style="{ width: `${trafficQuotaPercent}%` }"></span>
-                  </div>
-                  <small v-if="trafficQuotaExpiryText">{{ trafficQuotaExpiryText }}</small>
-                </div>
-                <div v-else class="traffic-quota github-network-status" :class="{ low: Boolean(githubNetworkWarningText) }">
-                  <div class="traffic-quota__header">
-                    <span>Github 网络检测</span>
-                    <strong>延迟 {{ githubLatencyText }}</strong>
-                  </div>
-                  <small>代理：{{ githubProxyText }}</small>
-                </div>
-              </div>
-
-               <div class="setting-block">
-                 <span class="setting-title">{{ t("settings.downloadSpeed") }}</span>
-                <button class="radio-row" :class="{ checked: !downloadLimited }" type="button" @click="downloadLimited = false">
-                  <span class="radio-dot"></span>
-                  <strong>{{ t("settings.unlimited") }}</strong>
-                </button>
-                <div class="limit-row">
-                  <button class="radio-row" :class="{ checked: downloadLimited }" type="button" @click="downloadLimited = true">
-                    <span class="radio-dot"></span>
-                    <strong>{{ t("settings.limited") }}</strong>
-                  </button>
-                  <input v-model="speedLimit" class="speed-input" inputmode="decimal" />
-                  <span class="speed-unit">MB/s（1-100）</span>
-                 </div>
-               </div>
-
-               <div v-if="canCancelGameDownload || downloadCancelPending" class="setting-block">
-                 <span class="setting-title">{{ t("settings.cancelDownload") }}</span>
-                 <p class="setting-hint">{{ t("settings.cancelDownloadHint") }}</p>
-                 <div class="game-actions">
-                   <button
-                     class="danger-action"
-                     type="button"
-                     :disabled="downloadCancelPending"
-                     @click="requestCancelGameDownload"
-                   >
-                     <X :size="22" />
-                     <span>{{ downloadCancelPending ? t("action.cancelling") : t("settings.cancelDownload") }}</span>
-                   </button>
-                 </div>
-               </div>
-
-              <div v-if="showGameChunkImportAction" class="setting-block">
-                 <span class="setting-title">本地游戏碎片</span>
-                 <p class="setting-hint">导入从网盘、QQ群或其他位置获取的当前版本游戏碎片。</p>
-                 <button class="light-action" type="button" :disabled="gameChunkImportDisabled" @click="openGameChunkImportGuide">
-                   <HardDriveDownload :size="22" />
-                   <span>导入碎片</span>
-                 </button>
-              </div>
-
-                 </section>
-
-                <section v-else-if="activeSettingsTab === 'game'" :key="activeSettingsTab" class="settings-page" data-settings-page="game">
-              <label class="setting-block">
-                <span class="setting-title">{{ t("settings.installPath") }}</span>
-                <input v-model="installPath" class="path-input" />
-              </label>
-
-              <div class="game-actions">
-                <button type="button" @click="openLocalGameFiles">
-                  <FolderOpen :size="22" />
-                  <span>{{ t("settings.openGameFolder") }}</span>
-                </button>
-                <button type="button" @click="relocateInstalledGame">
-                  <RotateCcw :size="22" />
-                  <span>{{ t("settings.relocateGame") }}</span>
-                </button>
-                <button type="button" :disabled="gameMigrationPending || gameRunning || gameSettingsDisabled" @click="migrateInstalledGame">
-                  <FolderOpen :size="22" />
-                  <span>{{ gameMigrationPending ? "正在迁移游戏文件" : t("settings.migrateGame") }}</span>
-                </button>
-              </div>
-
-              <div class="setting-block">
-                <span class="setting-title">{{ t("settings.gameLog") }}</span>
-                <button class="light-action" type="button">
-                  <FileText :size="22" />
-                  <span>{{ t("settings.openGameLog") }}</span>
-                </button>
-              </div>
-
-              <div class="setting-block">
-                <span class="setting-title">{{ t("settings.gameManagement") }}</span>
-                <div class="game-actions">
-                  <button class="danger-action" type="button" @click="requestDeleteGame">
-                    <Trash2 :size="22" />
-                    <span>{{ t("settings.deleteGame") }}</span>
-                  </button>
-                  <button class="danger-action danger-action-muted" type="button" @click="requestUninstallLauncher">
-                    <PackageOpen :size="22" />
-                    <span>{{ t("settings.uninstallLauncher") }}</span>
-                  </button>
-                </div>
-              </div>
-
-              <div class="setting-block">
-                <span class="setting-title">{{ t("settings.otherLaunchOptions") }}</span>
-                <div class="setting-line">
-                  <div>
-                    <strong>{{ t("settings.autoRepair") }}</strong>
-                    <p>{{ t("settings.autoRepairHint") }}</p>
-                  </div>
-                  <button class="switch" :class="{ on: autoRepair }" type="button" @click="autoRepair = !autoRepair">
-                    <span></span>
-                  </button>
-                </div>
-              </div>
-                </section>
-
-                <section v-else-if="activeSettingsTab === 'about'" :key="activeSettingsTab" class="settings-page" data-settings-page="about">
-              <div class="setting-block">
-                <span class="setting-title">{{ t("settings.aboutLauncher") }}</span>
-                <p class="about-line">{{ t("settings.launcherVersion") }}：{{ launcherVersion }}</p>
-                <button class="light-action" type="button" :disabled="launcherUpdatePending" @click="checkLauncherUpdate({ manual: true })">
-                  <RefreshCw :size="22" :class="{ spinning: launcherUpdatePending }" />
-                  <span>{{ launcherUpdatePending ? t("settings.checkingLauncherUpdate") : t("settings.checkVersion") }}</span>
-                </button>
-              </div>
-
-              <div class="setting-block">
-                <span class="setting-title">{{ t("settings.launcherLog") }}</span>
-                 <button class="light-action" type="button" @click="openLauncherLogFolder">
-                   <FileText :size="22" />
-                   <span>{{ t("settings.openLogFolder") }}</span>
-                 </button>
-               </div>
-
-              <div class="setting-block">
-                <span class="setting-title">{{ t("settings.termsPolicy") }}</span>
-                <a href="#">{{ t("settings.userAgreement") }}</a>
-                <a href="#">{{ t("settings.privacyPolicy") }}</a>
-              </div>
-                </section>
-
-                <section
-                  v-else-if="activeSettingsTab === 'developer'"
-                  :key="activeSettingsTab"
-                  class="settings-page"
-                  data-settings-page="developer"
-                >
-              <div class="setting-block">
-                <span class="setting-title">{{ t("dev.setVersion") }}</span>
-                <p class="setting-hint">{{ developerVersionHint }}</p>
-                <div class="developer-version-row">
-                  <input v-model="developerVersionInput" class="path-input" />
-                  <button class="light-action" type="button" :disabled="developerTaskActive" @click="saveDeveloperLauncherVersion">
-                    <Check :size="22" />
-                    <span>{{ t("dev.setVersion") }}</span>
-                  </button>
-                </div>
-              </div>
-
-              <div class="setting-block">
-                <span class="setting-title">{{ t("dev.packageLauncher") }}</span>
-                <button class="light-action" type="button" :disabled="developerTaskActive" @click="showDevPackageConfirm = true">
-                  <PackageOpen :size="22" />
-                  <span>{{ developerTaskPending ? t("dev.running") : t("dev.packageLauncher") }}</span>
-                </button>
-              </div>
-
-              <div class="setting-block">
-                <span class="setting-title">{{ t("dev.publishLauncher") }}</span>
-                <button class="light-action" type="button" :disabled="developerTaskActive" @click="publishDeveloperLauncherPackage">
-                  <HardDriveDownload :size="22" />
-                  <span>{{ developerTaskPending ? t("dev.running") : t("dev.publishLauncher") }}</span>
-                </button>
-              </div>
-
-              <div class="setting-block developer-game-publish-block">
-                <span class="setting-title">上传游戏本体</span>
-                <p class="setting-hint">PC 会过滤调试和临时文件；Android 会自动定位唯一的 APK 与 main OBB。</p>
-                <div class="developer-game-metadata">
-                  <label>
-                    <span>游戏版本</span>
-                    <input v-model="developerGameVersion" class="path-input" placeholder="V0.5.12" />
-                  </label>
-                  <label>
-                    <span>发布标题</span>
-                    <input v-model="developerGameTitle" class="path-input" maxlength="100" />
-                  </label>
-                </div>
-                <div class="developer-game-actions">
-                  <button class="light-action" type="button" :disabled="developerTaskActive" @click="publishDeveloperGamePackage('Windows', 'Stable')">
-                    <PackageOpen :size="22" />
-                    <span>上传 PC 游戏包</span>
-                  </button>
-                  <button class="light-action" type="button" :disabled="developerTaskActive" @click="publishDeveloperGamePackage('Android', 'Stable')">
-                    <HardDriveDownload :size="22" />
-                    <span>上传 Android 游戏包</span>
-                  </button>
-                  <button class="light-action test-server-action" type="button" :disabled="developerTaskActive" @click="publishDeveloperGamePackage('Windows', 'Test')">
-                    <PackageOpen :size="22" />
-                    <span>上传 PC 测试服游戏包</span>
-                  </button>
-                  <button class="light-action test-server-action" type="button" :disabled="developerTaskActive" @click="publishDeveloperGamePackage('Android', 'Test')">
-                    <HardDriveDownload :size="22" />
-                    <span>上传 Android 测试服游戏包</span>
-                  </button>
-                </div>
-              </div>
-
-              <div class="setting-block developer-notice-block">
-                <span class="setting-title">远程公告</span>
-                <p class="setting-hint">{{ developerNoticeStatus }}</p>
-                <input
-                  v-model="developerNoticeTitle"
-                  class="path-input developer-notice-title"
-                  maxlength="80"
-                  placeholder="公告标题"
-                />
-                <textarea
-                  v-model="developerNoticeContent"
-                  class="developer-notice-content"
-                  maxlength="2000"
-                  placeholder="公告正文"
-                ></textarea>
-                <div class="developer-notice-levels" aria-label="公告级别">
-                  <button
-                    v-for="option in ([
-                      { value: 'info', label: '普通' },
-                      { value: 'warning', label: '警告' },
-                      { value: 'error', label: '错误' },
-                    ] as const)"
-                    :key="option.value"
-                    type="button"
-                    :class="[option.value, { active: developerNoticeLevel === option.value }]"
-                    @click="developerNoticeLevel = option.value"
-                  >
-                    {{ option.label }}
-                  </button>
-                </div>
-                <div class="developer-notice-actions">
-                  <button class="light-action" type="button" :disabled="developerNoticePending" @click="publishDeveloperRemoteNotice(true)">
-                    <Megaphone :size="22" />
-                    <span>{{ developerNoticePending ? "正在处理" : "发布公告" }}</span>
-                  </button>
-                  <button class="light-action developer-notice-disable" type="button" :disabled="developerNoticePending" @click="publishDeveloperRemoteNotice(false)">
-                    <BellOff :size="22" />
-                    <span>关闭公告</span>
-                  </button>
-                </div>
-              </div>
-
-              <div class="setting-block">
-                <span class="setting-title">{{ t("dev.openProjectFolder") }}</span>
-                <button class="light-action" type="button" @click="openDeveloperProjectFolder">
-                  <FolderOpen :size="22" />
-                  <span>{{ t("dev.openProjectFolder") }}</span>
-                </button>
-              </div>
-                </section>
-                </Transition>
-              </div>
-              <div class="settings-scroll-spacer" :style="{ height: `${settingsScrollSpacer}px` }" aria-hidden="true"></div>
-            </div>
-          </div>
-        </section>
-
-        </section>
-        <div
-          class="settings-scrollbar-rail"
-          :class="{ visible: showSettingsScrollbar }"
-          :style="settingsScrollbarFrameStyle"
-          aria-hidden="true"
-        >
-          <span :style="{ transform: `translateY(${settingsScrollbarThumbTop}px)` }"></span>
-        </div>
-        <button class="settings-close" type="button" @click="showSettings = false" :title="t('window.close')" data-no-drag>
-          <ArrowLeft :size="37" stroke-width="2.8" aria-hidden="true" />
-        </button>
-        <Transition name="confirm-pop">
-          <div
-            v-if="showDeleteGameConfirm"
-            class="confirm-mask"
-            data-no-drag
-            @click.self="showDeleteGameConfirm = false"
-          >
-            <section
-              class="confirm-panel"
-              :aria-label="dangerConfirmTitle"
-            >
-              <h3>{{ dangerConfirmTitle }}</h3>
-              <p>{{ dangerConfirmBody }}</p>
-              <div class="confirm-actions">
-                <button class="confirm-delete" type="button" :disabled="downloadCancelPending" @click="confirmDangerAction">
-                  {{ dangerConfirmActionCopy }}
-                </button>
-                <button class="confirm-cancel" type="button" :disabled="downloadCancelPending" @click="showDeleteGameConfirm = false">
-                  {{ t("confirm.cancel") }}
-                </button>
-              </div>
-            </section>
-          </div>
-        </Transition>
-      </div>
+      <SettingsPanel v-if="showSettings" />
     </Transition>
 
     <Transition name="install-pop">
@@ -4529,6 +4212,4 @@ a,
 <style scoped src="./styles/news-panel.css"></style>
 <style scoped src="./styles/action-dock.css"></style>
 <style scoped src="./styles/install-dialogs.css"></style>
-<style scoped src="./styles/settings-panel.css"></style>
 <style scoped src="./styles/confirm-dialog.css"></style>
-<style scoped src="./styles/settings-controls.css"></style>

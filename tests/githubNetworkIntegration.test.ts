@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { launcherSource } from "./helpers/launcherSources";
+
 const appSource = readFileSync(resolve(process.cwd(), "src/App.vue"), "utf8");
 const nativeSource = readFileSync(resolve(process.cwd(), "src-tauri/src/lib.rs"), "utf8");
 
@@ -21,7 +23,7 @@ describe("PC Github network detection", () => {
 
   it("shows the Github warning in the home banner and download settings", () => {
     expect(appSource).toContain("showGithubNetworkWarning");
-    expect(appSource).toContain("github-network-status");
+    expect(launcherSource).toContain("github-network-status");
     expect(appSource).toContain("githubNetworkWarningText");
   });
 });

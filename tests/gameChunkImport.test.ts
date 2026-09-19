@@ -12,12 +12,12 @@ const toolMenuSource = readFileSync(
 
 describe("game chunk import", () => {
   it("offers the game chunk import action on the download settings page", () => {
-    const downloadPageStart = appSource.indexOf("data-settings-page=\"download\"");
-    const downloadPageEnd = appSource.indexOf("data-settings-page=\"game\"");
-    const aboutPageStart = appSource.indexOf("data-settings-page=\"about\"");
-    const developerPageStart = appSource.indexOf("data-settings-page=\"developer\"");
-    const downloadPage = appSource.slice(downloadPageStart, downloadPageEnd);
-    const aboutPage = appSource.slice(aboutPageStart, developerPageStart);
+    const downloadPageStart = launcherSource.indexOf("data-settings-page=\"download\"");
+    const downloadPageEnd = launcherSource.indexOf("data-settings-page=\"game\"");
+    const aboutPageStart = launcherSource.indexOf("data-settings-page=\"about\"");
+    const developerPageStart = launcherSource.indexOf("data-settings-page=\"developer\"");
+    const downloadPage = launcherSource.slice(downloadPageStart, downloadPageEnd);
+    const aboutPage = launcherSource.slice(aboutPageStart, developerPageStart);
 
     expect(downloadPage).toContain("导入碎片");
     expect(downloadPage).toContain('@click="openGameChunkImportGuide"');
