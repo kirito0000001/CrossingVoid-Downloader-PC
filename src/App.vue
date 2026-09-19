@@ -110,7 +110,6 @@ import {
   news,
   newsTabs,
   quickLinks,
-  SETTINGS_SCROLLBAR,
 } from "./launcherData";
 import {
   AUTO_REPAIR_STORAGE_KEY,
@@ -124,6 +123,7 @@ import {
   SPEED_LIMIT_STORAGE_KEY,
   USE_DX11_STORAGE_KEY,
 } from "./storageKeys";
+import { useSettingsScrollbar } from "./composables/useSettingsScrollbar";
 import { useDeveloperConsole } from "./dev/useDeveloperConsole";
 
 
@@ -334,11 +334,20 @@ const lastVersionCheckAt = ref(0);
 let lastCheckMessageTimer: number | undefined;
 let gameRunningPollTimer: number | undefined;
 let trafficQuotaRefreshTimer: number | undefined;
-const settingsScrollEl = ref<HTMLElement | null>(null);
-const settingsContentOverflowing = ref(false);
-const settingsScrollSpacer = ref(0);
-const settingsScrollbarThumbTop = ref(0);
-let settingsScrollbarFrame: number | undefined;
+const settingsScrollbar = useSettingsScrollbar({
+  visible: showSettings,
+  activeTab: activeSettingsTab,
+});
+const {
+  settingsScrollEl,
+  showSettingsScrollbar,
+  settingsScrollbarFrameStyle,
+  settingsScrollbarThumbTop,
+  settingsScrollSpacer,
+  updateSettingsScrollbar,
+  resetSettingsScrollbar,
+  scheduleSettingsScrollbarUpdate,
+} = settingsScrollbar;
 const showMenu = ref(false);
 let toolMenuCloseTimer: number | undefined;
 let downloadStateDiskWriteTimer: number | undefined;
@@ -474,10 +483,6 @@ if (isCrossingVoidActive.value) startCharacterBannerRotation();
 onBeforeUnmount(() => {
   removeLauncherErrorLogging();
   stopCharacterBannerRotation();
-  if (settingsScrollbarFrame !== undefined) {
-    window.cancelAnimationFrame(settingsScrollbarFrame);
-    settingsScrollbarFrame = undefined;
-  }
   if (downloadEstimateRefreshTimer !== undefined) {
     window.clearInterval(downloadEstimateRefreshTimer);
     downloadEstimateRefreshTimer = undefined;
@@ -1409,50 +1414,6 @@ const downloadSourceModel = computed({
   },
 });
 const downloadSourceOptions = computed(() => downloadSources.map((source) => t(source.nameKey)));
-const settingsScrollbarFrameStyle = computed(() => ({
-  top: `${SETTINGS_SCROLLBAR.railTop}px`,
-  bottom: `${SETTINGS_SCROLLBAR.railBottom}px`,
-}));
-const showSettingsScrollbar = computed(() => Boolean(showSettings.value && settingsContentOverflowing.value));
-
-function updateSettingsScrollbar() {
-  const scrollEl = settingsScrollEl.value;
-  const pageEl =
-    scrollEl?.querySelector<HTMLElement>(`[data-settings-page="${activeSettingsTab.value}"]`) ??
-    scrollEl?.querySelector<HTMLElement>(".settings-page");
-  const modalEl = scrollEl?.closest<HTMLElement>(".settings-modal");
-  const modalRect = modalEl?.getBoundingClientRect();
-  const pageRect = pageEl?.getBoundingClientRect();
-  const visualViewportHeight = scrollEl
-    ? Math.max(0, scrollEl.clientHeight - (SETTINGS_SCROLLBAR.viewportBottomInset - SETTINGS_SCROLLBAR.frameBottomOffset))
-    : 0;
-  const overflowAmount =
-    pageRect && visualViewportHeight
-      ? Math.max(0, Math.ceil(pageRect.height - visualViewportHeight))
-      : 0;
-  const visuallyOverflowing = Boolean(
-    overflowAmount > 0,
-  );
-  const nativeOverflowing = Boolean(scrollEl && pageEl && pageEl.scrollHeight > scrollEl.clientHeight + 2);
-  const shouldShowVisualScrollbar = visuallyOverflowing || nativeOverflowing;
-  settingsContentOverflowing.value = Boolean(showSettings.value && scrollEl && shouldShowVisualScrollbar);
-  settingsScrollSpacer.value = visuallyOverflowing ? overflowAmount + SETTINGS_SCROLLBAR.extraScrollSpace : 0;
-  const maxScroll = scrollEl ? scrollEl.scrollHeight - scrollEl.clientHeight : 0;
-  const railTravel = modalRect
-    ? Math.max(0, modalRect.height - SETTINGS_SCROLLBAR.railTop - SETTINGS_SCROLLBAR.railBottom) *
-      (1 - SETTINGS_SCROLLBAR.thumbVisibleRatio)
-    : 0;
-  settingsScrollbarThumbTop.value =
-    showSettingsScrollbar.value && maxScroll > 0
-      ? Math.min(railTravel, Math.max(0, scrollEl!.scrollTop / maxScroll) * railTravel)
-      : 0;
-}
-
-function resetSettingsScrollbar() {
-  settingsScrollSpacer.value = 0;
-  settingsScrollbarThumbTop.value = 0;
-  settingsContentOverflowing.value = false;
-}
 
 watch([showSettings, activeSettingsTab], () => {
   resetSettingsScrollbar();
@@ -1577,17 +1538,6 @@ function applyPersistedDownloadState(state: PersistedDownloadState) {
   }
 }
 
-function scheduleSettingsScrollbarUpdate() {
-  if (settingsScrollbarFrame !== undefined) {
-    window.cancelAnimationFrame(settingsScrollbarFrame);
-  }
-  void nextTick(() => {
-    settingsScrollbarFrame = window.requestAnimationFrame(() => {
-      settingsScrollbarFrame = undefined;
-      updateSettingsScrollbar();
-    });
-  });
-}
 
 async function validatePersistedDownloadState(state: PersistedDownloadState) {
   const targetPath = state.installPath || DEFAULT_GAME_INSTALL_PATH;
