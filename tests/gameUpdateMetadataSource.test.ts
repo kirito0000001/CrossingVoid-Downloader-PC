@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { launcherSource } from "./helpers/launcherSources";
+
 const appSource = readFileSync(resolve(process.cwd(), "src/App.vue"), "utf8");
 
 describe("game update metadata source", () => {
@@ -35,10 +37,10 @@ describe("game update metadata source", () => {
   });
 
   it("accepts only the clean v2 game metadata contract", () => {
-    expect(appSource).toContain("schemaVersion: 2;");
-    expect(appSource).toContain("downloadReleaseTag: string;");
+    expect(launcherSource).toContain("schemaVersion: 2;");
+    expect(launcherSource).toContain("downloadReleaseTag: string;");
     expect(appSource).toContain("function validateGameMetadataManifest");
-    expect(appSource).not.toContain("releaseTag?: string;");
+    expect(launcherSource).not.toContain("releaseTag?: string;");
   });
 
   it("publishes each platform's GitHub manifest to its Gitee metadata path", () => {

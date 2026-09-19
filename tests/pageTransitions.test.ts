@@ -1,8 +1,6 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const appSource = readFileSync(resolve(process.cwd(), "src/App.vue"), "utf8");
+import { appSource, launcherStyleSource } from "./helpers/launcherSources";
 
 describe("launcher page transitions", () => {
   it("animates news, settings title, and settings content without waiting for an outgoing page", () => {
@@ -14,7 +12,7 @@ describe("launcher page transitions", () => {
 
   it("keeps page motion on compositor-friendly properties", () => {
     for (const transitionName of ["news-page-motion", "settings-title-motion", "settings-page-motion"]) {
-      const activeRule = appSource.match(
+      const activeRule = launcherStyleSource.match(
         new RegExp(`\\.${transitionName}-enter-active,[\\s\\S]*?\\{([\\s\\S]*?)\\}`),
       )?.[1];
 
@@ -26,7 +24,7 @@ describe("launcher page transitions", () => {
   });
 
   it("disables page motion when the operating system requests reduced motion", () => {
-    expect(appSource).toContain("@media (prefers-reduced-motion: reduce)");
-    expect(appSource).toMatch(/\.news-page-motion-enter-active,[\s\S]*?transition-duration:\s*0\.01ms/);
+    expect(launcherStyleSource).toContain("@media (prefers-reduced-motion: reduce)");
+    expect(launcherStyleSource).toMatch(/\.news-page-motion-enter-active,[\s\S]*?transition-duration:\s*0\.01ms/);
   });
 });

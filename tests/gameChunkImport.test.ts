@@ -2,8 +2,13 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const appSource = readFileSync(resolve(process.cwd(), "src/App.vue"), "utf8");
+import { appSource, launcherSource, launcherStyleSource } from "./helpers/launcherSources";
+
 const nativeSource = readFileSync(resolve(process.cwd(), "src-tauri/src/lib.rs"), "utf8");
+const toolMenuSource = readFileSync(
+  resolve(process.cwd(), "src/components/LauncherToolMenu.vue"),
+  "utf8",
+);
 
 describe("game chunk import", () => {
   it("offers the game chunk import action on the download settings page", () => {
@@ -30,9 +35,10 @@ describe("game chunk import", () => {
 
   it("moves only the menu left while preserving the original button dimensions", () => {
     expect(appSource).toContain(":class=\"{ 'has-chunk-install': showGameChunkImportAction }\"");
-    expect(appSource).toMatch(/\.dock-actions\s*\{[\s\S]*?display:\s*grid;[\s\S]*?grid-template-columns:\s*59px 189px;/);
-    expect(appSource).toMatch(/\.dock-actions\.has-chunk-install\s*\{[\s\S]*?grid-template-columns:\s*59px 189px 189px;/);
-    expect(appSource).toMatch(/\.dock-actions\.has-chunk-install\s*~\s*\.tool-menu\s*\{[\s\S]*?right:\s*402px;/);
+    expect(launcherStyleSource).toMatch(/\.dock-actions\s*\{[\s\S]*?display:\s*grid;[\s\S]*?grid-template-columns:\s*59px 189px;/);
+    expect(launcherStyleSource).toMatch(/\.dock-actions\.has-chunk-install\s*\{[\s\S]*?grid-template-columns:\s*59px 189px 189px;/);
+    expect(appSource).toContain(':chunk-install-visible="showGameChunkImportAction"');
+    expect(toolMenuSource).toMatch(/\.tool-menu\.has-chunk-install\s*\{[\s\S]*?right:\s*402px;/);
   });
 
   it("selects one folder and lets the native importer find chunks inside it", () => {
@@ -65,10 +71,10 @@ describe("game chunk import", () => {
     expect(appSource).toContain('v-if="showGameChunkImportGuide"');
     expect(appSource).toContain("游戏碎片是将完整游戏包拆分后的文件");
     expect(appSource).toContain("选择包含全部游戏碎片的文件夹");
-    expect(appSource).toContain("https://qm.qq.com/q/Nrlo5pBLwY");
-    expect(appSource).toContain("https://pan.baidu.com/s/1J5zcggAWiq0Ui47fSZ1P0Q?pwd=2333");
-    expect(appSource).toContain("https://www.alipan.com/s/hGG6ZxsR6Y1");
-    expect(appSource).toContain("https://www.123684.com/s/SQH4vd-OoPZ3");
+    expect(launcherSource).toContain("https://qm.qq.com/q/Nrlo5pBLwY");
+    expect(launcherSource).toContain("https://pan.baidu.com/s/1J5zcggAWiq0Ui47fSZ1P0Q?pwd=2333");
+    expect(launcherSource).toContain("https://www.alipan.com/s/hGG6ZxsR6Y1");
+    expect(launcherSource).toContain("https://www.123684.com/s/SQH4vd-OoPZ3");
     expect(appSource).toContain('openUrl(url)');
     expect(appSource).toContain(':disabled="!selectedChunkFolder || gameChunkImportPending"');
   });
@@ -76,9 +82,9 @@ describe("game chunk import", () => {
   it("keeps the import guide readable and visually compact", () => {
     expect(appSource).toContain("获取游戏碎片");
     expect(appSource).toContain("选择碎片文件夹");
-    expect(appSource).toMatch(/\.chunk-import-panel\s*\{[\s\S]*?min-height:\s*450px;/);
-    expect(appSource).toMatch(/\.chunk-import-description[\s\S]*?font-size:\s*20px;/);
-    expect(appSource).toMatch(/\.chunk-import-hint\s*\{[\s\S]*?font-size:\s*17px;/);
+    expect(launcherStyleSource).toMatch(/\.chunk-import-panel\s*\{[\s\S]*?min-height:\s*450px;/);
+    expect(launcherStyleSource).toMatch(/\.chunk-import-description[\s\S]*?font-size:\s*20px;/);
+    expect(launcherStyleSource).toMatch(/\.chunk-import-hint\s*\{[\s\S]*?font-size:\s*17px;/);
   });
 
   it("reports byte-level validation progress while imported chunks are hashed", () => {

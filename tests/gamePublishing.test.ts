@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { launcherSource } from "./helpers/launcherSources";
+
 const appSource = readFileSync(resolve(process.cwd(), "src/App.vue"), "utf8");
 const wrapperSource = readFileSync(resolve(process.cwd(), "Scripts/Publish-GamePackage.ps1"), "utf8");
 const releaseSource = readFileSync(
@@ -18,7 +20,7 @@ describe("developer game publishing", () => {
     expect(appSource).toContain("上传 Android 测试服游戏包");
     expect(appSource).toContain('v-model="developerGameVersion"');
     expect(appSource).toContain('v-model="developerGameTitle"');
-    expect(appSource).toContain('DEV_GAME_VERSION_STORAGE_KEY) || "V0.5.12"');
+    expect(launcherSource).toContain('DEV_GAME_VERSION_STORAGE_KEY) || "V0.5.12"');
   });
 
   it("keeps the game publishing implementation inside the PC launcher project", () => {
@@ -27,13 +29,13 @@ describe("developer game publishing", () => {
   });
 
   it("sends the selected platform and folder to the native publisher", () => {
-    expect(appSource).toContain('channel: "Stable" | "Test"');
-    expect(appSource).toContain("developerGamePublishContext.value = context");
-    expect(appSource).toContain("script: taskKind");
-    expect(appSource).toContain("gameDirectory: context.gameDirectory");
-    expect(appSource).toContain("releaseVersion: context.releaseVersion");
-    expect(appSource).toContain("releaseTitle: context.releaseTitle");
-    expect(appSource).toContain("gameChannel: context.channel");
+    expect(launcherSource).toContain('channel: "Stable" | "Test"');
+    expect(launcherSource).toContain("developerGamePublishContext.value = context");
+    expect(launcherSource).toContain("script: taskKind");
+    expect(launcherSource).toContain("gameDirectory: context.gameDirectory");
+    expect(launcherSource).toContain("releaseVersion: context.releaseVersion");
+    expect(launcherSource).toContain("releaseTitle: context.releaseTitle");
+    expect(launcherSource).toContain("gameChannel: context.channel");
   });
 
   it("isolates stable and test server manifests and product keys", () => {

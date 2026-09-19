@@ -52,6 +52,24 @@ describe("mandatory launcher update gate", () => {
     expect(appSource).not.toContain("launcher-update-mask");
   });
 
+  it("keeps the launcher update action ahead of the locally playable fallback", () => {
+    const actionCopy = appSource.slice(
+      appSource.indexOf("const actionCopy = computed"),
+      appSource.indexOf("const actionIcon = computed"),
+    );
+    const primaryAction = appSource.slice(
+      appSource.indexOf("async function handlePrimaryAction"),
+      appSource.indexOf("function checkForUpdates"),
+    );
+
+    expect(actionCopy.indexOf('launcherUpdateConfirmStage.value === "available"')).toBeLessThan(
+      actionCopy.indexOf("localGamePlayableWhileNetworkLocked.value"),
+    );
+    expect(primaryAction.indexOf('launcherUpdateConfirmStage.value === "available"')).toBeLessThan(
+      primaryAction.indexOf("localGamePlayableWhileNetworkLocked.value"),
+    );
+  });
+
   it("rechecks the latest launcher at every network game download boundary", () => {
     const downloadSource = appSource.slice(
       appSource.indexOf("async function downloadGameArchive"),

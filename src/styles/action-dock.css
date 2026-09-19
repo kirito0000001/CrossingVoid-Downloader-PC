@@ -1,0 +1,406 @@
+.right-launcher {
+  position: absolute;
+  right: 236px;
+  bottom: 150px;
+  width: 300px;
+  height: 250px;
+  z-index: 2;
+}
+
+.hero-copy {
+  position: absolute;
+  right: 0;
+  bottom: 94px;
+  width: 430px;
+  text-align: right;
+  text-shadow: 0 6px 28px rgba(0, 0, 0, 0.72);
+  transition: transform 180ms ease;
+}
+
+.hero-copy.raised {
+  transform: translateY(-42px);
+}
+
+.hero-copy h2 {
+  margin: 0;
+  display: inline-block;
+  font-family: "SJBangshu", serif;
+  font-size: 42px;
+  line-height: 0.92;
+  font-weight: 500;
+  color: var(--cv-accent-title);
+  text-shadow:
+    0 4px 16px rgba(0, 0, 0, 0.5);
+  filter: drop-shadow(0 1px 0 rgba(96, 61, 22, 0.22));
+  letter-spacing: 0;
+  white-space: normal;
+}
+
+.collab-line {
+  margin-top: 8px;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  color: color-mix(in srgb, var(--cv-accent-title) 80%, transparent);
+  font-family: "UnispaceCV", sans-serif;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.collab-line i {
+  width: 44px;
+  height: 3px;
+  background: currentColor;
+  transform: skewX(-25deg);
+}
+
+.download-dock {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 310px;
+  min-width: 310px;
+}
+
+.download-state {
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 950;
+  text-shadow: 0 3px 12px rgba(0, 0, 0, 0.6);
+  white-space: nowrap;
+}
+
+.download-state > span {
+  min-width: 0;
+  overflow: hidden;
+  margin-right: auto;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.verification-detail {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: -3px 0 6px;
+  color: rgba(255, 255, 255, 0.76);
+  font-family: "UnispaceCV", "Microsoft YaHei UI", sans-serif;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.verification-detail strong {
+  overflow: hidden;
+  color: #ffb9ad;
+  text-overflow: ellipsis;
+}
+
+.download-state.compact {
+  justify-content: flex-end;
+  gap: 0;
+  margin-bottom: -4px;
+}
+
+.download-progress-block {
+  min-height: 34px;
+}
+
+.download-progress-block.warning .download-state {
+  color: #ffe6e1;
+}
+
+.check-result-line {
+  min-width: 310px;
+  margin-top: 12px;
+  margin-bottom: -4px;
+  color: var(--cv-download-progress-end);
+  font-size: 12px;
+  font-weight: 900;
+  text-align: right;
+  text-shadow: 0 3px 12px rgba(0, 0, 0, 0.65);
+  white-space: nowrap;
+}
+
+.download-progress-fade-enter-active,
+.download-progress-fade-leave-active {
+  transition:
+    opacity 160ms ease,
+    transform 180ms ease,
+    max-height 180ms ease;
+}
+
+.download-progress-fade-enter-from,
+.download-progress-fade-leave-to {
+  max-height: 0;
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+.download-state b {
+  color: var(--cv-accent-title);
+}
+
+.download-progress-block.warning .download-state b,
+.download-progress-block.warning .repair-missing-detail {
+  color: #ff756f;
+}
+
+.download-size {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+
+.download-size.install-detail {
+  min-width: 0;
+  max-width: 160px;
+  flex: 1 1 auto;
+  justify-content: flex-end;
+  overflow: hidden;
+}
+
+.download-size.install-detail span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.download-state > b {
+  flex: 0 0 auto;
+}
+
+.download-time {
+  flex: 0 0 auto;
+  color: rgba(255, 255, 255, 0.9);
+  font-variant-numeric: tabular-nums;
+}
+
+.download-size em {
+  font-style: normal;
+}
+
+.download-state strong,
+.download-state b {
+  font-family: "UnispaceCV", "Microsoft YaHei UI", sans-serif;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.progress-track {
+  height: 11px;
+  padding: 2px;
+  border: 1px solid var(--cv-download-progress-border);
+  border-radius: 999px;
+  background: rgba(5, 10, 15, 0.66);
+  box-shadow: inset 0 0 16px rgba(0, 0, 0, 0.9);
+}
+
+.progress-fill {
+  position: relative;
+  overflow: hidden;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--cv-download-progress-start), var(--cv-download-progress-end));
+  box-shadow: 0 0 18px var(--cv-download-progress-glow);
+  transition: width 250ms ease;
+}
+
+.progress-fill.warning {
+  background: linear-gradient(90deg, #9e4546, #ff756f);
+  box-shadow: 0 0 18px rgba(255, 91, 88, 0.64);
+}
+
+.progress-fill::after {
+  content: "";
+  position: absolute;
+  top: -55%;
+  bottom: -55%;
+  left: -52%;
+  width: 42%;
+  transform: skewX(-24deg);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, white 18%, transparent),
+    color-mix(in srgb, white 54%, transparent),
+    color-mix(in srgb, var(--cv-download-progress-end) 26%, transparent),
+    transparent
+  );
+  opacity: 0;
+  pointer-events: none;
+}
+
+.progress-fill.active::after {
+  opacity: 0.78;
+  animation: progress-sheen 1.35s linear infinite;
+}
+
+@keyframes progress-sheen {
+  from {
+    left: -52%;
+  }
+
+  to {
+    left: 116%;
+  }
+}
+
+.dock-actions {
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: 59px 189px;
+  gap: 12px;
+  align-items: end;
+  justify-content: end;
+}
+
+.dock-actions.has-chunk-install {
+  grid-template-columns: 59px 189px 189px;
+}
+
+.menu-button {
+  width: 59px;
+  height: 59px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 6px;
+}
+
+.primary-action {
+  width: 189px;
+  height: 59px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  border: 0;
+  border-radius: 5px;
+  color: #26344a;
+  background:
+    linear-gradient(90deg, rgba(255, 238, 132, 0.28), rgba(255, 246, 183, 0.18)),
+    url("/launcher/practical/Setting_10.PNG") center / cover no-repeat;
+  font-size: 16px;
+  font-weight: 950;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.55);
+  box-shadow: 0 18px 30px rgba(0, 0, 0, 0.34), inset 0 0 0 1px rgba(33, 58, 87, 0.45);
+  transition:
+    transform 160ms ease,
+    filter 160ms ease;
+}
+
+.primary-action:hover {
+  transform: translateY(-2px);
+  filter: brightness(1.08);
+}
+
+.primary-action.warning {
+  color: #ffe9e5;
+  background:
+    linear-gradient(90deg, rgba(142, 64, 66, 0.72), rgba(219, 95, 88, 0.54)),
+    url("/launcher/practical/Setting_10.PNG") center / cover no-repeat;
+  text-shadow: 0 2px 8px rgba(35, 6, 7, 0.54);
+  box-shadow: 0 18px 30px rgba(0, 0, 0, 0.34), inset 0 0 0 1px rgba(255, 142, 132, 0.42);
+}
+
+.primary-action.warning:hover {
+  filter: brightness(1.12);
+}
+
+.primary-action:disabled,
+.primary-action.disabled {
+  cursor: wait;
+  opacity: 0.58;
+  filter: grayscale(0.2) brightness(0.86);
+  transform: none;
+}
+
+.primary-action:disabled:hover,
+.primary-action.disabled:hover {
+  transform: none;
+  filter: grayscale(0.2) brightness(0.86);
+}
+
+.menu-button:disabled,
+.menu-button.disabled {
+  cursor: wait;
+  opacity: 0.5;
+  filter: grayscale(0.25) brightness(0.82);
+  transform: none;
+}
+
+.menu-button:disabled:hover,
+.menu-button.disabled:hover {
+  color: rgba(255, 255, 255, 0.88);
+  background: rgba(0, 11, 18, 0.62);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.16);
+  transform: none;
+}
+
+.spinning {
+  animation: icon-spin 980ms linear infinite;
+}
+
+@keyframes icon-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.side-handle {
+  position: absolute;
+  left: 0;
+  bottom: 330px;
+  width: 52px;
+  height: 78px;
+  border: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 0 6px 6px 0;
+  background: rgba(2, 10, 15, 0.68);
+  color: var(--cv-download-progress-start);
+  z-index: 2;
+  transition:
+    transform 180ms ease,
+    background 180ms ease;
+}
+
+.side-handle svg {
+  transform: rotate(0deg);
+  transition: transform 180ms ease;
+}
+
+.side-handle.collapsed svg {
+  transform: rotate(180deg);
+}
+
+.side-handle:hover {
+  background: color-mix(in srgb, var(--cv-download-progress-start) 16%, transparent);
+}
+
+.version-corner {
+  position: absolute;
+  left: 71px;
+  bottom: 140px;
+  z-index: 3;
+  display: grid;
+  gap: 4px;
+  color: color-mix(in srgb, var(--cv-download-progress-end) 72%, rgba(255, 255, 255, 0.72));
+  font-family: "UnispaceCV", "Microsoft YaHei UI", sans-serif;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.1;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.72);
+  opacity: 0.78;
+  pointer-events: none;
+}

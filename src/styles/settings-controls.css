@@ -1,0 +1,49 @@
+.settings-page a {
+  width: fit-content;
+  color: var(--cv-accent-title);
+  text-decoration: none;
+  font-size: 19px;
+  font-weight: 950;
+}
+
+.about-line {
+  margin: 0;
+}
+
+.switch {
+  width: 54px;
+  height: 28px;
+  padding: 3px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.switch span {
+  display: block;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 160ms ease;
+}
+
+.switch.on {
+  background: linear-gradient(90deg, var(--cv-download-progress-start), var(--cv-download-progress-end));
+}
+
+.switch.on span {
+  transform: translateX(26px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .news-page-motion-enter-active,
+  .news-page-motion-leave-active,
+  .settings-title-motion-enter-active,
+  .settings-title-motion-leave-active,
+  .settings-page-motion-enter-active,
+  .settings-page-motion-leave-active {
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+  }
+}

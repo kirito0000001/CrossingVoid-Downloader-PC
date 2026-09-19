@@ -1,0 +1,233 @@
+.launcher-shell {
+  position: relative;
+  width: 100vw;
+  height: 100vh;
+  min-width: 1200px;
+  min-height: 675px;
+  overflow: hidden;
+  isolation: isolate;
+  background: var(--cv-bg-page);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.background {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transform: scale(1.025);
+  z-index: -4;
+}
+
+.cinematic-shade {
+  position: absolute;
+  inset: 0;
+  z-index: -3;
+  background:
+    radial-gradient(circle at 82% 42%, var(--cv-accent-glow), transparent 23%),
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--cv-bg-deep) 72%, transparent),
+      color-mix(in srgb, var(--cv-bg-deep) 15%, transparent) 48%,
+      color-mix(in srgb, var(--cv-bg-deep) 78%, transparent)
+    ),
+    linear-gradient(
+      0deg,
+      color-mix(in srgb, var(--cv-bg-page) 92%, transparent),
+      color-mix(in srgb, var(--cv-bg-page) 8%, transparent) 52%,
+      color-mix(in srgb, var(--cv-bg-page) 52%, transparent)
+    );
+}
+
+.scanlines {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: -2;
+  opacity: 0.2;
+  background-image: linear-gradient(rgba(255, 255, 255, 0.12) 1px, transparent 1px);
+  background-size: 100% 5px;
+}
+
+.boot-splash {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  z-index: 500;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background:
+    linear-gradient(115deg, color-mix(in srgb, var(--cv-bg-deep) 94%, black), color-mix(in srgb, var(--cv-bg-page) 82%, black)),
+    var(--cv-bg-page);
+  pointer-events: auto;
+}
+
+.boot-splash::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 72% 38%, color-mix(in srgb, var(--cv-accent-title) 16%, transparent), transparent 23%),
+    linear-gradient(120deg, transparent 0 38%, color-mix(in srgb, white 9%, transparent) 46%, transparent 55% 100%);
+  opacity: 0.88;
+}
+
+.boot-splash::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: linear-gradient(color-mix(in srgb, white 13%, transparent) 1px, transparent 1px);
+  background-size: 100% 5px;
+  opacity: 0.18;
+}
+
+.boot-splash__grain {
+  position: absolute;
+  inset: -20%;
+  background:
+    repeating-linear-gradient(
+      90deg,
+      transparent 0 16px,
+      color-mix(in srgb, var(--cv-accent-title) 5%, transparent) 17px,
+      transparent 18px 35px
+    );
+  opacity: 0.2;
+  transform: rotate(-10deg);
+  animation: boot-grain-drift 6s linear infinite;
+}
+
+.boot-splash__center {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  justify-items: center;
+  gap: 18px;
+  transform: none;
+}
+
+.boot-splash__logo {
+  width: 286px;
+  max-width: 36vw;
+  height: auto;
+  object-fit: contain;
+  filter:
+    drop-shadow(0 12px 18px rgba(0, 0, 0, 0.62))
+    drop-shadow(0 0 20px color-mix(in srgb, var(--cv-accent-title) 25%, transparent));
+  animation: boot-logo-breathe 2.4s ease-in-out infinite;
+}
+
+.boot-splash__placeholder {
+  width: 92px;
+  height: 92px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  border-radius: 6px;
+  background: rgba(4, 10, 15, 0.78);
+  color: var(--cv-accent-title);
+  font-size: 34px;
+  font-weight: 950;
+  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.42);
+}
+
+.boot-splash__line {
+  position: relative;
+  width: 284px;
+  height: 8px;
+  max-width: 36vw;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--cv-download-progress-end) 46%, transparent);
+  background: color-mix(in srgb, var(--cv-bg-deep) 66%, transparent);
+  box-shadow: 0 0 18px color-mix(in srgb, var(--cv-download-progress-start) 20%, transparent);
+  transform: skewX(-16deg);
+}
+
+.boot-splash__line span {
+  position: absolute;
+  inset: 1px;
+  width: 44%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--cv-download-progress-start),
+    var(--cv-download-progress-end),
+    transparent
+  );
+  filter: drop-shadow(0 0 10px var(--cv-download-progress-glow));
+  animation: boot-line-sweep 1.18s linear infinite;
+}
+
+.boot-splash p {
+  margin: 0;
+  color: color-mix(in srgb, var(--cv-accent-title) 82%, white 18%);
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.56);
+}
+
+.boot-splash > strong {
+  position: absolute;
+  right: 66px;
+  bottom: 44px;
+  z-index: 1;
+  color: color-mix(in srgb, var(--cv-accent-title) 82%, white 18%);
+  font-family: "UnispaceCV", "Segoe UI", sans-serif;
+  font-size: 18px;
+  font-weight: 950;
+  letter-spacing: 0;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.65);
+}
+
+.boot-splash-enter-active,
+.boot-splash-leave-active {
+  transition:
+    opacity 340ms ease,
+    filter 340ms ease;
+}
+
+.boot-splash-enter-from,
+.boot-splash-leave-to {
+  opacity: 0;
+  filter: blur(8px);
+}
+
+@keyframes boot-line-sweep {
+  from {
+    transform: translateX(-120%);
+  }
+  to {
+    transform: translateX(250%);
+  }
+}
+
+@keyframes boot-logo-breathe {
+  0%,
+  100% {
+    opacity: 0.92;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.018);
+  }
+}
+
+@keyframes boot-grain-drift {
+  from {
+    transform: translateX(-3%) rotate(-10deg);
+  }
+  to {
+    transform: translateX(3%) rotate(-10deg);
+  }
+}
+
+.drag-surface {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}

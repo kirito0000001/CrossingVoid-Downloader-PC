@@ -1,0 +1,288 @@
+.install-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 210;
+  display: grid;
+  place-items: center;
+  background: rgba(2, 7, 12, 0.42);
+  backdrop-filter: blur(3px);
+  -webkit-app-region: no-drag;
+}
+
+.install-panel {
+  position: relative;
+  width: 750px;
+  min-height: 310px;
+  padding: 40px 40px;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 12px;
+  background: rgba(29, 33, 38, 0.96);
+  color: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 30px 82px rgba(0, 0, 0, 0.42);
+  transform: translate(-80px, -36px) scale(0.6);
+  transform-origin: center center;
+}
+
+.install-close {
+  position: absolute;
+  right: 14px;
+  top: 13px;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.76);
+  background: transparent;
+}
+
+.install-close:hover {
+  color: #fff;
+}
+
+.install-panel h2 {
+  margin: 0 0 28px;
+  color: #fff;
+  font-size: 24px;
+  font-weight: 950;
+}
+
+.install-path-row {
+  width: 670px;
+  height: 58px;
+  padding: 0 24px 0 28px;
+  border-radius: 8px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 58px;
+  align-items: center;
+  gap: 18px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.install-path-row span {
+  min-width: 0;
+  overflow: hidden;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 22px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.install-path-row button {
+  border: 0;
+  color: var(--cv-download-progress-start);
+  background: transparent;
+  font-size: 20px;
+  font-weight: 900;
+}
+
+.install-space-row {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  color: rgba(255, 255, 255, 0.56);
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.install-space-row i {
+  width: 1px;
+  height: 18px;
+  background: rgba(255, 255, 255, 0.32);
+}
+
+.install-space-row .danger {
+  color: #ff706a;
+}
+
+.chunk-import-panel {
+  width: 850px;
+  min-height: 450px;
+  padding: 36px 44px 90px;
+}
+
+.chunk-import-panel h2 {
+  margin-bottom: 12px;
+  font-size: 28px;
+}
+
+.chunk-import-description,
+.chunk-import-hint {
+  margin: 0;
+  font-weight: 750;
+  line-height: 1.55;
+}
+
+.chunk-import-description {
+  max-width: 760px;
+  color: rgba(255, 255, 255, 0.86);
+  font-size: 20px;
+}
+
+.chunk-import-section-title {
+  display: block;
+  margin-top: 18px;
+  color: rgba(255, 255, 255, 0.96);
+  font-size: 18px;
+  font-weight: 950;
+}
+
+.chunk-source-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 9px 0 0;
+}
+
+.chunk-source-actions button {
+  height: 54px;
+  border: 1px solid color-mix(in srgb, var(--cv-panel-accent) 44%, rgba(255, 255, 255, 0.16));
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: rgba(255, 255, 255, 0.9);
+  background: color-mix(in srgb, var(--cv-theme-support) 84%, transparent);
+  font-size: 17px;
+  font-weight: 900;
+  transition: border-color 160ms ease, background 160ms ease, color 160ms ease;
+}
+
+.chunk-source-actions button:hover {
+  border-color: var(--cv-panel-accent);
+  color: #fff;
+  background: color-mix(in srgb, var(--cv-theme-support) 70%, var(--cv-theme-accent) 30%);
+}
+
+.chunk-folder-row {
+  width: 770px;
+  height: 64px;
+  margin-top: 9px;
+}
+
+.chunk-import-hint {
+  margin-top: 8px;
+  color: rgba(255, 255, 255, 0.74);
+  font-size: 17px;
+}
+
+.chunk-import-continue {
+  right: 44px;
+  bottom: 28px;
+}
+
+.chunk-import-continue:disabled {
+  cursor: not-allowed;
+  opacity: 0.46;
+  filter: grayscale(0.45);
+}
+
+.dev-package-panel {
+  min-height: 300px;
+}
+
+.dev-package-panel .install-continue {
+  bottom: 30px;
+}
+
+.dev-package-note {
+  margin: 10px 0 0 2px;
+  color: rgba(255, 255, 255, 0.56);
+  font-size: 17px;
+  font-weight: 700;
+}
+
+.install-option {
+  margin-top: 10px;
+  min-height: 30px;
+  border: 0;
+  display: inline-grid;
+  grid-template-columns: 24px auto;
+  align-items: center;
+  gap: 10px;
+  color: rgba(255, 255, 255, 0.9);
+  background: transparent;
+  transition: color 160ms ease;
+}
+
+.install-option:hover {
+  color: var(--cv-check-accent);
+}
+
+.install-option strong {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.install-option .check-box {
+  width: 21px;
+  height: 21px;
+}
+
+.install-continue {
+  position: absolute;
+  right: 38px;
+  bottom: 40px;
+  width: 150px;
+  height: 54px;
+  border: 0;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(13, 16, 18, 0.96);
+  background: linear-gradient(90deg, var(--cv-panel-accent-strong), var(--cv-panel-accent));
+  font-size: 20px;
+  font-weight: 950;
+  transition:
+    color 170ms ease,
+    background 170ms ease,
+    box-shadow 170ms ease,
+    filter 170ms ease;
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--cv-panel-accent-strong) 64%, transparent),
+    0 10px 24px rgba(0, 0, 0, 0.24);
+}
+
+.install-continue:hover {
+  color: color-mix(in srgb, var(--cv-theme-accent) 48%, white 52%);
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--cv-theme-support) 84%, var(--cv-theme-accent) 16%) 0%,
+      color-mix(in srgb, var(--cv-theme-support) 90%, var(--cv-theme-accent) 10%) 100%
+    );
+  box-shadow:
+    0 0 16px color-mix(in srgb, var(--cv-theme-accent) 18%, transparent),
+    inset 0 0 0 1px color-mix(in srgb, var(--cv-theme-accent) 42%, transparent);
+  filter: brightness(1.02);
+}
+
+.install-pop-enter-active,
+.install-pop-leave-active {
+  transition:
+    opacity 160ms ease,
+    backdrop-filter 180ms ease;
+}
+
+.install-pop-enter-active .install-panel,
+.install-pop-leave-active .install-panel {
+  transition:
+    opacity 170ms ease,
+    transform 190ms cubic-bezier(0.2, 0.86, 0.22, 1);
+}
+
+.install-pop-enter-from,
+.install-pop-leave-to {
+  opacity: 0;
+  backdrop-filter: blur(0);
+}
+
+.install-pop-enter-from .install-panel,
+.install-pop-leave-to .install-panel {
+  opacity: 0;
+  transform: translate(-80px, -26px) scale(0.58);
+}

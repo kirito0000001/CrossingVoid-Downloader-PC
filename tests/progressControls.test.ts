@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
+import { launcherSource } from "./helpers/launcherSources";
+
 const appSource = readFileSync(resolve(process.cwd(), "src/App.vue"), "utf8");
 const rustSource = readFileSync(resolve(process.cwd(), "src-tauri/src/lib.rs"), "utf8");
 
@@ -46,10 +48,10 @@ describe("long-running progress controls", () => {
   });
 
   it("pauses and resumes developer game uploads with their original context", () => {
-    expect(appSource).toContain("developerGamePublishContext");
-    expect(appSource).toContain("pauseDeveloperUpload");
-    expect(appSource).toContain("resumeDeveloperUpload");
-    expect(appSource).toContain('invoke("dev_pause_script")');
+    expect(launcherSource).toContain("developerGamePublishContext");
+    expect(launcherSource).toContain("pauseDeveloperUpload");
+    expect(launcherSource).toContain("resumeDeveloperUpload");
+    expect(launcherSource).toContain('invoke("dev_pause_script")');
     expect(rustSource).toContain("DEV_SCRIPT_PAUSED");
     expect(rustSource).toContain("fn dev_pause_script()");
   });
@@ -64,10 +66,22 @@ describe("long-running progress controls", () => {
     expect(appSource).toContain("formatBytes(downloadedBytes.value)");
   });
 
+  it("uses the loading icon instead of spinning the gamepad while launching", () => {
+    const actionIcon = appSource.slice(
+      appSource.indexOf("const actionIcon = computed"),
+      appSource.indexOf("const showGameChunkImportAction = computed"),
+    );
+
+    expect(actionIcon).toContain("if (gameLaunchPending.value) return RefreshCw");
+    expect(actionIcon.indexOf("gameLaunchPending.value")).toBeLessThan(
+      actionIcon.indexOf("localGamePlayableWhileNetworkLocked.value"),
+    );
+  });
+
   it("shows byte-level manifest verification progress and the current file", () => {
-    expect(appSource).toContain("currentFile?: string");
-    expect(appSource).toContain("processedBytes?: number");
-    expect(appSource).toContain("currentFileTotalBytes?: number");
+    expect(launcherSource).toContain("currentFile?: string");
+    expect(launcherSource).toContain("processedBytes?: number");
+    expect(launcherSource).toContain("currentFileTotalBytes?: number");
     expect(appSource).toContain("verificationCurrentFile");
     expect(appSource).toContain("verificationByteProgress");
     expect(rustSource).toContain("current_file: Option<String>");

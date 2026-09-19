@@ -11,13 +11,19 @@ const overviewSource = readFileSync(
   resolve(process.cwd(), "src/components/PlatformGameOverview.vue"),
   "utf8",
 );
+const placeholderSource = readFileSync(
+  resolve(process.cwd(), "src/components/PlatformPlaceholderPage.vue"),
+  "utf8",
+);
 
 describe("platform shell integration", () => {
   it("uses the active game for boot branding and page rendering", () => {
     expect(appSource).toContain(":src=\"activeGame.bootLogoSrc");
     expect(appSource).toContain(":src=\"activeGame.brandLogoSrc");
     expect(appSource).toContain("isCrossingVoidActive");
-    expect(appSource).toContain("platform-placeholder-page");
+    expect(appSource).toContain("<PlatformPlaceholderPage");
+    expect(placeholderSource).toContain("platform-placeholder-page");
+    expect(placeholderSource).toContain("页面资源尚未接入");
     expect(appSource).toContain('new URLSearchParams(window.location.search).has("holdBoot")');
   });
 
@@ -54,6 +60,8 @@ describe("platform shell integration", () => {
     expect(overviewSource).toContain("previewGame.englishName");
     expect(overviewSource).toContain("previewGame.description");
     expect(appSource).not.toContain("launcher-shell.platform-overview-active");
+    expect(appSource).not.toContain("platform-game-overview");
+    expect(appSource).not.toContain("platform-game-cover");
     expect(appSource).toContain("gameOverviewVisible");
   });
 
