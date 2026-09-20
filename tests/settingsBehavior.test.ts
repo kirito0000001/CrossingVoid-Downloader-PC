@@ -2,12 +2,35 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { launcherSource } from "./helpers/launcherSources";
+import { launcherSource, readSource } from "./helpers/launcherSources";
 
 const appSource = readFileSync(resolve(process.cwd(), "src/App.vue"), "utf8");
 const nativeSource = readFileSync(resolve(process.cwd(), "src-tauri/src/lib.rs"), "utf8");
 
 describe("launcher behavior settings", () => {
+  it("manages remote download channels from the developer page", () => {
+    // 开发页：每个渠道独立开关（整站说明交给远程公告），发布走新的 Tauri 命令。
+    expect(launcherSource).toContain("dev_publish_download_channels");
+    expect(launcherSource).toContain("developerChannels");
+    expect(launcherSource).toContain("全部恢复");
+    // 玩家侧：拉取渠道开关 → 关闭的渠道不能选、当前渠道被关自动切换、下载入口兜底拦住。
+    expect(appSource).toContain("refreshRemoteDownloadChannels");
+    expect(appSource).toContain("pickAvailableDownloadChannel");
+    expect(appSource).toContain("isDownloadChannelEnabled(downloadChannelStates.value, downloadSource.value)");
+    expect(launcherSource).toContain("downloadChannelNoticeText");
+    // 渠道被关时复用右上角那条提示（和"流量不足"同一套外观），文案固定。
+    expect(appSource).toContain("当前渠道已关闭，请更换");
+    expect(appSource).toContain("downloadChannelWarningText || showOfficialTrafficWarning");
+  });
+
+  it("renders checkboxes through the shared component instead of raw inputs", () => {
+    // 复选框外观只有一份实现（LauncherCheckbox + 全局 controls.css），
+    // 别再各写各的原生 checkbox，否则开发页那块会跑出浏览器默认样式。
+    expect(readSource("src/components/LauncherCheckbox.vue")).toContain("check-box");
+    expect(readSource("src/components/SettingsPanel.vue")).toContain("LauncherCheckbox");
+    expect(launcherSource).not.toContain('type="checkbox"');
+  });
+
   it("persists automatic repair and post-launch visibility choices", () => {
     expect(appSource).toContain("AUTO_REPAIR_STORAGE_KEY");
     expect(appSource).toContain("HIDE_AFTER_GAME_LAUNCH_STORAGE_KEY");

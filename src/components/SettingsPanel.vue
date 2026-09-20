@@ -11,11 +11,13 @@ import {
   PackageOpen,
   RefreshCw,
   RotateCcw,
+  Send,
   Trash2,
   X,
 } from "lucide-vue-next";
 
 import LauncherSelect from "./LauncherSelect.vue";
+import LauncherCheckbox from "./LauncherCheckbox.vue";
 import { settingsContextKey } from "../settings/settingsContext";
 
 const settingsContext = inject(settingsContextKey);
@@ -35,6 +37,9 @@ const {
   dangerConfirmTitle,
   developerGameTitle,
   developerGameVersion,
+  developerChannels,
+  developerChannelsPending,
+  developerChannelsStatus,
   developerNoticeContent,
   developerNoticeLevel,
   developerNoticePending,
@@ -45,6 +50,7 @@ const {
   developerVersionHint,
   developerVersionInput,
   downloadCancelPending,
+  downloadChannelNoticeText,
   downloadLimited,
   downloadSource,
   downloadSourceDisabled,
@@ -70,12 +76,14 @@ const {
   openLauncherLogFolder,
   openLocalGameFiles,
   publishDeveloperGamePackage,
+  publishDeveloperDownloadChannels,
   publishDeveloperLauncherPackage,
   publishDeveloperRemoteNotice,
   relocateInstalledGame,
   requestCancelGameDownload,
   requestDeleteGame,
   requestUninstallLauncher,
+  restoreAllDeveloperDownloadChannels,
   saveDeveloperLauncherVersion,
   selectedDownloadSourceDescription,
   selectSettingsTab,
@@ -154,15 +162,10 @@ const {
 
               <div class="setting-block">
                 <span class="setting-title">{{ t("settings.display") }}</span>
-                <button
-                  class="check-row"
-                  :class="{ checked: hideAfterGameLaunch }"
-                  type="button"
-                  @click="hideAfterGameLaunch = !hideAfterGameLaunch"
-                >
-                  <span class="check-box"><Check :size="22" stroke-width="3.2" /></span>
-                  <strong>{{ t("settings.hideAfterGameLaunch") }}</strong>
-                </button>
+                <LauncherCheckbox
+                  v-model="hideAfterGameLaunch"
+                  :label="t('settings.hideAfterGameLaunch')"
+                />
               </div>
                 </section>
 
@@ -180,6 +183,9 @@ const {
                 </p>
                 <p v-else class="traffic-quota__notice" :class="{ low: Boolean(githubNetworkWarningText) }">
                   {{ githubNetworkWarningText || "Github 网络连接正常。" }}
+                </p>
+                <p v-if="downloadChannelNoticeText" class="traffic-quota__notice low">
+                  {{ downloadChannelNoticeText }}
                 </p>
                 <div
                   v-if="downloadSource === 'official'"
@@ -434,6 +440,35 @@ const {
                   <button class="light-action developer-notice-disable" type="button" :disabled="developerNoticePending" @click="publishDeveloperRemoteNotice(false)">
                     <BellOff :size="22" />
                     <span>关闭公告</span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="setting-block developer-channels-block">
+                <span class="setting-title">下载渠道开关</span>
+                <p class="setting-hint">{{ developerChannelsStatus }}</p>
+                <p class="setting-hint">
+                  每个渠道独立开关：关掉的渠道玩家侧不能选、也不会被用来下载（省流量）。整站维护请用上面的远程公告。
+                </p>
+                <div class="developer-channel-list">
+                  <div v-for="channel in developerChannels" :key="channel.key" class="developer-channel-row">
+                    <LauncherCheckbox v-model="channel.enabled" :label="t(channel.labelKey)" />
+                    <input
+                      v-model="channel.note"
+                      class="path-input developer-channel-note"
+                      maxlength="200"
+                      placeholder="关闭原因（可留空）"
+                    />
+                  </div>
+                </div>
+                <div class="developer-notice-actions">
+                  <button class="light-action" type="button" :disabled="developerChannelsPending" @click="publishDeveloperDownloadChannels">
+                    <Send :size="22" />
+                    <span>{{ developerChannelsPending ? "正在处理" : "发布渠道开关" }}</span>
+                  </button>
+                  <button class="light-action developer-notice-disable" type="button" :disabled="developerChannelsPending" @click="restoreAllDeveloperDownloadChannels">
+                    <RotateCcw :size="22" />
+                    <span>全部恢复</span>
                   </button>
                 </div>
               </div>

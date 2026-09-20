@@ -4,6 +4,11 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 
 import { translate, type LauncherLanguage } from "../i18n/launcherText";
+import { downloadSources } from "../launcherData";
+import {
+  parseRemoteDownloadChannels,
+  resolveDownloadChannelStates,
+} from "../downloadChannels";
 import type {
   DevScriptFinishedEvent,
   DevScriptProgressEvent,
@@ -34,6 +39,7 @@ export type DeveloperConsoleHost = {
   formatError: (error: unknown) => string;
   compareVersions: (left: string, right: string) => number;
   fetchRemoteLauncherNotice: () => Promise<RemoteLauncherNotice>;
+  fetchRemoteDownloadChannels: () => Promise<unknown>;
   onTaskStart: () => void;
 };
 
@@ -487,7 +493,117 @@ export function useDeveloperConsole(host: DeveloperConsoleHost) {
     }
   }
 
+  // ——— 远程下载渠道开关（每个渠道各自独立，加渠道只改渠道表） ———
+
+  const developerChannels = ref(
+    downloadSources.map((source) => ({
+      key: source.key,
+      labelKey: source.nameKey,
+      enabled: true,
+      note: "",
+    })),
+  );
+
+  const developerChannelsPending = ref(false);
+
+  const developerChannelsStatus = ref("正在读取线上渠道状态");
+
+  async function refreshDeveloperDownloadChannels() {
+    if (!isDevToolsAvailable() || developerChannelsPending.value) return;
+
+    developerChannelsPending.value = true;
+
+    try {
+      const remote = parseRemoteDownloadChannels(await host.fetchRemoteDownloadChannels());
+
+      if (!remote) {
+        developerChannelsStatus.value = "线上还没有渠道开关文档，当前按「全部开放」处理。";
+        return;
+      }
+
+      const states = resolveDownloadChannelStates(
+        developerChannels.value.map((channel) => channel.key),
+        remote,
+      );
+
+      developerChannels.value = developerChannels.value.map((channel) => {
+        const state = states.find((entry) => entry.key === channel.key);
+        return state ? { ...channel, enabled: state.enabled, note: state.note } : channel;
+      });
+
+      const closed = states.filter((state) => !state.enabled).map((state) => state.key);
+
+      developerChannelsStatus.value = closed.length
+        ? `线上已关闭：${closed.join("、")}`
+        : "线上渠道全部开放。";
+
+    } catch (error) {
+
+      // 还没发布过时线上没有这份文档（404），这属于正常初始状态，不是错误。
+      const message = formatError(error);
+
+      developerChannelsStatus.value = message.includes("404")
+        ? "线上还没有渠道开关文档（当前按全部开放处理）。"
+        : `读取线上渠道状态失败：${message}`;
+
+    } finally {
+
+      developerChannelsPending.value = false;
+
+    }
+
+  }
+
+  async function publishDeveloperDownloadChannels() {
+    if (!isDevToolsAvailable() || developerChannelsPending.value) return;
+
+    developerChannelsPending.value = true;
+
+    try {
+      const result = await invoke<string>("dev_publish_download_channels", {
+        channels: developerChannels.value.map((channel) => ({
+          key: channel.key,
+          enabled: channel.enabled,
+          note: channel.note,
+        })),
+      });
+
+      developerChannelsPending.value = false;
+
+      await refreshDeveloperDownloadChannels();
+
+      notify(result);
+
+    } catch (error) {
+
+      notify(formatError(error));
+
+    } finally {
+
+      developerChannelsPending.value = false;
+
+    }
+
+  }
+
+  async function restoreAllDeveloperDownloadChannels() {
+    developerChannels.value = developerChannels.value.map((channel) => ({
+      ...channel,
+      enabled: true,
+      note: "",
+    }));
+
+    await publishDeveloperDownloadChannels();
+
+  }
+
   return {
+    developerChannels,
+    developerChannelsPending,
+    developerChannelsStatus,
+    publishDeveloperDownloadChannels,
+    refreshDeveloperDownloadChannels,
+    restoreAllDeveloperDownloadChannels,
     disposeDeveloperConsole,
     canPauseDeveloperUpload,
     canResumeDeveloperUpload,

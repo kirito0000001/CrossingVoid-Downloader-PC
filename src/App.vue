@@ -48,6 +48,17 @@ import {
   type GamePackagePlan,
 } from "./gamePackage";
 import {
+  DOWNLOAD_CHANNELS_URL,
+  downloadChannelState,
+  downloadChannelNotice,
+  isDownloadChannelEnabled,
+  parseRemoteDownloadChannels,
+  pickAvailableDownloadChannel,
+  resolveDownloadChannelStates,
+  type DownloadChannelState,
+  type RemoteDownloadChannels,
+} from "./downloadChannels";
+import {
   activateGameOverviewItem,
   openGameOverview,
   type GameOverviewSelection,
@@ -294,6 +305,8 @@ const launcherUpdateTotalBytes = ref(0);
 
 const remoteLauncherNotice = ref<RemoteLauncherNotice | null>(null);
 const showRemoteLauncherNotice = ref(false);
+/** 远程下载渠道开关：开发页发布，玩家侧据此禁用/自动切换下载源。 */
+const remoteDownloadChannels = ref<RemoteDownloadChannels | null>(null);
 const developerConsole = useDeveloperConsole({
   launcherVersion,
   language: currentLanguage,
@@ -302,6 +315,7 @@ const developerConsole = useDeveloperConsole({
   formatError: formatUnknownError,
   compareVersions,
   fetchRemoteLauncherNotice,
+  fetchRemoteDownloadChannels: () => fetchRemoteJson<unknown>(`${DOWNLOAD_CHANNELS_URL}?t=${Date.now()}`),
   onTaskStart: () => {
     showSettings.value = false;
     showDevPackageConfirm.value = false;
@@ -315,6 +329,9 @@ const {
   developerGameTitle,
   developerGameUploadActive,
   developerGameVersion,
+  developerChannels,
+  developerChannelsPending,
+  developerChannelsStatus,
   developerNoticeContent,
   developerNoticeLevel,
   developerNoticePending,
@@ -333,11 +350,14 @@ const {
   developerVersionInput,
   openDeveloperProjectFolder,
   pauseDeveloperUpload,
+  publishDeveloperDownloadChannels,
   publishDeveloperGamePackage,
   publishDeveloperLauncherPackage,
   publishDeveloperRemoteNotice,
   refreshDeveloperLauncherVersion,
+  refreshDeveloperDownloadChannels,
   refreshDeveloperRemoteNotice,
+  restoreAllDeveloperDownloadChannels,
   resumeDeveloperUpload,
   runDeveloperLauncherBuild,
   saveDeveloperLauncherVersion,
@@ -704,6 +724,8 @@ async function initializePlatformPage() {
   const hasLauncherUpdate = await checkLauncherUpdate({ manual: false });
   // 公告不受"必须先更新启动器"的限制，先拉一次再决定要不要继续初始化平台页。
   await refreshRemoteLauncherNotice();
+  // 渠道开关同样先拉：玩家可能正因为某个源被关而进不来。
+  await refreshRemoteDownloadChannels();
   if (hasLauncherUpdate || launcherUpdateGate.value !== "ready" || !isCrossingVoidActive.value) return;
   await checkGameVersion({ manual: false });
   await Promise.all([
@@ -1013,6 +1035,9 @@ const gameChunkImportDisabled = computed(
 );
 const downloadSourceDisabled = computed(
   () =>
+    availableDownloadSources.value.every(
+      (source) => !isDownloadChannelEnabled(downloadChannelStates.value, source.key),
+    ) ||
     launcherUpdateActive.value ||
     developerTaskActive.value ||
     launcherState.value === "downloading" ||
@@ -1350,6 +1375,7 @@ function selectSettingsTab(tab: SettingsTab) {
   if (tab === "developer") {
     void refreshDeveloperRemoteNotice();
     void refreshDeveloperLauncherVersion();
+    void refreshDeveloperDownloadChannels();
   }
 }
 
@@ -1421,6 +1447,33 @@ const trafficQuotaExpiryText = computed(() => {
 const downloadSourceNameByKey = computed(() =>
   Object.fromEntries(downloadSources.map((source) => [source.key, t(source.nameKey)])) as Record<DownloadSourceKey, string>,
 );
+/** 远程渠道开关落到本地渠道表上的结果（远端没提到的渠道默认开放）。 */
+const downloadChannelStates = computed<DownloadChannelState[]>(() =>
+  resolveDownloadChannelStates(
+    downloadSources.map((source) => source.key),
+    remoteDownloadChannels.value,
+  ),
+);
+/** 设置页里补充说明：只列"有写明原因"的渠道，右上角那条提示已经覆盖了"被关"本身。 */
+const downloadChannelNoticeText = computed(() =>
+  downloadChannelNotice(
+    downloadChannelStates.value,
+    (key) => downloadSourceNameByKey.value[key],
+  ),
+);
+/** 当前下载源被远端关掉时，直接复用右上角那条提示（和"流量不足"同一套外观）。 */
+const downloadChannelWarningText = computed(() =>
+  downloadChannelState(downloadChannelStates.value, downloadSource.value).enabled
+    ? ""
+    : "当前渠道已关闭，请更换",
+);
+/** 还开着的下载源；全关时回落到完整列表，好让界面仍能显示"已关闭"。 */
+const availableDownloadSources = computed(() => {
+  const available = downloadSources.filter((source) =>
+    isDownloadChannelEnabled(downloadChannelStates.value, source.key),
+  );
+  return available.length > 0 ? available : downloadSources;
+});
 const activeGameDownloadSourceName = computed(() => {
   const source = activeGameDownloadSource.value;
   return source ? downloadSourceNameByKey.value[source] : "";
@@ -1434,7 +1487,13 @@ const downloadSourceModel = computed({
     downloadSource.value = downloadSourceKeyByName.value[label] ?? "official";
   },
 });
-const downloadSourceOptions = computed(() => downloadSources.map((source) => t(source.nameKey)));
+const downloadSourceOptions = computed(() =>
+  availableDownloadSources.value.map((source) =>
+    isDownloadChannelEnabled(downloadChannelStates.value, source.key)
+      ? t(source.nameKey)
+      : `${t(source.nameKey)}（已关闭）`,
+  ),
+);
 
 watch([showSettings, activeSettingsTab], () => {
   resetSettingsScrollbar();
@@ -1803,6 +1862,32 @@ async function fetchRemoteLauncherNotice() {
   const notice = parseRemoteLauncherNotice(payload);
   if (!notice) throw new Error("远程公告格式不正确");
   return notice;
+}
+
+/**
+ * 远程下载渠道开关：拉一次，然后据此调整当前下载源。
+ *
+ * 被关掉的渠道不允许选中；当前渠道被关就自动切到还开着的那个；
+ * 全都关了则保留选择，但下载入口会被 `downloadGameArchive` 拦下并显示说明。
+ */
+async function refreshRemoteDownloadChannels() {
+  if (!isCrossingVoidActive.value) return;
+  try {
+    const payload = await fetchRemoteJson<unknown>(`${DOWNLOAD_CHANNELS_URL}?t=${Date.now()}`);
+    remoteDownloadChannels.value = parseRemoteDownloadChannels(payload);
+  } catch (error) {
+    console.warn("Unable to load remote download channels", error);
+    // 拉不到就按"全部开放"处理：不能因为一次网络抖动把所有人挡在门外。
+    remoteDownloadChannels.value = null;
+  }
+
+  const available = pickAvailableDownloadChannel(downloadChannelStates.value, downloadSource.value);
+  if (available && available !== downloadSource.value) {
+    downloadSource.value = available;
+    showCheckResult(
+      `当前下载渠道已关闭，已自动切换到「${downloadSourceNameByKey.value[available]}」。`,
+    );
+  }
 }
 
 async function refreshRemoteLauncherNotice() {
@@ -2721,6 +2806,12 @@ function resetVerificationProgressDetail() {
 async function downloadGameArchive() {
   if (!(await ensureLatestLauncherForNetworkDownload())) return;
   if (gameDownloadActive.value) return;
+  if (!isDownloadChannelEnabled(downloadChannelStates.value, downloadSource.value)) {
+    showCheckResult(
+      downloadChannelNoticeText.value || "当前下载渠道已被关闭，请稍后再试或在设置里换个渠道。",
+    );
+    return;
+  }
   if (!ensureOfficialTrafficAvailable()) return;
   const requestedSource = downloadSource.value;
   activeGameDownloadSource.value = requestedSource;
@@ -3499,6 +3590,15 @@ async function verifyGameIntegrity() {
 async function repairMissingGameFiles() {
   if (!(await ensureLatestLauncherForNetworkDownload())) return;
   if (launcherState.value !== "repairPending") return;
+  // 修复同样要下文件，所以同样受渠道开关约束：被关掉的渠道不能用来补文件。
+  if (!isDownloadChannelEnabled(downloadChannelStates.value, downloadSource.value)) {
+    showCheckResult(
+      downloadChannelNoticeText.value || "当前下载渠道已被关闭，暂时无法补全游戏文件。",
+    );
+    showSettings.value = true;
+    activeSettingsTab.value = "download";
+    return;
+  }
   if (!ensureOfficialTrafficAvailable()) {
     showSettings.value = true;
     activeSettingsTab.value = "download";
@@ -3746,6 +3846,9 @@ const settingsContext = {
   dangerConfirmActionCopy,
   dangerConfirmBody,
   dangerConfirmTitle,
+  developerChannels,
+  developerChannelsPending,
+  developerChannelsStatus,
   developerGameTitle,
   developerGameVersion,
   developerNoticeContent,
@@ -3758,6 +3861,7 @@ const settingsContext = {
   developerVersionHint,
   developerVersionInput,
   downloadCancelPending,
+  downloadChannelNoticeText,
   downloadLimited,
   downloadSource,
   downloadSourceDisabled,
@@ -3782,6 +3886,7 @@ const settingsContext = {
   openGameChunkImportGuide,
   openLauncherLogFolder,
   openLocalGameFiles,
+  publishDeveloperDownloadChannels,
   publishDeveloperGamePackage,
   publishDeveloperLauncherPackage,
   publishDeveloperRemoteNotice,
@@ -3789,6 +3894,7 @@ const settingsContext = {
   requestCancelGameDownload,
   requestDeleteGame,
   requestUninstallLauncher,
+  restoreAllDeveloperDownloadChannels,
   saveDeveloperLauncherVersion,
   selectedDownloadSourceDescription,
   selectSettingsTab,
@@ -3875,9 +3981,9 @@ provide(settingsContextKey, settingsContext);
       </nav>
 
       <Transition name="traffic-warning">
-        <div v-if="isCrossingVoidActive && !gameOverviewVisible && (showOfficialTrafficWarning || showGithubNetworkWarning)" class="traffic-warning" role="status">
+        <div v-if="isCrossingVoidActive && !gameOverviewVisible && (downloadChannelWarningText || showOfficialTrafficWarning || showGithubNetworkWarning)" class="traffic-warning" role="status">
           <CircleAlert :size="18" stroke-width="2.8" />
-          <span>{{ showOfficialTrafficWarning ? t("traffic.low") : githubNetworkWarningText }}</span>
+          <span>{{ downloadChannelWarningText || (showOfficialTrafficWarning ? t("traffic.low") : githubNetworkWarningText) }}</span>
         </div>
       </Transition>
 

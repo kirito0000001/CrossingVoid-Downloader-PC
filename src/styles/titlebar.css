@@ -1,7 +1,12 @@
 .titlebar {
   position: relative;
   height: 72px;
-  z-index: 30;
+  /*
+   * 要压过"流量不足 / 当前渠道已关闭"那条提示（position: fixed; z-index: 99），
+   * 否则鼠标悬停在快捷入口上时，弹出的提示会被那条横幅盖掉一截。
+   * 仍然低于设置弹窗（120）、公告浮层（260）和开机动画（500）。
+   */
+  z-index: 100;
 }
 
 .brand {

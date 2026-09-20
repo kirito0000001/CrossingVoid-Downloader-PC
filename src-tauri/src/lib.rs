@@ -206,6 +206,19 @@ struct GameFileManifest {
     files: Vec<GameFileManifestEntry>,
 }
 
+/// 开发页发布的一个下载渠道开关：每个渠道各自独立。
+///
+/// 契约是"数组"，所以以后新增渠道（比如镜像源）只要在启动器自己的渠道表里加一行，
+/// 服务端文档里跟着多一项即可，不需要改结构。
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadChannelState {
+    key: String,
+    enabled: bool,
+    #[serde(default)]
+    note: String,
+}
+
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GameFileManifestEntry {
@@ -407,6 +420,43 @@ fn dev_set_launcher_version(version: String) -> Result<String, String> {
         let project_root = dev_project_root()?;
         write_dev_launcher_version(&project_root, clean_version)?;
         Ok(clean_version.to_string())
+    }
+}
+
+#[tauri::command]
+async fn dev_publish_download_channels(
+    channels: Vec<DownloadChannelState>,
+) -> Result<String, String> {
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = channels;
+        return Err("开发工具仅在调试模式可用。".into());
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        let published_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("Unable to read system time: {}", error))?
+            .as_millis() as u64;
+        let payload = build_download_channels_payload(&channels, published_at)?;
+        let project_root = dev_project_root()?;
+        tauri::async_runtime::spawn_blocking(move || {
+            publish_download_channels_blocking(&project_root, &payload)
+        })
+        .await
+        .map_err(|error| format!("Download channel task failed: {}", error))??;
+
+        let open: Vec<&str> = channels
+            .iter()
+            .filter(|channel| channel.enabled)
+            .map(|channel| channel.key.as_str())
+            .collect();
+        Ok(if open.is_empty() {
+            "下载渠道已更新：全部关闭。整站说明请用远程公告发布。".to_string()
+        } else {
+            format!("下载渠道已更新，当前开放：{}", open.join("、"))
+        })
     }
 }
 
@@ -3619,6 +3669,106 @@ fn build_remote_notice_payload(
 }
 
 #[cfg(debug_assertions)]
+fn build_download_channels_payload(
+    channels: &[DownloadChannelState],
+    published_at: u64,
+) -> Result<String, String> {
+    if channels.is_empty() {
+        return Err("至少要有一个下载渠道。".into());
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut entries = Vec::with_capacity(channels.len());
+    for channel in channels {
+        let key = channel.key.trim();
+        if key.is_empty()
+            || key.len() > 32
+            || !key
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_' | '.'))
+        {
+            return Err(format!("渠道标识不合规：{}", channel.key));
+        }
+        if !seen.insert(key.to_string()) {
+            return Err(format!("渠道标识重复：{key}"));
+        }
+        let channel_note = channel.note.trim();
+        if channel_note.chars().count() > 200 {
+            return Err(format!("渠道 {key} 的说明不能超过 200 个字符。"));
+        }
+        entries.push(serde_json::json!({
+            "key": key,
+            "enabled": channel.enabled,
+            "note": channel_note,
+        }));
+    }
+
+    let payload = serde_json::json!({
+        "schemaVersion": 1,
+        "channels": entries,
+        "publishedAt": published_at,
+    });
+    serde_json::to_string_pretty(&payload)
+        .map(|text| format!("{}\n", text))
+        .map_err(|error| format!("Unable to serialize download channels: {}", error))
+}
+
+#[cfg(debug_assertions)]
+fn publish_download_channels_blocking(project_root: &Path, payload: &str) -> Result<(), String> {
+    let saved_dir = project_root.join("Saved").join("Launcher");
+    fs::create_dir_all(&saved_dir)
+        .map_err(|error| format!("Unable to create {}: {}", saved_dir.display(), error))?;
+    let channels_path = saved_dir.join("download-channels.json");
+    let temporary_path = channels_path.with_extension("json.tmp");
+    fs::write(&temporary_path, payload)
+        .map_err(|error| format!("Unable to write {}: {}", temporary_path.display(), error))?;
+    replace_file_atomic(&temporary_path, &channels_path).map_err(|error| {
+        format!(
+            "Unable to replace {}: {}",
+            channels_path.display(),
+            error
+        )
+    })?;
+
+    let script_path = project_root
+        .join("Scripts")
+        .join("Publish-LauncherDownloadChannels.ps1");
+    if !script_path.is_file() {
+        return Err(format!("渠道发布脚本不存在：{}", script_path.display()));
+    }
+    let shell = dev_powershell_command();
+    let mut command = Command::new(&shell);
+    command.arg("-NoProfile");
+    if shell.eq_ignore_ascii_case("powershell")
+        || shell.to_ascii_lowercase().ends_with("powershell.exe")
+    {
+        command.arg("-ExecutionPolicy").arg("Bypass");
+    }
+    let output = command
+        .arg("-File")
+        .arg(&script_path)
+        .arg("-InputFile")
+        .arg(&channels_path)
+        .output()
+        .map_err(|error| format!("Unable to run {}: {}", script_path.display(), error))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Err(format!(
+        "渠道开关发布失败，exit code {:?}: {}{}",
+        output.status.code(),
+        stderr,
+        if stdout.is_empty() {
+            String::new()
+        } else {
+            format!(" | {}", stdout)
+        }
+    ))
+}
+
+#[cfg(debug_assertions)]
 fn publish_remote_notice_blocking(project_root: &Path, payload: &str) -> Result<(), String> {
     let saved_dir = project_root.join("Saved").join("Launcher");
     fs::create_dir_all(&saved_dir)
@@ -4456,6 +4606,7 @@ pub fn run() {
             dev_get_published_launcher_version,
             dev_set_launcher_version,
             dev_publish_remote_notice,
+            dev_publish_download_channels,
             dev_run_launcher_script,
             dev_pause_script,
             open_launcher_log_folder,
@@ -4790,6 +4941,96 @@ mod tests {
         let disabled_json: serde_json::Value =
             serde_json::from_str(&disabled).expect("parse disabled notice");
         assert_eq!(disabled_json["enabled"], false);
+    }
+
+    #[test]
+    fn download_channel_payload_keeps_players_informed() {
+        let channels = vec![
+            DownloadChannelState {
+                key: "official".to_string(),
+                enabled: false,
+                note: "  官方源维护中  ".to_string(),
+            },
+            DownloadChannelState {
+                key: "github".to_string(),
+                enabled: true,
+                note: String::new(),
+            },
+        ];
+        let open = build_download_channels_payload(&channels, 111).expect("build channel payload");
+        let open_json: serde_json::Value = serde_json::from_str(&open).expect("parse channels");
+        assert_eq!(open_json["schemaVersion"], 1);
+        assert_eq!(open_json["channels"][0]["key"], "official");
+        assert_eq!(open_json["channels"][0]["enabled"], false);
+        assert_eq!(open_json["channels"][0]["note"], "官方源维护中");
+        assert_eq!(open_json["channels"][1]["key"], "github");
+        assert_eq!(open_json["channels"][1]["enabled"], true);
+        assert_eq!(open_json["publishedAt"], 111);
+
+        // 以后新增渠道：数组里多一项就行，结构不变。
+        let with_new_channel = vec![
+            DownloadChannelState {
+                key: "official".to_string(),
+                enabled: true,
+                note: String::new(),
+            },
+            DownloadChannelState {
+                key: "mirror-cn".to_string(),
+                enabled: true,
+                note: String::new(),
+            },
+        ];
+        let extended =
+            build_download_channels_payload(&with_new_channel, 222).expect("array shape accepts new keys");
+        let extended_json: serde_json::Value = serde_json::from_str(&extended).expect("parse extended");
+        assert_eq!(extended_json["channels"][1]["key"], "mirror-cn");
+
+        // 全部关闭是合法用途：整站说明交给远程公告，这里只记渠道自己的状态。
+        let closed_channels = vec![
+            DownloadChannelState {
+                key: "official".to_string(),
+                enabled: false,
+                note: String::new(),
+            },
+            DownloadChannelState {
+                key: "github".to_string(),
+                enabled: false,
+                note: String::new(),
+            },
+        ];
+        let closed =
+            build_download_channels_payload(&closed_channels, 333).expect("closing every channel is allowed");
+        let closed_json: serde_json::Value = serde_json::from_str(&closed).expect("parse closed");
+        assert_eq!(closed_json["channels"][0]["enabled"], false);
+        assert_eq!(closed_json["channels"][1]["enabled"], false);
+
+        // 非法渠道标识、重复标识、超长渠道说明都要拒绝。
+        let too_long_channels = vec![DownloadChannelState {
+            key: "official".to_string(),
+            enabled: false,
+            note: "字".repeat(201),
+        }];
+        assert!(build_download_channels_payload(&too_long_channels, 444).is_err());
+        let bad_key = vec![DownloadChannelState {
+            key: "Bad Key".to_string(),
+            enabled: true,
+            note: String::new(),
+        }];
+        assert!(build_download_channels_payload(&bad_key, 445).is_err());
+        let duplicated = vec![
+            DownloadChannelState {
+                key: "official".to_string(),
+                enabled: true,
+                note: String::new(),
+            },
+            DownloadChannelState {
+                key: "official".to_string(),
+                enabled: false,
+                note: String::new(),
+            },
+        ];
+        assert!(build_download_channels_payload(&duplicated, 446).is_err());
+        assert!(build_download_channels_payload(&[], 447).is_err());
     }
 
     #[test]

@@ -668,6 +668,23 @@
   background: linear-gradient(90deg, rgba(142, 79, 70, 0.94), rgba(104, 59, 55, 0.92));
 }
 
+.developer-channel-list {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.developer-channel-row {
+  display: grid;
+  grid-template-columns: minmax(190px, max-content) 1fr;
+  align-items: center;
+  gap: 16px;
+}
+
+.developer-channel-note {
+  width: 100%;
+}
+
 .limit-row {
   display: flex;
   align-items: center;

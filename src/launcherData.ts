@@ -162,10 +162,10 @@ export const quickLinks: QuickLink[] = [
     compact: true,
   },
   {
-    key: "afdian",
-    labelKey: "quick.afdian",
-    tipKey: "quick.afdianTip",
-    iconSrc: "/launcher/icons/afdian.svg",
-    url: "https://ifdian.net/a/Akege304",
+    key: "bug-report",
+    labelKey: "quick.bugReport",
+    tipKey: "quick.bugReportTip",
+    iconSrc: "/launcher/icons/bug-report.svg",
+    url: "https://gitee.com/xiaojie578/CrossingVoid/issues",
   },
 ];

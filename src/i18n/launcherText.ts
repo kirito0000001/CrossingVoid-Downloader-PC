@@ -152,8 +152,8 @@ export type TranslationKey =
   | "quick.qq"
   | "quick.qqTip"
   | "quick.qqQrAlt"
-  | "quick.afdian"
-  | "quick.afdianTip"
+  | "quick.bugReport"
+  | "quick.bugReportTip"
   | "side.expand"
   | "side.collapse"
   | "install.title"
@@ -346,8 +346,8 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "quick.qq": "QQ",
     "quick.qqTip": "零境交错同好会",
     "quick.qqQrAlt": "零境交错同好会二维码",
-    "quick.afdian": "爱发电",
-    "quick.afdianTip": "支持作者（之后开放更多定制内容）",
+    "quick.bugReport": "BUG 提交",
+    "quick.bugReportTip": "遇到问题或有建议，来这里反馈",
     "side.expand": "展开左侧栏",
     "side.collapse": "收起左侧栏",
     "install.title": "选择安装路径",
@@ -528,8 +528,8 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "quick.qq": "QQ",
     "quick.qqTip": "零境交錯同好會",
     "quick.qqQrAlt": "零境交錯同好會 QR Code",
-    "quick.afdian": "愛發電",
-    "quick.afdianTip": "支持作者（之後開放更多客製內容）",
+    "quick.bugReport": "BUG 提交",
+    "quick.bugReportTip": "遇到問題或有建議，來這裡回報",
     "side.expand": "展開左側欄",
     "side.collapse": "收起左側欄",
     "install.title": "選擇安裝路徑",
@@ -710,8 +710,8 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "quick.qq": "QQ",
     "quick.qqTip": "Crossing Void Fan Group",
     "quick.qqQrAlt": "Crossing Void Fan Group QR code",
-    "quick.afdian": "Afdian",
-    "quick.afdianTip": "Support the creator",
+    "quick.bugReport": "Report a bug",
+    "quick.bugReportTip": "Found a problem or have a suggestion? Tell us here",
     "side.expand": "Expand sidebar",
     "side.collapse": "Collapse sidebar",
     "install.title": "Choose Install Path",
@@ -892,8 +892,8 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "quick.qq": "QQ",
     "quick.qqTip": "零境交錯ファングループ",
     "quick.qqQrAlt": "零境交錯ファングループ QR コード",
-    "quick.afdian": "Afdian",
-    "quick.afdianTip": "作者を支援",
+    "quick.bugReport": "不具合報告",
+    "quick.bugReportTip": "問題や要望があればこちらへ",
     "side.expand": "左サイドバーを展開",
     "side.collapse": "左サイドバーを折りたたむ",
     "install.title": "インストール先を選択",

@@ -16,6 +16,9 @@ export type SettingsContext = {
   dangerConfirmActionCopy: any;
   dangerConfirmBody: any;
   dangerConfirmTitle: any;
+  developerChannels: any;
+  developerChannelsPending: any;
+  developerChannelsStatus: any;
   developerGameTitle: any;
   developerGameVersion: any;
   developerNoticeContent: any;
@@ -28,6 +31,7 @@ export type SettingsContext = {
   developerVersionHint: any;
   developerVersionInput: any;
   downloadCancelPending: any;
+  downloadChannelNoticeText: any;
   downloadLimited: any;
   downloadSource: any;
   downloadSourceDisabled: any;
@@ -52,6 +56,7 @@ export type SettingsContext = {
   openGameChunkImportGuide: any;
   openLauncherLogFolder: any;
   openLocalGameFiles: any;
+  publishDeveloperDownloadChannels: any;
   publishDeveloperGamePackage: any;
   publishDeveloperLauncherPackage: any;
   publishDeveloperRemoteNotice: any;
@@ -59,6 +64,7 @@ export type SettingsContext = {
   requestCancelGameDownload: any;
   requestDeleteGame: any;
   requestUninstallLauncher: any;
+  restoreAllDeveloperDownloadChannels: any;
   saveDeveloperLauncherVersion: any;
   selectedDownloadSourceDescription: any;
   selectSettingsTab: any;
