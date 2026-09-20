@@ -702,11 +702,12 @@ function hideBootSplash() {
 
 async function initializePlatformPage() {
   const hasLauncherUpdate = await checkLauncherUpdate({ manual: false });
+  // 公告不受"必须先更新启动器"的限制，先拉一次再决定要不要继续初始化平台页。
+  await refreshRemoteLauncherNotice();
   if (hasLauncherUpdate || launcherUpdateGate.value !== "ready" || !isCrossingVoidActive.value) return;
   await checkGameVersion({ manual: false });
   await Promise.all([
     refreshTrafficQuota(),
-    refreshRemoteLauncherNotice(),
     ...(downloadSource.value === "github" ? [refreshGithubNetworkStatus()] : []),
   ]);
   if (trafficQuotaRefreshTimer === undefined) {
@@ -1805,7 +1806,9 @@ async function fetchRemoteLauncherNotice() {
 }
 
 async function refreshRemoteLauncherNotice() {
-  if (!isCrossingVoidActive.value || launcherNetworkLocked.value) return;
+  // 公告是运营的通知渠道，不跟着"必须先更新启动器"的网络锁一起禁掉：
+  // 恰恰在有更新待装时，玩家更需要看到"维护公告/暂不开放下载"这类信息。
+  if (!isCrossingVoidActive.value) return;
   try {
     const notice = await fetchRemoteLauncherNotice();
     remoteLauncherNotice.value = notice;
@@ -4094,7 +4097,7 @@ provide(settingsContextKey, settingsContext);
               <strong v-if="repairMissingDetail" class="download-size repair-missing-detail">
                 <span>{{ repairMissingDetail }}</span>
               </strong>
-              <strong v-if="gamePackageProgressDetail" class="download-size game-package-files">
+              <strong v-if="gamePackageProgressDetail" class="download-size">
                 <span>{{ gamePackageProgressDetail }}</span>
               </strong>
               <strong v-if="downloadEstimateCopy" class="download-time">{{ downloadEstimateCopy }}</strong>
@@ -4426,3 +4429,4 @@ a,
 <style scoped src="./styles/action-dock.css"></style>
 <style scoped src="./styles/install-dialogs.css"></style>
 <style scoped src="./styles/confirm-dialog.css"></style>
+<style scoped src="./styles/remote-notice.css"></style>

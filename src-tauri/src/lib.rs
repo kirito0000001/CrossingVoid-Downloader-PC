@@ -29,6 +29,7 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 
 static DOWNLOAD_CANCELLED: AtomicBool = AtomicBool::new(false);
 mod game_package;
+mod webview_cleanup;
 
 static DOWNLOAD_SPEED_LIMIT_BYTES_PER_SECOND: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -4339,6 +4340,41 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+/// 清理残留 WebView2 之后写一行诊断日志，方便事后核对"卡死是不是这个原因"。
+fn log_webview_cleanup<R: tauri::Runtime>(app: &tauri::AppHandle<R>, killed: usize) {
+    let Ok(log_dir) = app.path().app_log_dir() else {
+        return;
+    };
+    if fs::create_dir_all(&log_dir).is_err() {
+        return;
+    }
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or_default();
+    let line = format!("[{seconds}] 清理残留 WebView2 进程 {killed} 个（宿主已死）\n");
+    let path = log_dir.join("webview-cleanup.log");
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
+/// 主窗口建立之前清掉"宿主已死"的 WebView2 残留进程。
+///
+/// WebView2 是按 user-data-dir 复用浏览器进程的：新实例一旦接到死实例留下的孤儿宿主上，
+/// 页面就永远起不来（整窗卡死、线程全 Wait、CPU 不涨），所以必须在窗口创建前处理。
+fn webview_cleanup_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
+    tauri::plugin::Builder::new("cv-webview-cleanup")
+        .setup(|app, _api| {
+            let killed = webview_cleanup::cleanup_stale_webview_hosts();
+            if killed > 0 {
+                log_webview_cleanup(app, killed);
+            }
+            Ok(())
+        })
+        .build()
+}
+
 pub fn run() {
     tauri::Builder::default()
         // 单实例必须最先注册：再次点击启动器图标时，第二个进程会把已经藏起来的窗口叫回来，
@@ -4346,6 +4382,7 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);
         }))
+        .plugin(webview_cleanup_plugin())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())

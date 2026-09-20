@@ -199,6 +199,40 @@ B 的官方写法是用 `_P.pak` 命名（引擎会给 patch pak 提优先级）
 
 **本期决定**：走 A。理由是"下载量一样、代价只是本地几十秒，换来的是没有歧义"。B 留到真机验证之后再做，那时它是纯优化，不改任何接口。
 
+### 6.1 组装 OBB 的一条硬约束（实现时必须遵守）
+
+更新时只下 sha256 变了的条目，**没变的条目本地并没有散文件**——它们只在已安装的 OBB 里。
+所以组装新 OBB 时：
+
+| 该条目 | 字节从哪里来 |
+| --- | --- |
+| 这次下载了 | 下载目录里的那份 |
+| 没下载 | 从**现有 OBB** 里按同名条目搬 |
+| 两边都没有 | 报错并点名条目（宁可失败，也不要组装出缺文件的 OBB） |
+
+不遵守这条，每次更新都得先把 2 GB 的旧条目重新下一遍。PC 端不存在这个问题（文件本来就在安装目录里）。
+
+### 6.2 安卓实现进度（2026-09-20）
+
+| 步骤 | 状态 |
+| --- | --- |
+| 共用内核 `src/services/gamePackage.ts`（与 PC 逐字相同，LF sha256 `57cc72b0…`） | ✅ 已落地，两边各有哈希守卫测试 |
+| v1 服务层 `src/services/gamePackageUpdate.ts`：latest → 清单 → OBB 旁车 → 差异计划（含 `needsObbRebuild` 判定） | ✅ 已落地（9 项单测） |
+| 原生计划模型 `GamePackagePlan.java`（路径/sha256/大小/URL/旁车条目校验） | ✅ 已落地（6 项单测） |
+| 原生 OBB 组装 `ObbAssembler.java`（STORED + 复用旧 OBB 条目，见 6.1） | ✅ 已落地（5 项单测） |
+| `GameDownloadService` 按文件下载（Range + sha256 + 落位）+ `ObbAssembler` 组装 + 复用原有 APK 安装 | ✅ 已落地 |
+| App.vue / `androidLauncher.ts` 桥接切到新计划；默认下载源改成 official | ✅ 已落地 |
+| 导入/导出（按 files 走目录） | ⏳ 暂缓：入口保留，点击提示"正在适配新的文件级清单" |
+| 真机验收（首次安装能起、改一个 pak 只下那一个、OBB 能被引擎读到） | ⏳ 需要设备 |
+
+> 原生实现要点：插件按计划形状路由（带 `files[]` → 新的 `ACTION_START_PACKAGE`，带 `chunks[]` → 老的切片流程），
+> 所以过渡期两条都能跑；安装成功后状态里会写回 `packageFiles`（清单全量的 path/size/sha256），
+> 下次更新就用它算差异。切换下载源到 GitHub 会明确报"未适配新清单"，不会静默拿 dl 的文件冒充。
+
+> **本机跑 Java 单测**：`JAVA_HOME` 要指到 JDK 21（PATH 里的 java 是 21，但 `JAVA_HOME` 是 17，
+> 用 17 会报 `无效的源发行版：21`）：
+> `$env:JAVA_HOME='C:\Program Files\Eclipse Adoptium\jdk-21.0.11.10-hotspot'; cd android; .\gradlew.bat :app:testDebugUnitTest`
+
 ---
 
 ## 七、验收（做完拿这几条自检）
