@@ -32,7 +32,21 @@ import {
   type LauncherUpdateGate,
 } from "./launcherNetworkPolicy";
 import { createPlatformLauncher } from "./platform/platformLauncher";
-import type { PlatformGameId } from "./platform/gameCatalog";
+import { getGamePackageConfig, type PlatformGameId } from "./platform/gameCatalog";
+import {
+  GamePackageError,
+  assertNoGamePackageDowngrade,
+  buildGamePackagePlan,
+  describeGamePackageError,
+  gamePackageManifestUrl,
+  parseGamePackageManifest,
+  parseGamePackageState,
+  parseLatestPointer,
+  withCacheBuster,
+  type GamePackageFile,
+  type GamePackageManifest,
+  type GamePackagePlan,
+} from "./gamePackage";
 import {
   activateGameOverviewItem,
   openGameOverview,
@@ -253,6 +267,11 @@ const pendingRepairSummary = ref<ManifestVerifySummary | null>(
 const updateAvailable = ref(false);
 const updateDownloadPending = ref(savedDownloadState?.mode === "update");
 const localGameVersion = ref("");
+/** 文件级游戏包（清单 v1）：本次要装的清单与差异计划。 */
+const activeGamePackage = shallowRef<GamePackageManifest | null>(null);
+const activeGamePackagePlan = shallowRef<GamePackagePlan | null>(null);
+/** 进度条上的"已完成/总数（按文件）"，由 Rust 的进度事件带过来。 */
+const gamePackageFileProgress = ref({ done: 0, total: 0 });
 const remoteGameVersion = ref("");
 const lastCheckMessage = ref("");
 const trafficQuota = ref<TrafficQuotaResponse | null>(null);
@@ -1192,6 +1211,12 @@ const installProgressDetail = computed(() => {
   }
   return "";
 });
+const gamePackageProgressDetail = computed(() => {
+  if (launcherState.value !== "downloading") return "";
+  const progress = gamePackageFileProgress.value;
+  if (progress.total <= 0) return "";
+  return `${Math.min(progress.done, progress.total)}/${progress.total} 个文件`;
+});
 const repairProgressDetail = computed(() => {
   if (launcherState.value === "repairPending" && pendingRepairSummary.value) {
     const total = Math.max(0, pendingRepairSummary.value.checkedFiles || 0);
@@ -1888,11 +1913,173 @@ async function resolveBackendChunks(version: string, runtime: string, chunks?: B
   return resolved.sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
 }
 
+// ——— 文件级游戏包（清单 v1）：与 Android 共用同一套内核 ———
+// 下载站 → latest.json → 清单 → 本地状态/扫描 → 差异计划，全部走 src/gamePackage.ts。
+// 还没有接入下载站的游戏仍然走下面的 v2 切片链路（downloadLegacyGameArchive）。
+
+function currentGamePackageConfig() {
+  return getGamePackageConfig(activeGameId.value);
+}
+
+async function fetchGamePackageManifest(): Promise<GamePackageManifest> {
+  const config = currentGamePackageConfig();
+  if (!config) {
+    throw new GamePackageError("manifest-invalid", "当前游戏还没有接入下载站。");
+  }
+  const pointer = parseLatestPointer(
+    await fetchRemoteJson<unknown>(withCacheBuster(gamePackageManifestUrl(config.productSegment))),
+  );
+  return parseGamePackageManifest(
+    await fetchRemoteJson<unknown>(withCacheBuster(pointer.manifestUrl)),
+    { productKey: config.productKey, runtime: config.runtime },
+  );
+}
+
+/**
+ * 本地状态 → 差异计划。
+ * 没有状态文件时（老安装升上来）先逐文件哈希一次，玩家就不必重下已有的文件。
+ */
+async function resolveGamePackagePlan(manifest: GamePackageManifest) {
+  const rawState = await invoke<unknown | null>("read_game_package_state", {
+    installPath: installPath.value,
+  });
+  const state = parseGamePackageState(rawState);
+  const scanned = state
+    ? null
+    : await invoke<GamePackageFile[]>("scan_local_game_package", {
+        installPath: installPath.value,
+        files: manifest.files,
+      });
+  const plan = buildGamePackagePlan(
+    manifest,
+    state?.files ?? scanned,
+    state?.files.map((entry) => entry.path) ?? [],
+  );
+  return { state, plan };
+}
+
+async function resolveGamePackage() {
+  const manifest = await fetchGamePackageManifest();
+  assertNoGamePackageDowngrade(manifest, localGameVersion.value);
+  const { plan } = await resolveGamePackagePlan(manifest);
+  activeGamePackage.value = manifest;
+  activeGamePackagePlan.value = plan;
+  return { manifest, plan };
+}
+
+/** 文件级下载：只下 sha256 变了的文件；`.part`、Range 续传、sha256 校验都在 Rust 侧。 */
+async function downloadGamePackageFiles() {
+  const { manifest, plan } = await resolveGamePackage();
+  activeDownloadBytes.value =
+    plan.totalBytes || remoteArchiveBytes.value || fallbackRequiredInstallBytes;
+  remoteArchiveBytes.value = activeDownloadBytes.value;
+  downloadedBytes.value = 0;
+  downloadedMb.value = 0;
+  gamePackageFileProgress.value = {
+    done: Math.max(0, manifest.files.length - plan.download.length),
+    total: manifest.files.length,
+  };
+  downloadEstimate.value = downloadTimeEstimator.record(
+    0,
+    activeDownloadBytes.value,
+    performance.now(),
+  );
+  persistDownloadState("paused", "immediate");
+
+  if (plan.download.length > 0) {
+    await invoke("download_game_package", {
+      installPath: installPath.value,
+      baseUrl: manifest.baseUrl,
+      files: plan.download,
+      concurrency: 4,
+    });
+  }
+
+  downloadedBytes.value = activeDownloadBytes.value;
+  downloadedMb.value = bytesToMb(downloadedBytes.value);
+  gamePackageFileProgress.value = {
+    done: manifest.files.length,
+    total: manifest.files.length,
+  };
+}
+
+/** 文件已经落位，安装阶段只剩：清旧文件（白名单）→ 写状态文件 → 复核 ready。 */
+async function finalizeGamePackageInstall() {
+  const manifest = activeGamePackage.value;
+  if (!manifest) throw new GamePackageError("manifest-invalid", "还没有取得游戏清单。");
+
+  gameOperationCancelRequested.value = false;
+  try {
+    launcherState.value = "installing";
+    installProgressPercent.value = 0;
+    installProgressStage.value = "verifying";
+    installProgressItems.value = null;
+    downloadPauseRequested.value = false;
+    await ensureInstallProgressListener();
+
+    const prunePaths = activeGamePackagePlan.value?.prune ?? [];
+    if (prunePaths.length > 0) {
+      await invoke("prune_game_package", {
+        installPath: installPath.value,
+        paths: prunePaths,
+      });
+    }
+
+    await invoke("write_game_package_state", {
+      installPath: installPath.value,
+      productKey: manifest.productKey,
+      version: manifest.version,
+      files: manifest.files,
+    });
+
+    const installReady = await invoke<boolean>("validate_game_install_state", {
+      installPath: installPath.value,
+      state: "ready",
+    });
+    if (!installReady) {
+      throw new Error("游戏文件已就位，但安装校验没有通过。");
+    }
+
+    if (createDesktopShortcut.value) {
+      await invoke("create_game_desktop_shortcut_now", { installPath: installPath.value }).catch(
+        (error) => console.warn("Unable to create desktop shortcut", error),
+      );
+    }
+    await invoke("install_vc_redist", { installPath: installPath.value }).catch((error) =>
+      console.warn("Unable to install VC redist", error),
+    );
+
+    const installedBytes = activeDownloadBytes.value ?? 0;
+    downloadedBytes.value = installedBytes;
+    downloadedMb.value = bytesToMb(installedBytes);
+    launcherState.value = "ready";
+    clearUpdateDownloadContext();
+    persistDownloadState("ready", "immediate");
+    await readLocalGameVersion();
+  } catch (error) {
+    console.error("Game install failed", error);
+    launcherState.value = "downloaded";
+    installProgressPercent.value = 0;
+    installProgressItems.value = null;
+    persistDownloadState("downloaded", "immediate");
+    showSettings.value = false;
+    showInstallConfirm.value = false;
+    showMenu.value = false;
+    showCheckResult(`安装游戏失败：${describeGamePackageError(error)}`);
+  }
+}
+
 async function updateRemoteArchiveInfo() {
   remoteArchivePending.value = true;
   try {
-    const info = await fetchGameMetadataArchiveInfo();
-    remoteArchiveBytes.value = info.sizeBytes || null;
+    if (currentGamePackageConfig()) {
+      const manifest = await fetchGamePackageManifest();
+      const total = manifest.files.reduce((sum, entry) => sum + entry.sizeBytes, 0);
+      remoteArchiveBytes.value = total || null;
+    } else {
+      const info = await fetchGameMetadataArchiveInfo();
+      remoteArchiveBytes.value = info.sizeBytes || null;
+    }
   } catch (error) {
     console.warn("Unable to query remote archive info", error);
     remoteArchiveBytes.value = null;
@@ -2424,6 +2611,12 @@ async function ensureDownloadProgressListener() {
   downloadProgressUnlisten = await listen<DownloadProgressEvent>("game-download-progress", (event) => {
     if (launcherState.value !== "downloading" && launcherState.value !== "repairing") return;
     const payload = event.payload;
+    if (typeof payload.doneFiles === "number" && typeof payload.totalFiles === "number") {
+      gamePackageFileProgress.value = {
+        done: Math.max(0, payload.doneFiles),
+        total: Math.max(0, payload.totalFiles),
+      };
+    }
     const totalBytes = payload.totalBytes || activeDownloadBytes.value || remoteArchiveBytes.value || fallbackRequiredInstallBytes;
     const nextDownloadedBytes = Math.max(0, payload.downloadedBytes || 0);
     activeDownloadBytes.value = totalBytes;
@@ -2535,29 +2728,11 @@ async function downloadGameArchive() {
   gameDownloadActive.value = true;
   try {
     await ensureDownloadProgressListener();
-    const archive = await resolveDownloadArchiveInfo(requestedSource);
-    activeDownloadBytes.value = archive.sizeBytes || remoteArchiveBytes.value || fallbackRequiredInstallBytes;
-    remoteArchiveBytes.value = activeDownloadBytes.value;
-    if (downloadedBytes.value <= 0) {
-      downloadedBytes.value = 0;
-      downloadedMb.value = 0;
+    if (currentGamePackageConfig()) {
+      await downloadGamePackageFiles();
+    } else {
+      await downloadLegacyGameArchive(requestedSource);
     }
-    downloadEstimate.value = downloadTimeEstimator.record(
-      downloadedBytes.value,
-      activeDownloadBytes.value,
-      performance.now(),
-    );
-    persistDownloadState("paused", "immediate");
-    await invoke("download_game_archive", {
-      url: archive.url,
-      installPath: installPath.value,
-      expectedSize: archive.sizeBytes,
-      fileName: archive.fileName,
-      chunks: archive.chunks ?? [],
-      speedLimitBytesPerSecond: getDownloadSpeedLimitBytes(),
-    });
-    downloadedBytes.value = activeDownloadBytes.value ?? archive.sizeBytes;
-    downloadedMb.value = bytesToMb(downloadedBytes.value);
     installStage.value = "downloaded";
     launcherState.value = "downloaded";
     updateAvailable.value = false;
@@ -2565,6 +2740,9 @@ async function downloadGameArchive() {
   } catch (error) {
     if (!downloadPauseRequested.value && String(error) !== "DOWNLOAD_CANCELLED") {
       console.error("Game download failed", error);
+      if (error instanceof GamePackageError) {
+        showCheckResult(describeGamePackageError(error));
+      }
     }
     launcherState.value = "paused";
     persistDownloadState("paused", "immediate");
@@ -2574,7 +2752,38 @@ async function downloadGameArchive() {
   }
 }
 
+/** v2 切片链路：只服务还没接入下载站的游戏。 */
+async function downloadLegacyGameArchive(requestedSource: DownloadSourceKey) {
+  const archive = await resolveDownloadArchiveInfo(requestedSource);
+  activeDownloadBytes.value = archive.sizeBytes || remoteArchiveBytes.value || fallbackRequiredInstallBytes;
+  remoteArchiveBytes.value = activeDownloadBytes.value;
+  if (downloadedBytes.value <= 0) {
+    downloadedBytes.value = 0;
+    downloadedMb.value = 0;
+  }
+  downloadEstimate.value = downloadTimeEstimator.record(
+    downloadedBytes.value,
+    activeDownloadBytes.value,
+    performance.now(),
+  );
+  persistDownloadState("paused", "immediate");
+  await invoke("download_game_archive", {
+    url: archive.url,
+    installPath: installPath.value,
+    expectedSize: archive.sizeBytes,
+    fileName: archive.fileName,
+    chunks: archive.chunks ?? [],
+    speedLimitBytesPerSecond: getDownloadSpeedLimitBytes(),
+  });
+  downloadedBytes.value = activeDownloadBytes.value ?? archive.sizeBytes;
+  downloadedMb.value = bytesToMb(downloadedBytes.value);
+}
+
 async function installDownloadedGameArchive() {
+  if (activeGamePackage.value) {
+    await finalizeGamePackageInstall();
+    return;
+  }
   gameOperationCancelRequested.value = false;
   try {
     const archive = await fetchGameMetadataArchiveInfo();
@@ -3884,6 +4093,9 @@ provide(settingsContextKey, settingsContext);
               </strong>
               <strong v-if="repairMissingDetail" class="download-size repair-missing-detail">
                 <span>{{ repairMissingDetail }}</span>
+              </strong>
+              <strong v-if="gamePackageProgressDetail" class="download-size game-package-files">
+                <span>{{ gamePackageProgressDetail }}</span>
               </strong>
               <strong v-if="downloadEstimateCopy" class="download-time">{{ downloadEstimateCopy }}</strong>
               <b v-if="showProgressNumbers">{{ progressPercent }}%</b>

@@ -28,6 +28,8 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
 };
 
 static DOWNLOAD_CANCELLED: AtomicBool = AtomicBool::new(false);
+mod game_package;
+
 static DOWNLOAD_SPEED_LIMIT_BYTES_PER_SECOND: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 #[cfg(debug_assertions)]
@@ -58,6 +60,11 @@ struct DownloadProgress {
     downloaded_bytes: u64,
     total_bytes: u64,
     percent: f64,
+    /// 文件级下载（v1）才有的计数；旧的切片下载不带这两个字段。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    done_files: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_files: Option<u64>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1372,6 +1379,33 @@ async fn install_downloaded_game_archive(
 }
 
 fn emit_download_progress(app: &AppHandle, downloaded_bytes: u64, total_bytes: u64) {
+    emit_progress_event(app, downloaded_bytes, total_bytes, None, None);
+}
+
+/// 文件级下载（v1）的进度：多带"已完成/总数（按文件）"。
+fn emit_game_package_progress(
+    app: &AppHandle,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    done_files: u64,
+    total_files: u64,
+) {
+    emit_progress_event(
+        app,
+        downloaded_bytes,
+        total_bytes,
+        Some(done_files),
+        Some(total_files),
+    );
+}
+
+fn emit_progress_event(
+    app: &AppHandle,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    done_files: Option<u64>,
+    total_files: Option<u64>,
+) {
     let percent = if total_bytes > 0 {
         ((downloaded_bytes as f64 / total_bytes as f64) * 100.0).clamp(0.0, 100.0)
     } else {
@@ -1383,6 +1417,8 @@ fn emit_download_progress(app: &AppHandle, downloaded_bytes: u64, total_bytes: u
             downloaded_bytes,
             total_bytes,
             percent,
+            done_files,
+            total_files,
         },
     );
 }
@@ -4374,6 +4410,11 @@ pub fn run() {
             download_game_archive,
             import_game_chunks,
             install_downloaded_game_archive,
+            game_package::scan_local_game_package,
+            game_package::download_game_package,
+            game_package::prune_game_package,
+            game_package::read_game_package_state,
+            game_package::write_game_package_state,
             dev_get_launcher_version,
             dev_get_published_launcher_version,
             dev_set_launcher_version,

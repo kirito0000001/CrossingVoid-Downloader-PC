@@ -19,6 +19,18 @@ export type PlatformGameDefinition = {
   brandLogoSrc: string | null;
   backgroundSrc: string | null;
   implemented: boolean;
+  /** 下载站（dl.crossingvoid.top）配置；没接入的游戏为 null。 */
+  gamePackage: GamePackageConfig | null;
+};
+
+export type GamePackageConfig = {
+  /** dl 上的产品段，例如 crossingvoid / crossingvoid-android。 */
+  productSegment: string;
+  /** 清单里的 productKey，必须与 productSegment 一一对应。 */
+  productKey: string;
+  runtime: "Windows" | "Android";
+  /** 版本标记文件，落位后由启动器读取（诊断用）。 */
+  versionMarker: string;
 };
 
 export const DEFAULT_PLATFORM_GAME_ID: PlatformGameId = "crossing-void";
@@ -35,6 +47,7 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
     brandLogoSrc: null,
     backgroundSrc: null,
     implemented: false,
+    gamePackage: null,
   },
   {
     id: "crossing-void",
@@ -47,6 +60,12 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
     brandLogoSrc: "/launcher/logo_white.png",
     backgroundSrc: "/launcher/hero-bg.jpeg",
     implemented: true,
+    gamePackage: {
+      productSegment: "crossingvoid",
+      productKey: "crossingvoid-game",
+      runtime: "Windows",
+      versionMarker: "CrossingVoid.version.json",
+    },
   },
   {
     id: "fantasy-kill",
@@ -59,6 +78,7 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
     brandLogoSrc: null,
     backgroundSrc: null,
     implemented: false,
+    gamePackage: null,
   },
   {
     id: "naruto-bp",
@@ -71,6 +91,7 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
     brandLogoSrc: null,
     backgroundSrc: null,
     implemented: false,
+    gamePackage: null,
   },
   {
     id: "white-love",
@@ -83,6 +104,7 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
     brandLogoSrc: null,
     backgroundSrc: null,
     implemented: false,
+    gamePackage: null,
   },
 ] as const;
 
@@ -92,4 +114,8 @@ export function isPlatformGameId(value: unknown): value is PlatformGameId {
 
 export function getPlatformGame(id: PlatformGameId) {
   return PLATFORM_GAMES.find((game) => game.id === id) ?? PLATFORM_GAMES[1];
+}
+
+export function getGamePackageConfig(id: PlatformGameId): GamePackageConfig | null {
+  return getPlatformGame(id).gamePackage;
 }

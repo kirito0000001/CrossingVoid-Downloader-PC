@@ -123,6 +123,9 @@ export type DownloadProgressEvent = {
   downloadedBytes: number;
   totalBytes: number;
   percent: number;
+  /** 文件级下载（清单 v1）才有的计数；切片下载不带这两个字段。 */
+  doneFiles?: number;
+  totalFiles?: number;
 };
 export type RepairSummary = {
   checkedFiles: number;
