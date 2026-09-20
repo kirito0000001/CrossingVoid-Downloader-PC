@@ -243,9 +243,63 @@ function Invoke-RemotePowerShell {
     )
 
     $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($Script))
-    & ssh $Target "powershell -NoProfile -EncodedCommand $encoded"
-    if ($LASTEXITCODE -ne 0) {
-        throw "远端 PowerShell 执行失败，ssh exit code $LASTEXITCODE"
+    $result = Invoke-OpenSshProcess -ExecutableName 'ssh.exe' -Arguments @(
+        '-o', 'BatchMode=yes',
+        '-o', 'ConnectTimeout=10',
+        $Target,
+        "powershell -NoProfile -EncodedCommand $encoded"
+    )
+    if ($result.ExitCode -ne 0) {
+        $errorDetail = if ([string]::IsNullOrWhiteSpace($result.StandardError)) {
+            ''
+        } else {
+            "；$($result.StandardError.Trim())"
+        }
+        throw "远端 PowerShell 执行失败，ssh exit code $($result.ExitCode)$errorDetail"
+    }
+    if (![string]::IsNullOrWhiteSpace($result.StandardOutput)) {
+        Write-Output $result.StandardOutput.TrimEnd()
+    }
+}
+
+function Invoke-OpenSshProcess {
+    param(
+        [ValidateSet('ssh.exe', 'scp.exe')]
+        [string]$ExecutableName,
+        [string[]]$Arguments
+    )
+
+    $command = Get-Command $ExecutableName -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $command.Source
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.StandardOutputEncoding = [Text.UTF8Encoding]::new($false)
+    $startInfo.StandardErrorEncoding = [Text.UTF8Encoding]::new($false)
+    foreach ($argument in $Arguments) {
+        [void]$startInfo.ArgumentList.Add($argument)
+    }
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        [void]$process.Start()
+        $process.StandardInput.Close()
+        $standardOutputTask = $process.StandardOutput.ReadToEndAsync()
+        $standardErrorTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            StandardOutput = $standardOutputTask.GetAwaiter().GetResult()
+            StandardError = $standardErrorTask.GetAwaiter().GetResult()
+        }
+    }
+    finally {
+        $process.Dispose()
     }
 }
 
@@ -268,12 +322,22 @@ if (Test-Path -LiteralPath `$path -PathType Leaf) {
 }
 "@
     $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($remoteScript))
-    $output = & ssh $Target "powershell -NoProfile -EncodedCommand $encoded"
-    if ($LASTEXITCODE -ne 0) {
-        throw "读取服务器旧清单失败：$RemoteUpdateJsonPath，ssh exit code $LASTEXITCODE"
+    $result = Invoke-OpenSshProcess -ExecutableName 'ssh.exe' -Arguments @(
+        '-o', 'BatchMode=yes',
+        '-o', 'ConnectTimeout=10',
+        $Target,
+        "powershell -NoProfile -EncodedCommand $encoded"
+    )
+    if ($result.ExitCode -ne 0) {
+        $errorDetail = if ([string]::IsNullOrWhiteSpace($result.StandardError)) {
+            ''
+        } else {
+            "；$($result.StandardError.Trim())"
+        }
+        throw "读取服务器旧清单失败：$RemoteUpdateJsonPath，ssh exit code $($result.ExitCode)$errorDetail"
     }
 
-    $json = ($output -join [Environment]::NewLine).Trim()
+    $json = $result.StandardOutput.Trim()
     if ([string]::IsNullOrWhiteSpace($json)) {
         return $null
     }
@@ -352,9 +416,19 @@ function Copy-BackendManifestToServer {
     }
 
     $remoteTempPath = "C:\Windows\Temp\crossingvoid-launcher-update.$([Guid]::NewGuid().ToString('N')).json"
-    & scp $ManifestPath "${Target}:$remoteTempPath"
-    if ($LASTEXITCODE -ne 0) {
-        throw "上传后端清单到服务器失败，scp exit code $LASTEXITCODE"
+    $copyResult = Invoke-OpenSshProcess -ExecutableName 'scp.exe' -Arguments @(
+        '-o', 'BatchMode=yes',
+        '-o', 'ConnectTimeout=10',
+        $ManifestPath,
+        "${Target}:$remoteTempPath"
+    )
+    if ($copyResult.ExitCode -ne 0) {
+        $errorDetail = if ([string]::IsNullOrWhiteSpace($copyResult.StandardError)) {
+            ''
+        } else {
+            "；$($copyResult.StandardError.Trim())"
+        }
+        throw "上传后端清单到服务器失败，scp exit code $($copyResult.ExitCode)$errorDetail"
     }
 
     $remoteScript = @"

@@ -369,6 +369,19 @@ fn dev_get_launcher_version() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+fn dev_get_published_launcher_version() -> Result<Option<String>, String> {
+    #[cfg(not(debug_assertions))]
+    {
+        Ok(None)
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        read_published_launcher_version(&dev_project_root()?)
+    }
+}
+
+#[tauri::command]
 fn dev_set_launcher_version(version: String) -> Result<String, String> {
     #[cfg(not(debug_assertions))]
     {
@@ -3497,6 +3510,37 @@ fn write_dev_launcher_version(project_root: &Path, version: &str) -> Result<(), 
         .map_err(|error| format!("Unable to replace {}: {}", path.display(), error))
 }
 
+/// 最近一次打包出来的更新清单，代表“平台上真正发布过的版本”。
+///
+/// 开发版本文件（Saved/Launcher/developer-version.json）只记录开发者手动抬的版本，
+/// 它可能长期停在旧值上；只信它会让开发页把一个早就过期的数字当成当前版本。
+#[cfg(debug_assertions)]
+fn published_launcher_manifest_path(project_root: &Path) -> PathBuf {
+    project_root
+        .join("dist-launcher-update")
+        .join("latest.json")
+}
+
+#[cfg(debug_assertions)]
+fn read_published_launcher_version(project_root: &Path) -> Result<Option<String>, String> {
+    let path = published_launcher_manifest_path(project_root);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let text = fs::read_to_string(&path)
+        .map_err(|error| format!("Unable to read {}: {}", path.display(), error))?;
+    let json: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|error| format!("Unable to parse {}: {}", path.display(), error))?;
+    let version = json
+        .get("version")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| is_safe_semver(value));
+
+    Ok(version.map(str::to_string))
+}
+
 #[cfg(debug_assertions)]
 fn build_remote_notice_payload(
     title: &str,
@@ -4222,8 +4266,50 @@ fn platform_available_space(_path: &str) -> Result<u64, String> {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// 直接把窗口落到 Win32 层显示。
+///
+/// Tauri 只在它自己的「可见」标记发生变化时才真的调用 ShowWindow，
+/// 一旦标记和窗口真实状态不一致（窗口被系统藏起来、或状态被外部改动），
+/// 光调 show() 会什么都不做，所以这里补一次系统级调用兜底。
+#[cfg(target_os = "windows")]
+fn force_show_window(window: &tauri::WebviewWindow) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+    };
+
+    let Ok(handle) = window.hwnd() else {
+        return;
+    };
+    let hwnd = handle.0 as windows_sys::Win32::Foundation::HWND;
+
+    unsafe {
+        if IsIconic(hwnd) != 0 {
+            ShowWindow(hwnd, SW_RESTORE);
+        } else {
+            ShowWindow(hwnd, SW_SHOW);
+        }
+        SetForegroundWindow(hwnd);
+    }
+}
+
+/// 把主窗口从托盘/最小化状态叫回前台：托盘点击和“重复启动”都走这一条路径。
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        #[cfg(target_os = "windows")]
+        force_show_window(&window);
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
+        // 单实例必须最先注册：再次点击启动器图标时，第二个进程会把已经藏起来的窗口叫回来，
+        // 然后自己退出，而不是并排再开一个启动器。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main_window(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_process::init())
@@ -4245,13 +4331,7 @@ pub fn run() {
                     | TrayIconEvent::DoubleClick {
                         button: MouseButton::Left,
                         ..
-                    } => {
-                        if let Some(window) = tray.app_handle().get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.unminimize();
-                            let _ = window.set_focus();
-                        }
-                    }
+                    } => show_main_window(tray.app_handle()),
                     _ => {}
                 })
                 .build(app)?;
@@ -4295,6 +4375,7 @@ pub fn run() {
             import_game_chunks,
             install_downloaded_game_archive,
             dev_get_launcher_version,
+            dev_get_published_launcher_version,
             dev_set_launcher_version,
             dev_publish_remote_notice,
             dev_run_launcher_script,
@@ -4459,6 +4540,42 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&package_json).expect("read package json"),
             "{\"version\":\"1.0.3\"}\n"
+        );
+
+        fs::remove_dir_all(root).expect("remove test project");
+    }
+
+    #[test]
+    fn published_launcher_version_comes_from_the_release_manifest() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "cv-launcher-published-version-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let manifest_dir = root.join("dist-launcher-update");
+        fs::create_dir_all(&manifest_dir).expect("create manifest folder");
+
+        assert_eq!(
+            read_published_launcher_version(&root).expect("read missing manifest"),
+            None
+        );
+
+        let manifest_path = manifest_dir.join("latest.json");
+        fs::write(&manifest_path, "{\"version\":\"1.2.4\"}\n").expect("write release manifest");
+        assert_eq!(
+            read_published_launcher_version(&root).expect("read published version"),
+            Some("1.2.4".to_string())
+        );
+
+        fs::write(&manifest_path, "{\"version\":\"not-a-version\"}\n")
+            .expect("write invalid manifest");
+        assert_eq!(
+            read_published_launcher_version(&root).expect("ignore unusable version"),
+            None
         );
 
         fs::remove_dir_all(root).expect("remove test project");

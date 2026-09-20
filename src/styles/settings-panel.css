@@ -752,6 +752,18 @@
   color: rgba(58, 55, 50, 0.95);
   font-size: 17px;
   font-weight: 950;
+  transition:
+    color 150ms ease,
+    background 170ms ease,
+    box-shadow 170ms ease,
+    filter 170ms ease;
+}
+
+.remote-notice-panel > button:hover {
+  background: #f3d789;
+  color: rgba(43, 44, 42, 0.94);
+  box-shadow: 0 0 18px rgba(243, 215, 137, 0.26);
+  filter: brightness(1.02);
 }
 
 .limit-row {

@@ -1323,6 +1323,7 @@ function selectSettingsTab(tab: SettingsTab) {
   activeSettingsTab.value = tab;
   if (tab === "developer") {
     void refreshDeveloperRemoteNotice();
+    void refreshDeveloperLauncherVersion();
   }
 }
 

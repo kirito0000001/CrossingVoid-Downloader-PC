@@ -142,15 +142,24 @@ export function useDeveloperConsole(host: DeveloperConsoleHost) {
   async function refreshDeveloperLauncherVersion() {
     if (!isDevToolsAvailable()) return;
     try {
-      const savedVersion = await invoke<string | null>("dev_get_launcher_version");
-      if (!savedVersion || !isSafeSemver(savedVersion)) return;
-      launcherVersion.value = savedVersion;
-      developerVersionInput.value = savedVersion;
+      // 两个来源各自失败都不影响另一个：旧构建里还没有新命令时也要能显示版本。
+      const [savedVersion, publishedVersion] = await Promise.all([
+        invoke<string | null>("dev_get_launcher_version").catch(() => null),
+        invoke<string | null>("dev_get_published_launcher_version").catch(() => null),
+      ]);
+      // 平台当前版本取「本地开发版本文件」和「最近一次发布清单」里更高的那个：
+      // 只看开发版本文件会被一份停更的数字骗到，只看发布清单又会漏掉已经手动抬高的版本。
+      const currentVersion = [savedVersion, publishedVersion]
+        .map((value) => (typeof value === "string" ? value.trim() : ""))
+        .filter((value) => isSafeSemver(value))
+        .reduce((highest, value) => (compareVersions(value, highest) > 0 ? value : highest), "");
+      if (!currentVersion) return;
+      launcherVersion.value = currentVersion;
+      developerVersionInput.value = currentVersion;
     } catch (error) {
       console.warn("Unable to read developer launcher version", error);
     }
   }
-  
   async function chooseDeveloperPackagePath() {
     if (!isDevToolsAvailable()) return;
     const selected = await open({
