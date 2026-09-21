@@ -195,29 +195,30 @@
   font-weight: 700;
 }
 
-.install-option {
+/*
+ * 安装弹窗里那一行勾选（「创建桌面快捷方式」）和设置页共用 `LauncherCheckbox`，
+ * 只是尺寸更紧凑：这里只写差异，并且用 `.install-panel` 把特异性提一级，
+ * 这样不依赖 controls.css 与本文件的先后顺序（两者都是 `.check-row` 一级时，顺序决定胜负）。
+ */
+.install-panel .check-row {
   margin-top: 10px;
+  /* 这两条是原来那个手写按钮的实际几何，不是设计值：
+     它当时没有写 padding，吃的是浏览器给 button 的 1px 6px；统一到组件后照抄回来，
+     免得这一行悄悄往左上偏 6px。想让它和设置页一样贴左，把 padding 改成 0 即可。 */
+  padding: 1px 6px;
   min-height: 30px;
-  border: 0;
   display: inline-grid;
   grid-template-columns: 24px auto;
-  align-items: center;
   gap: 10px;
   color: rgba(255, 255, 255, 0.9);
-  background: transparent;
-  transition: color 160ms ease;
 }
 
-.install-option:hover {
-  color: var(--cv-check-accent);
-}
-
-.install-option strong {
+.install-panel .check-row strong {
   font-size: 18px;
   font-weight: 700;
 }
 
-.install-option .check-box {
+.install-panel .check-row .check-box {
   width: 21px;
   height: 21px;
 }

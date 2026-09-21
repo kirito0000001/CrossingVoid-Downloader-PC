@@ -55,6 +55,7 @@ export type SettingsContext = {
   officialTrafficBlocked: any;
   openDeveloperProjectFolder: any;
   openGameChunkImportGuide: any;
+  openGameLogFolder: any;
   openLauncherLogFolder: any;
   openLocalGameFiles: any;
   publishDeveloperDownloadChannels: any;

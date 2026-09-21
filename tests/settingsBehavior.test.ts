@@ -26,9 +26,23 @@ describe("launcher behavior settings", () => {
   it("renders checkboxes through the shared component instead of raw inputs", () => {
     // 复选框外观只有一份实现（LauncherCheckbox + 全局 controls.css），
     // 别再各写各的原生 checkbox，否则开发页那块会跑出浏览器默认样式。
+    // 安装弹窗里那一行（原 `.install-option`）也并进了同一个组件 ——
+    // 它只是尺寸更紧凑，差异写在 install-dialogs.css 的 `.install-panel .check-row` 里。
     expect(readSource("src/components/LauncherCheckbox.vue")).toContain("check-box");
     expect(readSource("src/components/SettingsPanel.vue")).toContain("LauncherCheckbox");
+    expect(appSource).toContain("LauncherCheckbox");
+    expect(appSource).not.toContain('class="check-box"');
+    expect(launcherSource).not.toContain("install-option");
     expect(launcherSource).not.toContain('type="checkbox"');
+  });
+
+  it("renders radio rows through the shared component too", () => {
+    // 单选框和复选框同一条规则：圆点和悬停变色只在 LauncherRadio / controls.css 里有一份，
+    // 设置页不该再手写 <span class="radio-dot">。
+    expect(readSource("src/components/LauncherRadio.vue")).toContain("radio-dot");
+    expect(readSource("src/components/SettingsPanel.vue")).toContain("LauncherRadio");
+    expect(readSource("src/components/SettingsPanel.vue")).not.toContain('class="radio-dot"');
+    expect(readSource("src/styles/controls.css")).toContain(".radio-row:hover");
   });
 
   it("persists automatic repair and post-launch visibility choices", () => {
@@ -98,6 +112,18 @@ describe("launcher behavior settings", () => {
     expect(appSource).toContain("installDialogConfirmText");
     expect(appSource).toContain("installDialogMode === 'install' || migrationChangesVolume");
     expect(appSource).toContain('showCheckResult(`无法打开游戏目录：${formatUnknownError(error)}`)');
+  });
+
+  it("opens the game log folder through its own native command", () => {
+    // 「打开游戏日志」以前是个没有 @click 的按钮（点了什么都不发生）。
+    // 日志落在 %LOCALAPPDATA%\<工程名>\Saved\Logs，和安装目录无关，
+    // 所以路径由 Rust 解析，前端只负责点击。
+    expect(readSource("src/components/SettingsPanel.vue")).toContain('@click="openGameLogFolder"');
+    expect(appSource).toContain('invoke("open_game_log_folder")');
+    expect(nativeSource).toContain("fn open_game_log_folder()");
+    expect(nativeSource).toContain("            open_game_log_folder,");
+    expect(nativeSource).toContain('const GAME_PROJECT_NAME: &str = "CrossingVoid";');
+    expect(nativeSource).toContain(".join(GAME_PROJECT_NAME)");
   });
 
   it("does not treat Explorer's non-zero exit code as a folder-open failure", () => {

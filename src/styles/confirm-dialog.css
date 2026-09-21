@@ -1,3 +1,16 @@
+/*
+ * 确认弹窗（取消下载 / 删除游戏 / 卸载启动器共用一套）。
+ *
+ * 这段 DOM 在 `components/SettingsPanel.vue` 里，所以那个组件必须**自己**以 scoped 方式
+ * 引入本文件 —— 早先只有 App.vue 引入：弹窗 DOM 从 App.vue 搬进 SettingsPanel 时样式没跟着走，
+ * 选择器带的是 App 的 data-v 哈希，`.confirm-mask` / `.confirm-panel` 一条都匹配不到，
+ * 遮罩退回普通块级元素、被上面的 100% 高设置弹窗顶到窗口外，
+ * 现场表现就是「点删除游戏 / 卸载启动器没有任何反应」。
+ *
+ * App.vue 仍然引入本文件，理由只有一个：远程公告用的是 `Transition name="confirm-pop"`，
+ * 需要下面的 `.confirm-pop-*` 淡入淡出规则。改这两处引用前先看 `tests/launcherStyleFiles.test.ts`。
+ */
+
 .confirm-mask {
   position: absolute;
   inset: 0;

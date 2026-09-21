@@ -44,4 +44,17 @@ describe("launcher style files", () => {
     expect(readSource("src/styles/remote-notice.css")).toContain(".remote-notice-mask");
     expect(readSource("src/styles/settings-panel.css")).not.toContain(".remote-notice-mask");
   });
+
+  it("keeps the danger confirm dialog styles in the component that renders it", () => {
+    // 和上面那条互为镜像：弹窗 DOM 从 App.vue 搬进 SettingsPanel.vue 时，样式没跟着走。
+    // 于是 `.confirm-mask` / `.confirm-panel` 一条规则都匹配不到，遮罩退回普通块级元素、
+    // 被上面 100% 高的设置弹窗顶出窗口 —— 现场就是「点删除游戏 / 卸载启动器没反应」。
+    const importedBySettings = [
+      ...readSource("src/components/SettingsPanel.vue").matchAll(/<style[^>]*\ssrc="([^"]+)"/g),
+    ].map((match) => match[1]);
+
+    expect(importedBySettings.some((path) => path.includes("confirm-dialog.css"))).toBe(true);
+    expect(readSource("src/styles/confirm-dialog.css")).toContain(".confirm-mask");
+    expect(readSource("src/components/SettingsPanel.vue")).toContain('class="confirm-mask"');
+  });
 });

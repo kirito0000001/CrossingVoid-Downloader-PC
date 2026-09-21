@@ -466,6 +466,29 @@ GitHub 源提示“需要魔法”。PC 游戏和 Android 游戏必须使用平�
 
 下载栏要显示：操作阶段、来源、已下载/总大小、百分比、速率和预计时间。预计时间立即计算；超过 24 小时显示“网络不佳”。按钮图标本身不能随着任务加载动画一起旋转。
 
+### 12.1 进度口径：按"文件对得上"算，不追字节精度（2026-09-21 用户拍板）
+
+**进度 = 本地已经对得上清单的文件 + 本轮真正下回来的字节**，分母是整包。
+`file_matches_entry` 是 size + sha256 双查，所以"对得上"是真的对得上 —— 这就是唯一的真相源。
+
+- Rust 的进度事件（`emit_game_package_progress`）报的是**本轮要下的那些文件**，
+  是会话级数字。前端要用 `gamePackageBaseline`（整包 − 本轮要下的）把它补回整包坐标，
+  否则暂停→继续会让进度条和"已完成 N/M 个文件"一起退回 0。
+- **不要拿字节数当状态**：`.part` 阶段一个完整文件都没有、下过一轮又会清零。
+  判断"这个路径上还有没有没干完的活"用 `installPathHasPartialWork`。
+- `.part` 里已下的字节不计入进度（否则每轮都要扫全盘），所以暂停后进度会略低于实际下过的字节。
+
+### 12.2 下载栏的两条硬约束
+
+| 约束 | 值 | 为什么 |
+| --- | --- | --- |
+| `.download-dock` 宽度 | `461px`（= `59 + 12 + 189 + 12 + 189`，三个方块的按钮排宽） | 进度行有五段（状态/字节/文件数/剩余时间/百分比）。310px 放不下时 flex 会把状态文字挤出容器、被 `overflow: hidden` **硬裁掉**（半个字，不是省略号）。对齐按钮排后左端正好和"方形菜单"齐平，再宽就顶出画面 |
+| 点"继续下载"后必须先出一个准备阶段 | `获取游戏清单` → `核对下载进度` | 拉清单 + 把本地文件与清单逐条对一遍（没有逐文件状态文件时要整盘哈希，几十秒）期间进度条不动。不吭声玩家会以为卡死 |
+
+准备阶段由 `gamePackagePrepareStage` 承载，挂在 `statusCopy` 的"下载中"那一档最前面
+（有值时先返回它）。守卫见 `tests/progressControls.test.ts`。
+
+
 ## 13. 安装、解压与原子替换
 
 标准流程：
@@ -765,6 +788,44 @@ cargo test --manifest-path src-tauri\Cargo.toml
 ### 删除游戏后启动按钮卡很久
 
 启动进程前先检查关键 exe 和清单。缺失时立即标记为下载/修复，不要等待 Windows 进程错误超时。
+
+### 设置页的「删除游戏 / 卸载启动器」点了没反应
+
+不是命令挂了，是确认弹窗根本没显示出来：弹窗的 DOM 在 `src/components/SettingsPanel.vue`，
+样式却只在 `App.vue` 里以 scoped 方式引入 —— 选择器带的是 App 的 `data-v` 哈希，
+`.confirm-mask` / `.confirm-panel` 一条都匹配不到。遮罩于是退回普通块级元素，
+被上面 100% 高的 `.settings-modal` 顶到窗口外，看起来就是"点了完全没反应"（2026-09-21 修复）。
+
+和 `remote-notice.css` 那次（§10.4 的加载层）是同一条判据：**样式文件必须由渲染那段 DOM 的组件自己 scoped 引入。**
+现在 `SettingsPanel.vue` 引入 `styles/confirm-dialog.css`；`App.vue` 保留同一份引用只是为了远程公告的
+`.confirm-pop-*` 过渡类。守卫见 `tests/launcherStyleFiles.test.ts`。
+
+同一页的「打开游戏日志」是另一种情况：按钮压根没有 `@click`。它现在走 `open_game_log_folder`，
+目录是 `%LOCALAPPDATA%\CrossingVoid\Saved\Logs` —— 打包后的虚幻游戏把 `Saved` 放在用户目录而不是
+安装目录，所以不能用 `install_path` 拼。
+
+### 退出后再进启动器又要重新下载
+
+断点状态是被**启动时的校验**清掉的，不是下载器不会续传（2026-09-21 修复）。
+
+启动时 `App.vue` 会拿存档里的 `downloadedBytes` 去问 `validate_game_install_state`，而 Rust 侧
+`validate_install_state` 对非 `ready` / `repairable` 的状态一律要求"归档或全部分片齐全"
+（`CrossingVoid.zip`，或 `part_bytes >= totalBytes`）。**部分下载必然不满足** → 返回 false →
+`validateCurrentPersistedState()` 把 localStorage 连同 `<安装目录>\_download\download-state.json`
+一起清掉、进度归零，用户看到的就是"又重新开始下载"。
+
+现在 `paused` 和 `downloaded` 的判据分开：
+
+| 状态 | 回答的问题 | 判据 |
+| --- | --- | --- |
+| `paused` | 这单还能不能续 | 状态文件还在（它就住在安装目录里）+ `_download\` 还在；剩下的交给 Range 续传 |
+| `downloaded` | 能不能开始安装 | 归档或全部分片必须齐全 |
+
+注意**逐文件链路根本不产生 `_download\CrossingVoid.zip.partNNN`**：它把 `<文件>.part` 放在目标旁边、
+校验通过再原子改名。所以任何只认 v1 分片命名的判据都会把逐文件的下载判死。
+
+守卫：`tests/downloadStateRestore.test.ts` + Rust 单元测试
+`paused_download_stays_resumable_while_downloaded_requires_the_archive`。
 
 ### 下载闪回或重新开始
 

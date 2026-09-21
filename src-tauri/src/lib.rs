@@ -48,6 +48,9 @@ const DEV_SCRIPT_PAUSED: &str = "DEV_SCRIPT_PAUSED";
 const DOWNLOAD_RETRY_ATTEMPTS: u32 = 3;
 const MAX_ERROR_LOG_TOTAL_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_ERROR_LOG_DETAIL_BYTES: usize = 256 * 1024;
+/// 游戏（虚幻打包版）的工程名。打包后的游戏把 `Saved` 放在 `%LOCALAPPDATA%\<工程名>` 下，
+/// 日志目录因此不在安装目录里，拼路径时用这个名字而不是 `install_path`。
+const GAME_PROJECT_NAME: &str = "CrossingVoid";
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -629,6 +632,30 @@ fn open_launcher_log_folder(app: AppHandle) -> Result<(), String> {
             error
         )
     })?;
+    open_folder(&log_dir)
+}
+
+/// 打开游戏自己的日志目录。
+///
+/// 打包后的虚幻游戏把 `ProjectSavedDir()` 落在用户的 `%LOCALAPPDATA%\<工程名>\Saved`，
+/// 日志就是里面的 `Logs`（本机实测：`C:\Users\<用户>\AppData\Local\CrossingVoid\Saved\Logs\CrossingVoid.log`）。
+/// 所以这个目录和安装位置无关，不能用 `install_path` 拼，也不该由前端猜路径。
+#[tauri::command]
+fn open_game_log_folder() -> Result<(), String> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+        .ok_or_else(|| "无法确定本机的 LOCALAPPDATA 目录。".to_string())?;
+    let log_dir = local_app_data
+        .join(GAME_PROJECT_NAME)
+        .join("Saved")
+        .join("Logs");
+    if !log_dir.is_dir() {
+        return Err(format!(
+            "找不到游戏日志目录 {}：游戏可能还没有运行过。",
+            log_dir.display()
+        ));
+    }
     open_folder(&log_dir)
 }
 
@@ -4001,6 +4028,18 @@ fn validate_install_state(install_path: &str, state: &str) -> Result<bool, Strin
     if !state_path.is_file() || !download_dir.is_dir() {
         return Ok(false);
     }
+
+    // "paused"：下载被打断，磁盘上**本来就不该**有完整归档，所以只确认"这单的地盘还在"——
+    // 状态文件就住在安装目录里（`<游戏目录>\_download\download-state.json`），
+    // 能读到它就说明目录还在、这单还有救；剩下交给 Range 续传（有碎片续碎片，没碎片从 0 下）。
+    //
+    // 以前这里和 "downloaded" 共用下面那套"归档必须齐全"的判据，于是每一条被打断的下载
+    // 在下次启动都会被判成无效、前端把进度清掉，用户看到的就是"又重新开始下载"（2026-09-21 报的断点失效）。
+    if state.eq_ignore_ascii_case("paused") {
+        return Ok(true);
+    }
+
+    // "downloaded"：下载阶段已经结束，归档或全部分片必须在，否则装不出东西来。
     let state_text = fs::read_to_string(&state_path).map_err(|error| {
         format!(
             "Unable to read download state {}: {}",
@@ -4792,6 +4831,7 @@ pub fn run() {
             dev_run_launcher_script,
             dev_pause_script,
             open_launcher_log_folder,
+            open_game_log_folder,
             write_launcher_error_log,
             dev_open_project_folder
         ])
@@ -5258,6 +5298,66 @@ mod tests {
         );
 
         fs::remove_dir_all(root).expect("remove test install");
+    }
+
+    /// 断点续传的判据（2026-09-21 用户报"退出后再进启动器又要重新下载"）。
+    ///
+    /// `paused` 和 `downloaded` 必须分开判：前者磁盘上**本来就不该**有完整归档，
+    /// 拿"归档齐全"去判它，等于把每一条被打断的下载都判成无效、进度被清空。
+    #[test]
+    fn paused_download_stays_resumable_while_downloaded_requires_the_archive() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "cv-launcher-paused-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let dir = root.to_string_lossy().to_string();
+        let download_dir = root.join("_download");
+        fs::create_dir_all(&download_dir).expect("create download directory");
+        let total_bytes = 8192u64;
+        write_download_state_file(DownloadStateFile {
+            install_path: dir.clone(),
+            selected_install_base_path: dir.clone(),
+            download_source: "official".to_string(),
+            mode: Some("install".to_string()),
+            downloaded_bytes: 1024,
+            total_bytes,
+            state: "paused".to_string(),
+            install_stage: None,
+        })
+        .expect("write download state");
+
+        // 下到一半（只有 1 KB，归档还没有）：这条任务必须"还能续"。
+        assert!(
+            validate_install_state(&dir, "paused").expect("validate interrupted download"),
+            "interrupted download must stay resumable"
+        );
+        // 同一份磁盘状态，如果记录说"已经下完"，就得按归档齐全来判。
+        assert!(
+            !validate_install_state(&dir, "downloaded").expect("validate unfinished archive"),
+            "a half-written archive is not 'downloaded'"
+        );
+
+        fs::write(
+            download_dir.join("CrossingVoid.zip"),
+            vec![0u8; total_bytes as usize],
+        )
+        .expect("write complete archive");
+        assert!(
+            validate_install_state(&dir, "downloaded").expect("validate complete archive"),
+            "complete archive must count as downloaded"
+        );
+
+        // 整个安装目录没了（状态文件随之消失）：不能再认这条任务。
+        fs::remove_dir_all(&root).expect("remove test install");
+        assert!(
+            !validate_install_state(&dir, "paused").expect("validate missing install directory"),
+            "a wiped install directory must not look resumable"
+        );
     }
 
     #[test]

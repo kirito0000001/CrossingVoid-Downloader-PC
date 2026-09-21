@@ -82,7 +82,6 @@ import {
   type TranslationKey,
 } from "./i18n/launcherText";
 import {
-  Check,
   ChevronLeft,
   CircleAlert,
   Download,
@@ -151,6 +150,7 @@ import {
   USE_DX11_STORAGE_KEY,
 } from "./storageKeys";
 import SettingsPanel from "./components/SettingsPanel.vue";
+import LauncherCheckbox from "./components/LauncherCheckbox.vue";
 import { useSettingsScrollbar } from "./composables/useSettingsScrollbar";
 import { settingsContextKey } from "./settings/settingsContext";
 import { useDeveloperConsole } from "./dev/useDeveloperConsole";
@@ -255,6 +255,17 @@ const showPlatformGameRail = computed(
 );
 const savedDownloadedBytes = persistedNumber(savedDownloadState?.downloadedBytes);
 const savedTotalBytes = persistedNumber(savedDownloadState?.totalBytes);
+/**
+ * 这个安装路径上"已经动过手"（下过东西、还没收尾）。
+ *
+ * 主按钮的文案/分流、进度悬浮栏要不要显示，全都问它 —— **不要问字节数**：
+ * 暂停→继续会把本轮要下的字节数清零（逐文件链路连进度条都会从 0 重来），
+ * 而在 `.part` 阶段更是一个完整文件都没有。那些时候"还有活没干完"依然是事实。
+ * 取下过载、置位、复位的规则见 §「下载与暂停」（本文件内注释）。
+ */
+const installPathHasPartialWork = ref(
+  Boolean(savedDownloadState && normalizePersistedState(savedDownloadState) !== "ready"),
+);
 const launcherVersion = ref(__APP_VERSION__);
 const bundledOnSetManifest = ref<OnSetManifest | null>(null);
 const bootSplashMinimumDurationMs = 1800;
@@ -292,6 +303,21 @@ const activeGamePackage = shallowRef<GamePackageManifest | null>(null);
 const activeGamePackagePlan = shallowRef<GamePackagePlan | null>(null);
 /** 进度条上的"已完成/总数（按文件）"，由 Rust 的进度事件带过来。 */
 const gamePackageFileProgress = ref({ done: 0, total: 0 });
+/**
+ * 本轮"逐文件"下载的**文件级基线**：这个安装路径上已经对得上清单的文件（字节 + 个数）。
+ *
+ * Rust 的进度事件只报"本轮要下的那些文件"，所以暂停→继续会让进度条回到 0。
+ * 用它补回整包坐标后，进度只取决于"本地文件对不对得上"—— 暂停、继续、重启都不丢。
+ * v1 归档下载与修复下载没有这个概念，进它们之前要清零（否则数字会整体偏移）。
+ */
+const gamePackageBaseline = ref({ bytes: 0, files: 0 });
+/**
+ * "继续下载"按下去到真正开始下之间的准备阶段文案。
+ *
+ * 这一段要拉清单、再把本地文件跟清单逐条对一遍（没有逐文件状态文件时要整盘哈希，慢起来几十秒），
+ * 期间进度条是不动的 —— 以前界面上一个字都不说，看着就是卡死。
+ */
+const gamePackagePrepareStage = ref("");
 const remoteGameVersion = ref("");
 const lastCheckMessage = ref("");
 const trafficQuota = ref<TrafficQuotaResponse | null>(null);
@@ -951,7 +977,7 @@ const showDownloadProgress = computed(() =>
     launcherState.value === "repairPending" ||
     launcherState.value === "repairing" ||
     (launcherState.value === "ready" && updateAvailable.value && !offlineMode.value) ||
-    (launcherState.value === "paused" && downloadedMb.value > 0))),
+    (launcherState.value === "paused" && installPathHasPartialWork.value))),
 );
 const showProgressNumbers = computed(
   () =>
@@ -1092,7 +1118,7 @@ const actionCopy = computed(() => {
   if (launcherState.value === "downloaded" || hasCompleteDownloadedArchive.value) return t("action.installGame");
   if (launcherState.value === "ready") return t("action.launchGame");
   if (updateDownloadPending.value) return t("action.resumeDownload");
-  return downloadedMb.value > 0 ? t("action.resumeDownload") : t("action.downloadGame");
+  return installPathHasPartialWork.value ? t("action.resumeDownload") : t("action.downloadGame");
 });
 
 const actionIcon = computed(() => {
@@ -1201,6 +1227,9 @@ const statusCopy = computed(() => {
     return remoteGameVersion.value ? `${t("status.updateAvailable")} ${remoteGameVersion.value}` : t("status.updateAvailable");
   }
   if (launcherState.value === "downloading") {
+    // 准备阶段（获取清单 / 核对上次进度）优先说出来：这一段进度条不动，
+    // 不吭声就会被当成卡死。
+    if (gamePackagePrepareStage.value) return gamePackagePrepareStage.value;
     return activeGameDownloadSourceName.value
       ? `下载游戏中：${activeGameDownloadSourceName.value}`
       : t("status.downloading");
@@ -1208,7 +1237,7 @@ const statusCopy = computed(() => {
   if (launcherState.value === "downloaded" || hasCompleteDownloadedArchive.value) return t("status.downloaded");
   if (launcherState.value === "ready") return t("status.ready");
   if (updateDownloadPending.value) return t("status.paused");
-  if (downloadedMb.value > 0) {
+  if (installPathHasPartialWork.value) {
     return activeGameDownloadSourceName.value
       ? `下载已暂停：${activeGameDownloadSourceName.value}`
       : t("status.paused");
@@ -1658,8 +1687,16 @@ async function validatePersistedDownloadState(state: PersistedDownloadState) {
       return false;
     }
   }
-  const targetState = state.state === "ready" ? "ready" : "paused";
-  if (targetState === "paused" && persistedNumber(state.downloadedBytes) <= 0) return false;
+  // "downloaded" 和 "paused" 不能共用一句判据：
+  // - "downloaded"：下载阶段已经结束，归档/分片必须齐，不然装不出来。
+  // - "paused"：下载被打断，磁盘上本来就不该有完整归档 —— 到 Rust 侧只要求"这单的地盘还在"。
+  //   以前两种情况都按"必须齐"来判，于是每一条被打断的下载在下次启动都会被判无效、
+  //   进度被清掉，用户看到的就是"又重新开始下载"（2026-09-21 报的断点失效）。
+  const targetState =
+    state.state === "ready" ? "ready" : state.state === "downloaded" ? "downloaded" : "paused";
+  // `paused` 不再看 `downloadedBytes`：进度现在是"文件对得上"的字节数，
+  // 停在一个 `.part` 上的任务本来就可能是 0 —— 拿 0 判死它又会把进度清掉。
+  // "这单还在不在"交给下面的磁盘判据回答。
   try {
     return await invoke<boolean>("validate_game_install_state", {
       installPath: targetPath,
@@ -1703,6 +1740,8 @@ async function restoreReadyInstallFromFiles() {
     updateAvailable.value = false;
     pendingRepairSummary.value = null;
     remoteArchiveBytes.value = null;
+    // 已经是一个完整安装，不再是"下到一半的活"。
+    installPathHasPartialWork.value = false;
     persistDownloadState("ready", "immediate");
     return true;
   } catch (error) {
@@ -2074,6 +2113,11 @@ async function resolveGamePackagePlan(manifest: GamePackageManifest) {
     installPath: installPath.value,
   });
   const state = parseGamePackageState(rawState);
+  if (!state) {
+    // 没有逐文件状态文件（下到一半停了、或者老安装升级上来）时要整盘对一遍哈希，
+    // 这是整个准备阶段最慢的一步，必须说出来。
+    gamePackagePrepareStage.value = "核对下载进度";
+  }
   const scanned = state
     ? null
     : await invoke<GamePackageFile[]>("scan_local_game_package", {
@@ -2099,22 +2143,32 @@ async function resolveGamePackage() {
 
 /** 文件级下载：只下 sha256 变了的文件；`.part`、Range 续传、sha256 校验都在 Rust 侧。 */
 async function downloadGamePackageFiles() {
+  gamePackagePrepareStage.value = "获取游戏清单";
   const { manifest, plan } = await resolveGamePackage();
-  activeDownloadBytes.value =
-    plan.totalBytes || remoteArchiveBytes.value || fallbackRequiredInstallBytes;
+  const packageBytes = manifest.files.reduce((sum, entry) => sum + entry.sizeBytes, 0);
+  // 进度按"文件对得上"算：分母是整包，分子是本地已经对上的那些文件。
+  // 事件只报"本轮要下的文件"的进度，所以这里先记下基线补回整包坐标 ——
+  // 这样暂停→继续、重启后继续，进度条都不会回到 0。
+  gamePackageBaseline.value = {
+    bytes: Math.max(0, packageBytes - plan.totalBytes),
+    files: Math.max(0, manifest.files.length - plan.download.length),
+  };
+  activeDownloadBytes.value = packageBytes || remoteArchiveBytes.value || fallbackRequiredInstallBytes;
   remoteArchiveBytes.value = activeDownloadBytes.value;
-  downloadedBytes.value = 0;
-  downloadedMb.value = 0;
+  downloadedBytes.value = gamePackageBaseline.value.bytes;
+  downloadedMb.value = bytesToMb(downloadedBytes.value);
   gamePackageFileProgress.value = {
-    done: Math.max(0, manifest.files.length - plan.download.length),
+    done: gamePackageBaseline.value.files,
     total: manifest.files.length,
   };
   downloadEstimate.value = downloadTimeEstimator.record(
-    0,
+    downloadedBytes.value,
     activeDownloadBytes.value,
     performance.now(),
   );
   persistDownloadState("paused", "immediate");
+  // 清单和差异都算好了：准备阶段到此结束，后面交给进度事件。
+  gamePackagePrepareStage.value = "";
 
   if (plan.download.length > 0) {
     // 每个文件带上候选地址：首选源排第一，另一个源兜底（被渠道开关关掉的源不参与）。
@@ -2374,6 +2428,15 @@ async function openLauncherLogFolder() {
   }
 }
 
+async function openGameLogFolder() {
+  try {
+    await invoke("open_game_log_folder");
+  } catch (error) {
+    console.warn("Unable to open game log folder", error);
+    showCheckResult(`打开游戏日志失败：${formatUnknownError(error)}`);
+  }
+}
+
 function formatUnknownError(error: unknown) {
   return error instanceof Error ? error.message : String(error || "未知错误");
 }
@@ -2599,6 +2662,8 @@ async function hasRepairableGameManifest() {
 
 async function markFullGameDownloadRequired(message: string) {
   await clearPersistedDownloadStateForPath(installPath.value);
+  // 状态都清了，本地不再有"没干完的活"：下次点主按钮要重新问装哪儿。
+  installPathHasPartialWork.value = false;
   pendingRepairSummary.value = null;
   repairProgressPercent.value = 0;
   repairProgressItems.value = null;
@@ -2808,14 +2873,22 @@ async function ensureDownloadProgressListener() {
   downloadProgressUnlisten = await listen<DownloadProgressEvent>("game-download-progress", (event) => {
     if (launcherState.value !== "downloading" && launcherState.value !== "repairing") return;
     const payload = event.payload;
+    const baseline = gamePackageBaseline.value;
     if (typeof payload.doneFiles === "number" && typeof payload.totalFiles === "number") {
+      // 文件数也补上基线：暂停→继续不该让"已完成 N/M 个文件"退回去。
       gamePackageFileProgress.value = {
-        done: Math.max(0, payload.doneFiles),
-        total: Math.max(0, payload.totalFiles),
+        done: baseline.files + Math.max(0, payload.doneFiles),
+        total: baseline.files + Math.max(0, payload.totalFiles),
       };
     }
-    const totalBytes = payload.totalBytes || activeDownloadBytes.value || remoteArchiveBytes.value || fallbackRequiredInstallBytes;
-    const nextDownloadedBytes = Math.max(0, payload.downloadedBytes || 0);
+    // 事件报的是"本轮要下的那些文件"的字节，加上基线才是整包坐标（v1/修复下载的基线是 0）。
+    const sessionTotalBytes = payload.totalBytes || 0;
+    const totalBytes =
+      baseline.bytes + sessionTotalBytes ||
+      activeDownloadBytes.value ||
+      remoteArchiveBytes.value ||
+      fallbackRequiredInstallBytes;
+    const nextDownloadedBytes = baseline.bytes + Math.max(0, payload.downloadedBytes || 0);
     activeDownloadBytes.value = totalBytes;
     remoteArchiveBytes.value = totalBytes;
     downloadedBytes.value = nextDownloadedBytes;
@@ -2924,6 +2997,11 @@ async function downloadGameArchive() {
   if (!ensureOfficialTrafficAvailable()) return;
   const requestedSource = downloadSource.value;
   activeGameDownloadSource.value = requestedSource;
+  // 下载一旦真的开始，"这个路径上有活"就成立了（哪怕只写到一个 `.part`）——
+  // 主按钮从此是"继续下载"而不是又问一遍"装哪儿"。
+  installPathHasPartialWork.value = true;
+  // 文件级基线每轮任务先清零：逐文件链路会在算完差异后填上，v1 归档链路保持 0。
+  gamePackageBaseline.value = { bytes: 0, files: 0 };
   downloadTimeEstimator.reset();
   downloadEstimate.value = { status: "calculating" };
   launcherState.value = "downloading";
@@ -2950,6 +3028,8 @@ async function downloadGameArchive() {
     launcherState.value = "paused";
     persistDownloadState("paused", "immediate");
   } finally {
+    // 准备阶段的文案不能留到下一轮（下一轮开始时会重新设）。
+    gamePackagePrepareStage.value = "";
     gameDownloadActive.value = false;
     downloadPauseRequested.value = false;
   }
@@ -3210,6 +3290,9 @@ async function cancelGameDownload() {
     await invoke("clear_game_download_artifacts", { installPath: installPath.value });
     await clearPersistedDownloadStateForPath(installPath.value);
 
+    // 碎片和记录都清了，这个路径上不再有没干完的活。
+    installPathHasPartialWork.value = false;
+    gamePackageBaseline.value = { bytes: 0, files: 0 };
     downloadedBytes.value = 0;
     downloadedMb.value = 0;
     activeDownloadBytes.value = null;
@@ -3445,7 +3528,10 @@ async function handlePrimaryAction() {
     return;
   }
 
-  if (downloadedMb.value <= 0) {
+  // 只有"这个路径上从来没动过手"才需要先问装哪儿。
+  // 以前这里看的是字节数（`downloadedMb <= 0`）：暂停→继续会把本轮字节清零，
+  // 于是继续下载会莫名其妙弹出"选择安装路径"。
+  if (!installPathHasPartialWork.value) {
     installDialogMode.value = "install";
     showInstallConfirm.value = true;
     return;
@@ -3719,6 +3805,8 @@ async function repairMissingGameFiles() {
   repairDownloadPauseRequested.value = false;
   gameOperationCancelRequested.value = false;
   resetVerificationProgressDetail();
+  // 修复走的是归档链路，没有"文件级基线"，清零免得进度数字整体偏移。
+  gamePackageBaseline.value = { bytes: 0, files: 0 };
   repairProgressPercent.value = 0;
   repairProgressItems.value = null;
   try {
@@ -3812,6 +3900,8 @@ function resetDeletedGameState() {
   clearUpdateDownloadContext();
   launcherState.value = "paused";
   clearPersistedDownloadState();
+  // 游戏删掉了，这个路径上不再有没干完的活。
+  installPathHasPartialWork.value = false;
   localGameVersion.value = "";
   remoteGameVersion.value = "";
   pendingRepairSummary.value = null;
@@ -3994,6 +4084,7 @@ const settingsContext = {
   officialTrafficBlocked,
   openDeveloperProjectFolder,
   openGameChunkImportGuide,
+  openGameLogFolder,
   openLauncherLogFolder,
   openLocalGameFiles,
   publishDeveloperDownloadChannels,
@@ -4435,16 +4526,12 @@ provide(settingsContextKey, settingsContext);
             <i v-if="installDialogMode === 'install' || migrationChangesVolume"></i>
             <span :class="{ danger: isInstallSpaceLow }">{{ t("install.availableSpace") }}：{{ availableSpaceCopy }}</span>
           </div>
-          <button
+          <LauncherCheckbox
             v-if="installDialogMode === 'install'"
-            class="install-option"
-            :class="{ checked: createDesktopShortcut }"
-            type="button"
-            @click="createDesktopShortcut = !createDesktopShortcut"
-          >
-            <span class="check-box"><Check :size="21" stroke-width="3.2" /></span>
-            <strong>{{ t("install.desktopShortcut") }}</strong>
-          </button>
+            v-model="createDesktopShortcut"
+            :label="t('install.desktopShortcut')"
+            :icon-size="21"
+          />
           <button
             class="install-continue"
             type="button"

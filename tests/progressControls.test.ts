@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-import { launcherSource } from "./helpers/launcherSources";
+import { launcherSource, launcherStyleSource } from "./helpers/launcherSources";
 
 const appSource = readFileSync(resolve(process.cwd(), "src/App.vue"), "utf8");
 const rustSource = readFileSync(resolve(process.cwd(), "src-tauri/src/lib.rs"), "utf8");
@@ -87,5 +87,29 @@ describe("long-running progress controls", () => {
     expect(rustSource).toContain("current_file: Option<String>");
     expect(rustSource).toContain("processed_bytes: u64");
     expect(rustSource).toContain("calculate_file_sha256_with_progress");
+  });
+
+  it("names the resume preparation stages before the first byte moves", () => {
+    // 点"继续下载"之后要先拉清单、再把本地文件跟清单逐条对一遍（最慢是整盘哈希，几十秒）。
+    // 这期间进度条不动，界面上必须说出来 —— 不然玩家以为卡死了（用户 2026-09-21）。
+    expect(appSource).toContain("gamePackagePrepareStage");
+    expect(appSource).toContain('gamePackagePrepareStage.value = "获取游戏清单"');
+    expect(appSource).toContain('gamePackagePrepareStage.value = "核对下载进度"');
+
+    const statusCopy = appSource.match(/const statusCopy = computed\(\(\) => \{[\s\S]*?\n\}\);/)?.[0];
+    expect(statusCopy).toBeTruthy();
+    expect(statusCopy).toContain(
+      "if (gamePackagePrepareStage.value) return gamePackagePrepareStage.value",
+    );
+  });
+
+  it("keeps the download dock wide enough for the whole progress line", () => {
+    // 进度行有五段（状态 / 字节 / 文件数 / 剩余时间 / 百分比）。310px 放不下时 flex 会把
+    // 左边的状态文字挤出容器、再被 overflow:hidden 硬裁掉（半个字，不是省略号）。
+    // 宽度对齐三个方块的按钮排：59 + 12 + 189 + 12 + 189 = 461，左端正好和"方形菜单"齐平。
+    const dock = launcherStyleSource.match(/\.download-dock\s*\{[\s\S]*?\n\}/)?.[0];
+    expect(dock).toBeTruthy();
+    expect(dock).toContain("width: 461px;");
+    expect(dock).toContain("min-width: 461px;");
   });
 });

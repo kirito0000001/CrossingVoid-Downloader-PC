@@ -18,6 +18,7 @@ import {
 
 import LauncherSelect from "./LauncherSelect.vue";
 import LauncherCheckbox from "./LauncherCheckbox.vue";
+import LauncherRadio from "./LauncherRadio.vue";
 import { settingsContextKey } from "../settings/settingsContext";
 
 const settingsContext = inject(settingsContextKey);
@@ -74,6 +75,7 @@ const {
   officialTrafficBlocked,
   openDeveloperProjectFolder,
   openGameChunkImportGuide,
+  openGameLogFolder,
   openLauncherLogFolder,
   openLocalGameFiles,
   publishDeveloperGamePackage,
@@ -151,14 +153,16 @@ const {
 
               <div class="setting-block">
                 <span class="setting-title">{{ t("settings.closeWindow") }}</span>
-                <button class="radio-row" :class="{ checked: !closeToTray }" type="button" @click="closeToTray = false">
-                  <span class="radio-dot"></span>
-                  <strong>{{ t("settings.exitLauncher") }}</strong>
-                </button>
-                <button class="radio-row" :class="{ checked: closeToTray }" type="button" @click="closeToTray = true">
-                  <span class="radio-dot"></span>
-                  <strong>{{ t("settings.minimizeToTray") }}</strong>
-                </button>
+                <LauncherRadio
+                  v-model="closeToTray"
+                  :value="false"
+                  :label="t('settings.exitLauncher')"
+                />
+                <LauncherRadio
+                  v-model="closeToTray"
+                  :value="true"
+                  :label="t('settings.minimizeToTray')"
+                />
               </div>
 
               <div class="setting-block">
@@ -213,15 +217,17 @@ const {
 
                <div class="setting-block">
                  <span class="setting-title">{{ t("settings.downloadSpeed") }}</span>
-                <button class="radio-row" :class="{ checked: !downloadLimited }" type="button" @click="downloadLimited = false">
-                  <span class="radio-dot"></span>
-                  <strong>{{ t("settings.unlimited") }}</strong>
-                </button>
+                <LauncherRadio
+                  v-model="downloadLimited"
+                  :value="false"
+                  :label="t('settings.unlimited')"
+                />
                 <div class="limit-row">
-                  <button class="radio-row" :class="{ checked: downloadLimited }" type="button" @click="downloadLimited = true">
-                    <span class="radio-dot"></span>
-                    <strong>{{ t("settings.limited") }}</strong>
-                  </button>
+                  <LauncherRadio
+                    v-model="downloadLimited"
+                    :value="true"
+                    :label="t('settings.limited')"
+                  />
                   <input v-model="speedLimit" class="speed-input" inputmode="decimal" />
                   <span class="speed-unit">MB/s（1-100）</span>
                  </div>
@@ -277,7 +283,7 @@ const {
 
               <div class="setting-block">
                 <span class="setting-title">{{ t("settings.gameLog") }}</span>
-                <button class="light-action" type="button">
+                <button class="light-action" type="button" @click="openGameLogFolder">
                   <FileText :size="22" />
                   <span>{{ t("settings.openGameLog") }}</span>
                 </button>
@@ -535,3 +541,5 @@ const {
 
 <style scoped src="../styles/settings-panel.css"></style>
 <style scoped src="../styles/settings-controls.css"></style>
+<!-- 确认弹窗那段 DOM 在本组件里（App.vue 只拿走 .confirm-pop-* 过渡类给远程公告用）。 -->
+<style scoped src="../styles/confirm-dialog.css"></style>
