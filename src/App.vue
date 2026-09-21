@@ -1517,11 +1517,28 @@ const showOfficialTrafficWarning = computed(
   () => downloadSource.value === "official" && officialTrafficBlocked.value,
 );
 const githubNetworkWarningText = computed(() =>
-  githubNetworkStatus.value ? githubNetworkWarning(githubNetworkStatus.value) : "",
+  githubNetworkStatus.value
+    ? githubNetworkWarning(githubNetworkStatus.value, {
+        // 玩家自己把「GitHub 走系统代理」关了就是故意走直连，别再唠叨"未开启网络代理"。
+        proxyDisabledByUser: !githubUseSystemProxy.value,
+      })
+    : "",
 );
 const showGithubNetworkWarning = computed(
   () => downloadSource.value === "github" && Boolean(githubNetworkWarningText.value),
 );
+/**
+ * 主界面右上角那条提示的最终判定。
+ *
+ * 下载相关（渠道被关 / 流量不足 / 没挂代理会很慢）这三条**只在真的还有东西要下**的时候出现：
+ * 游戏已经装好且是最新版本时，它们纯属噪音（用户 2026-09-21 的截图：装好了还在报"下载会很慢"）。
+ */
+const showDownloadWarning = computed(() => {
+  if (launcherState.value === "ready" && !updateAvailable.value) return false;
+  return Boolean(
+    downloadChannelWarningText.value || showOfficialTrafficWarning.value || showGithubNetworkWarning.value,
+  );
+});
 const githubProxyText = computed(() => {
   if (githubNetworkPending.value) return "正在检测";
   if (!githubNetworkStatus.value) return "等待检测";
@@ -4343,7 +4360,7 @@ provide(settingsContextKey, settingsContext);
       </nav>
 
       <Transition name="traffic-warning">
-        <div v-if="isCrossingVoidActive && !gameOverviewVisible && (downloadChannelWarningText || showOfficialTrafficWarning || showGithubNetworkWarning)" class="traffic-warning" role="status">
+        <div v-if="isCrossingVoidActive && !gameOverviewVisible && showDownloadWarning" class="traffic-warning" role="status">
           <CircleAlert :size="18" stroke-width="2.8" />
           <span>{{ downloadChannelWarningText || (showOfficialTrafficWarning ? t("traffic.low") : githubNetworkWarningText) }}</span>
         </div>

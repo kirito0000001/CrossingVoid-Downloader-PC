@@ -26,4 +26,22 @@ describe("PC Github network detection", () => {
     expect(launcherSource).toContain("github-network-status");
     expect(appSource).toContain("githubNetworkWarningText");
   });
+
+  it("only shows download hints when there is really something to download", () => {
+    // 用户 2026-09-21 的截图：游戏装好了、版本 0.5.14 是最新的，右上角还在报"下载会很慢"。
+    // 渠道被关 / 流量不足 / 没挂代理这三条下载提示，只在"还没装好"或"有更新"的时候出现。
+    const gate = appSource.match(/const showDownloadWarning = computed\(\(\) => \{[\s\S]*?\n\}\);/)?.[0];
+    expect(gate).toBeTruthy();
+    expect(gate).toContain('if (launcherState.value === "ready" && !updateAvailable.value) return false;');
+    expect(gate).toContain(
+      "downloadChannelWarningText.value || showOfficialTrafficWarning.value || showGithubNetworkWarning.value",
+    );
+    // 主界面那条横幅要用这个判定，而不是把三个条件直接摊在模板里。
+    expect(appSource).toContain("!gameOverviewVisible && showDownloadWarning");
+    expect(appSource).not.toContain(
+      "downloadChannelWarningText || showOfficialTrafficWarning || showGithubNetworkWarning",
+    );
+    // 玩家自己关掉「GitHub 走系统代理」之后，别再唠叨"未开启网络代理"。
+    expect(appSource).toContain("proxyDisabledByUser: !githubUseSystemProxy.value");
+  });
 });

@@ -18,9 +18,11 @@ describe("launcher behavior settings", () => {
     expect(appSource).toContain("pickAvailableDownloadChannel");
     expect(appSource).toContain("isDownloadChannelEnabled(downloadChannelStates.value, downloadSource.value)");
     expect(launcherSource).toContain("downloadChannelNoticeText");
-    // 渠道被关时复用右上角那条提示（和"流量不足"同一套外观），文案固定。
+    // 渠道被关时复用右上角那条提示（和"流量不足"同一套外观），文案固定；
+    // 横幅的显示条件统一收敛到 showDownloadWarning（它还会再过滤掉"其实没东西要下"的情况）。
     expect(appSource).toContain("当前渠道已关闭，请更换");
-    expect(appSource).toContain("downloadChannelWarningText || showOfficialTrafficWarning");
+    expect(appSource).toContain("const showDownloadWarning = computed");
+    expect(appSource).toContain("showDownloadWarning");
   });
 
   it("renders checkboxes through the shared component instead of raw inputs", () => {

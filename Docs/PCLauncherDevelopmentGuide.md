@@ -628,6 +628,13 @@ UI 展示“服务器可用下载流量”，按所有可用流量包汇总。�
 
 真正的安全边界在服务器：低流量时不签发 OSS 下载地址。客户端限制只能改善体验，不能替代服务器拒签。
 
+**主界面右上角那条下载提示只在"真的还有东西要下"的时候出现**（2026-09-21 用户拍板）：
+判定收敛在 `showDownloadWarning` —— 先看 `launcherState !== "ready" || updateAvailable`，
+再取「渠道被关 / 流量不足 / 没挂代理会很慢」三条之一。游戏装好且是最新版本时，这三条都是噪音
+（用户截图现场：版本 0.5.14 已装好，横幅还在报"下载会很慢"）。
+另外玩家自己关掉「GitHub 走系统代理」之后，`githubNetworkWarning` 不再唠叨"未开启网络代理"
+（传 `proxyDisabledByUser`）—— 那本来就是他选的直连。
+
 `TrafficQuotaAlert.ps1` 与 `Install-TrafficQuotaAlert.ps1` 在服务器上每 5 分钟检查一次状态，并复用 Watchdog 邮件配置发送不足/恢复邮件。凭据文件只在服务器，不进入本仓库。
 
 ## 17. OnSet 内容
