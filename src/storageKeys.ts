@@ -13,3 +13,5 @@ export const DEV_GAME_VERSION_STORAGE_KEY = "crossing-void.launcher.dev-game-ver
 export const DEV_GAME_TITLE_STORAGE_KEY = "crossing-void.launcher.dev-game-title";
 export const DEV_GAME_WINDOWS_PATH_STORAGE_KEY = "crossing-void.launcher.dev-game-windows-path";
 export const DEV_GAME_ANDROID_PATH_STORAGE_KEY = "crossing-void.launcher.dev-game-android-path";
+/** 开发/测试开关：勾上后启动加载界面一直停着不消失（调它的尺寸用）。 */
+export const HOLD_BOOT_SPLASH_STORAGE_KEY = "crossing-void.launcher.hold-boot-splash";

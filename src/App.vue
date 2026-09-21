@@ -7,6 +7,7 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
+import { finishBootSplash, updateBootSplash } from "./bootSplash";
 import PlatformGameRail from "./components/PlatformGameRail.vue";
 import PlatformGameOverview from "./components/PlatformGameOverview.vue";
 import PlatformPlaceholderPage from "./components/PlatformPlaceholderPage.vue";
@@ -256,14 +257,13 @@ const savedDownloadedBytes = persistedNumber(savedDownloadState?.downloadedBytes
 const savedTotalBytes = persistedNumber(savedDownloadState?.totalBytes);
 const launcherVersion = ref(__APP_VERSION__);
 const bundledOnSetManifest = ref<OnSetManifest | null>(null);
-const keepBootSplashVisibleForLayout =
-  import.meta.env.DEV &&
-  typeof window !== "undefined" &&
-  new URLSearchParams(window.location.search).has("holdBoot");
 const bootSplashMinimumDurationMs = 1800;
 const bootSplashStartedAt = Date.now();
-const bootSplashVisible = ref(true);
-const bootSplashStatus = ref("Now Loading...");
+// 加载界面在 index.html 里（第一帧就有），这里只把当前游戏的 logo / 短名字同步给它。
+updateBootSplash({
+  logoSrc: activeGame.value.bootLogoSrc,
+  shortLabel: activeGame.value.shortLabel,
+});
 const launcherState = ref<LauncherState>(savedDownloadState ? normalizePersistedState(savedDownloadState) : "paused");
 const savedLanguage = typeof window === "undefined" ? null : window.localStorage.getItem(LANGUAGE_STORAGE_KEY);
 const currentLanguage = ref<LauncherLanguage>(isLauncherLanguage(savedLanguage) ? savedLanguage : "zh-Hans");
@@ -340,6 +340,7 @@ const {
   developerGameTitle,
   developerGameUploadActive,
   developerGameVersion,
+  developerHoldBootSplash,
   developerChannels,
   developerChannelsPending,
   developerChannelsStatus,
@@ -701,24 +702,25 @@ async function preloadBootImages() {
 
 async function loadBootResources() {
   if (!isCrossingVoidActive.value) {
-    bootSplashStatus.value = `正在进入 ${activeGame.value.name}`;
+    updateBootSplash({ status: `正在进入 ${activeGame.value.name}` });
     await Promise.all([waitForBootFonts(1600), preloadBootImages()]);
     return;
   }
-  bootSplashStatus.value = "读取主题配置";
+  updateBootSplash({ status: "读取主题配置" });
   await loadOnSetColors();
-  bootSplashStatus.value = "加载角色轮播";
+  updateBootSplash({ status: "加载角色轮播" });
   await loadOnSetCharacters();
-  bootSplashStatus.value = "加载公告内容";
+  updateBootSplash({ status: "加载公告内容" });
   await loadOnSetNoticeBoard();
-  bootSplashStatus.value = "加载视频列表";
+  updateBootSplash({ status: "加载视频列表" });
   await loadOnSetVideos();
-  bootSplashStatus.value = "预载界面资源";
+  updateBootSplash({ status: "预载界面资源" });
   await Promise.all([waitForBootFonts(1600), preloadBootImages()]);
 }
 
 function hideBootSplash() {
-  if (keepBootSplashVisibleForLayout) return;
+  // 注意：这里**不要**按"是否常驻"提前 return —— 常驻的判断和 Esc 逃生口都在
+  // finishBootSplash() 里（以前在这里提前返回，导致常驻时 Esc 根本没挂上）。
   if (bootSplashTimer !== undefined) {
     window.clearTimeout(bootSplashTimer);
   }
@@ -727,7 +729,7 @@ function hideBootSplash() {
     bootSplashMinimumDurationMs - (Date.now() - bootSplashStartedAt),
   );
   bootSplashTimer = window.setTimeout(() => {
-    bootSplashVisible.value = false;
+    finishBootSplash();
     bootSplashTimer = undefined;
   }, remainingDuration + 180);
 }
@@ -789,7 +791,6 @@ function togglePlatformDetails() {
 
 onMounted(() => {
   installLauncherErrorLogging();
-  document.body.classList.add("launcher-app-mounted");
   downloadEstimateRefreshTimer = window.setInterval(() => {
     if (launcherState.value !== "downloading") return;
     downloadEstimate.value = downloadTimeEstimator.getEstimate(performance.now());
@@ -797,7 +798,7 @@ onMounted(() => {
   void (async () => {
     const bootStartedAt = performance.now();
     try {
-      bootSplashStatus.value = "读取本地状态";
+      updateBootSplash({ status: "读取本地状态" });
       gameProcessExitedUnlisten = await listen("game-process-exited", async () => {
         gameRunning.value = false;
         gameLaunchPending.value = false;
@@ -817,7 +818,7 @@ onMounted(() => {
       });
       await nextTick();
 
-      bootSplashStatus.value = "准备界面资源";
+      updateBootSplash({ status: "准备界面资源" });
       await Promise.all([wait(Math.max(0, 900 - (performance.now() - bootStartedAt))), loadBootResources()]);
     } catch (error) {
       console.warn("Launcher boot initialization failed", error);
@@ -3959,6 +3960,7 @@ const settingsContext = {
   developerChannelsStatus,
   developerGameTitle,
   developerGameVersion,
+  developerHoldBootSplash,
   developerNoticeContent,
   developerNoticeLevel,
   developerNoticePending,
@@ -4049,21 +4051,6 @@ provide(settingsContextKey, settingsContext);
       大时由 100vw/100vh 让贴边的元素各自靠边。背景 / 扫描线留在画布外面满铺。
     -->
     <div class="ui-canvas">
-
-    <Transition name="boot-splash">
-      <section v-if="bootSplashVisible" class="boot-splash">
-        <div class="boot-splash__grain"></div>
-        <div class="boot-splash__center">
-          <img v-if="activeGame.bootLogoSrc" class="boot-splash__logo" :src="activeGame.bootLogoSrc" :alt="activeGame.name" />
-          <span v-else class="boot-splash__placeholder" aria-hidden="true">{{ activeGame.shortLabel }}</span>
-          <div class="boot-splash__line">
-            <span></span>
-          </div>
-          <p>{{ bootSplashStatus }}</p>
-        </div>
-        <strong>Now Loading...</strong>
-      </section>
-    </Transition>
 
     <header class="titlebar">
       <section v-if="!gameOverviewVisible" class="brand">

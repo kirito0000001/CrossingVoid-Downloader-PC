@@ -37,6 +37,7 @@ const {
   dangerConfirmTitle,
   developerGameTitle,
   developerGameVersion,
+  developerHoldBootSplash,
   developerChannels,
   developerChannelsPending,
   developerChannelsStatus,
@@ -359,6 +360,11 @@ const {
                   <PackageOpen :size="22" />
                   <span>{{ developerTaskPending ? t("dev.running") : t("dev.packageLauncher") }}</span>
                 </button>
+              </div>
+
+              <div class="setting-block">
+                <span class="setting-title">调试</span>
+                <LauncherCheckbox v-model="developerHoldBootSplash" label="加载界面常驻（勾上后下次启动开始，调加载界面用）" />
               </div>
 
               <div class="setting-block">

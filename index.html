@@ -5,6 +5,19 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>零境启动器</title>
     <style>
+      /*
+       * 启动加载界面（boot splash）就写在这里，**不在 Vue 里**。
+       *
+       * 为什么：它是窗口里出现的第一帧，必须跟着第一份 HTML 解析出来，不能等打包后的 CSS。
+       * 以前它是 App.vue 里的 `<section v-if="bootSplashVisible" class="boot-splash">`，
+       * 样式来自打包后的 CSS —— JS 先跑完、Vue 先把主界面画出来，CSS 还没应用上时加载层
+       * 是**没有样式**的普通块（不 fixed、不压 z-index），于是用户先看到主界面闪一下，
+       * 等 CSS 到位加载层才"贴"上来。所以这里的样式一律内联，不依赖任何外部 CSS。
+       *
+       * 主题色：等 App.vue 的 :root 变量加载后，下面 `var(--cv-*, 兜底色)` 会自动换成当前主题色；
+       * 在那之前用兜底色显示。JS 跑起来之前的空白 WebView 由窗口背景色兜底
+       * （tauri.conf.json 的 backgroundColor）。
+       */
       html,
       body,
       #app {
@@ -12,32 +25,243 @@
         height: 100%;
         margin: 0;
         overflow: hidden;
-        background:
-          radial-gradient(circle at 72% 38%, rgba(210, 170, 92, 0.12), transparent 24%),
-          linear-gradient(115deg, #050708, #0d1214);
+        background: #0a0e11;
       }
 
-      body::before {
-        content: "";
+      @font-face {
+        font-family: "CVBootMono";
+        src: url("/launcher/unispace_bd.ttf") format("truetype");
+        font-display: swap;
+      }
+
+      #boot-splash {
         position: fixed;
+        inset: 0;
+        z-index: 500;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        background:
+          linear-gradient(115deg, var(--cv-bg-deep, #090c0e), var(--cv-bg-page, #0b1013)),
+          #0a0e11;
+        transition: opacity 340ms ease, filter 340ms ease;
+        /*
+         * 加载层是"图片 + 文字"，默认可以被鼠标框选、还能把 logo 拖走（选中就是一片蓝底）。
+         * 整套界面在 .launcher-shell 里已经关掉了选择，这里补上同样的规则。
+         */
+        user-select: none;
+        -webkit-user-select: none;
+        cursor: default;
+      }
+
+      #boot-splash * {
+        user-select: none;
+        -webkit-user-select: none;
+      }
+
+      #boot-splash img {
+        -webkit-user-drag: none;
+      }
+
+      /*
+       * `hidden` 属性在 UA 样式里只是 `display: none`，会被下面 `.boot-splash__placeholder { display: grid }`
+       * 这类作者样式盖掉 —— 于是"有 logo 时隐藏占位方块"会失效（现场表现为 logo 上方多一个「零」方块）。
+       * 这里把它按住。
+       */
+      #boot-splash [hidden] {
+        display: none !important;
+      }
+
+      #boot-splash.is-hiding {
+        opacity: 0;
+        filter: blur(8px);
+        pointer-events: none;
+      }
+
+      #boot-splash::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background:
+          radial-gradient(circle at 72% 38%, rgba(210, 170, 92, 0.16), transparent 23%),
+          linear-gradient(120deg, transparent 0 38%, rgba(255, 255, 255, 0.09) 46%, transparent 55% 100%);
+        opacity: 0.88;
+      }
+
+      #boot-splash::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background-image: linear-gradient(rgba(255, 255, 255, 0.13) 1px, transparent 1px);
+        background-size: 100% 5px;
+        opacity: 0.18;
+      }
+
+      .boot-splash__grain {
+        position: absolute;
+        inset: -20%;
+        background: repeating-linear-gradient(90deg, transparent 0 16px, rgba(210, 170, 92, 0.05) 17px, transparent 18px 35px);
+        opacity: 0.2;
+        transform: rotate(-10deg);
+        animation: boot-grain-drift 6s linear infinite;
+      }
+
+      /*
+       * 内容层：**和别的页面同一条规则**（见 Docs/PCLauncherDevelopmentGuide.md 10.3）——
+       * 按 1200×675 的设计坐标原样排版，不做任何跟随窗口的等比缩放；
+       * 窗口比设计尺寸小时裁掉超出部分，大时由 inset:0 让它跟着窗口长。
+       * 纹理层留在外面满铺，所以任何窗口比例都不会露边。
+       */
+      .boot-splash__scaled {
+        position: absolute;
         left: 50%;
         top: 50%;
-        width: 286px;
-        height: 100px;
-        background: url("/launcher/logo_white.png") center / contain no-repeat;
-        filter: drop-shadow(0 12px 18px rgba(0, 0, 0, 0.62));
-        pointer-events: none;
+        width: 1200px;
+        height: 675px;
         transform: translate(-50%, -50%);
-        transition: opacity 160ms ease;
+        display: grid;
+        place-items: center;
       }
 
-      body.launcher-app-mounted::before {
-        opacity: 0;
+      .boot-splash__center {
+        position: relative;
+        z-index: 1;
+        display: grid;
+        justify-items: center;
+        gap: 18px;
+      }
+
+      .boot-splash__logo {
+        /* 设计尺寸写死，窗口大小由 .boot-splash__scaled 的缩放负责（文案别再用百分比 max-width 兜）。 */
+        width: 286px;
+        height: auto;
+        object-fit: contain;
+        filter:
+          drop-shadow(0 12px 18px rgba(0, 0, 0, 0.62))
+          drop-shadow(0 0 20px rgba(240, 215, 154, 0.25));
+        animation: boot-logo-breathe 2.4s ease-in-out infinite;
+      }
+
+      .boot-splash__placeholder {
+        width: 92px;
+        height: 92px;
+        display: grid;
+        place-items: center;
+        border: 1px solid rgba(255, 255, 255, 0.32);
+        border-radius: 6px;
+        background: rgba(4, 10, 15, 0.78);
+        color: var(--cv-accent-title, #f0d79a);
+        font-size: 34px;
+        font-weight: 950;
+        box-shadow: 0 16px 38px rgba(0, 0, 0, 0.42);
+      }
+
+      .boot-splash__line {
+        position: relative;
+        width: 284px;
+        height: 8px;
+        overflow: hidden;
+        border: 1px solid var(--cv-download-progress-border, rgba(255, 224, 116, 0.46));
+        background: rgba(5, 9, 12, 0.66);
+        box-shadow: 0 0 18px var(--cv-download-progress-glow, rgba(255, 213, 97, 0.2));
+        transform: skewX(-16deg);
+      }
+
+      .boot-splash__line span {
+        position: absolute;
+        inset: 1px;
+        width: 44%;
+        background: linear-gradient(
+          90deg,
+          transparent,
+          var(--cv-download-progress-start, #d3aa49),
+          var(--cv-download-progress-end, #ffe074),
+          transparent
+        );
+        filter: drop-shadow(0 0 10px var(--cv-download-progress-glow, rgba(255, 213, 97, 0.46)));
+        animation: boot-line-sweep 1.18s linear infinite;
+      }
+
+      #boot-splash p {
+        margin: 0;
+        color: var(--cv-accent-title, #f0d79a);
+        font-size: 13px;
+        font-weight: 900;
+        letter-spacing: 0;
+        text-shadow: 0 2px 8px rgba(0, 0, 0, 0.56);
+      }
+
+      #boot-splash > strong {
+        /* 相对窗口右下角（遮罩本身 fixed:inset:0，所以这里 absolute 就是贴窗口）。 */
+        position: absolute;
+        right: 66px;
+        bottom: 44px;
+        z-index: 1;
+        color: var(--cv-accent-title, #f0d79a);
+        font-family: "CVBootMono", "Segoe UI", sans-serif;
+        font-size: 18px;
+        font-weight: 950;
+        letter-spacing: 0;
+        text-shadow: 0 2px 12px rgba(0, 0, 0, 0.65);
+      }
+
+      @keyframes boot-line-sweep {
+        from {
+          transform: translateX(-120%);
+        }
+        to {
+          transform: translateX(250%);
+        }
+      }
+
+      @keyframes boot-logo-breathe {
+        0%,
+        100% {
+          opacity: 0.92;
+          transform: scale(1);
+        }
+        50% {
+          opacity: 1;
+          transform: scale(1.018);
+        }
+      }
+
+      @keyframes boot-grain-drift {
+        from {
+          transform: translateX(-3%) rotate(-10deg);
+        }
+        to {
+          transform: translateX(3%) rotate(-10deg);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #boot-splash,
+        .boot-splash__logo,
+        .boot-splash__grain,
+        .boot-splash__line span {
+          animation: none;
+        }
       }
     </style>
   </head>
 
   <body>
+    <!-- 启动加载界面：第一帧就存在，Vue 只负责改文案 / 换 logo / 加载完淡出（见 src/bootSplash.ts）。 -->
+    <div id="boot-splash" role="status" aria-live="polite">
+      <div class="boot-splash__grain"></div>
+      <!-- 直接挂在遮罩下（不放进中间那个设计框）：它的 right/bottom 是相对**窗口**算的。 -->
+      <strong>Now Loading...</strong>
+      <div class="boot-splash__scaled">
+        <div class="boot-splash__center">
+          <img id="boot-splash-logo" class="boot-splash__logo" src="/launcher/logo_white.png" alt="" draggable="false" />
+          <span id="boot-splash-placeholder" class="boot-splash__placeholder" hidden>零</span>
+          <div class="boot-splash__line"><span></span></div>
+          <p id="boot-splash-status">正在启动启动器</p>
+        </div>
+      </div>
+    </div>
+
     <div id="app"></div>
     <script type="module" src="/src/main.ts"></script>
   </body>

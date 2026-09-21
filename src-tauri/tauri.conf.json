@@ -6,6 +6,7 @@
     },
     "windows": [
       {
+        "backgroundColor": "#0a0e11",
         "center": true,
         "decorations": false,
         "height": 675,

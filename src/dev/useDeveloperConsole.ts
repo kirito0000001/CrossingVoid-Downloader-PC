@@ -22,8 +22,10 @@ import {
   DEV_GAME_TITLE_STORAGE_KEY,
   DEV_GAME_VERSION_STORAGE_KEY,
   DEV_GAME_WINDOWS_PATH_STORAGE_KEY,
+  HOLD_BOOT_SPLASH_STORAGE_KEY,
   DEV_PACKAGE_PATH_STORAGE_KEY,
 } from "../storageKeys";
+import { releaseHeldBootSplash } from "../bootSplash";
 
 /**
  * 开发页（打包 / 发布 / 上传 / 远程公告）的全部状态与操作。
@@ -69,9 +71,20 @@ export function useDeveloperConsole(host: DeveloperConsoleHost) {
         : "D:\\启动器新包",
     ),
   );
-  const developerGameVersion = ref(window.localStorage.getItem(DEV_GAME_VERSION_STORAGE_KEY) || "V0.5.12");
-  const developerGameTitle = ref(window.localStorage.getItem(DEV_GAME_TITLE_STORAGE_KEY) || "零境交错：空界幻境更新包");
-  const developerTaskPending = ref(false);
+  const developerGameVersion = ref(window.localStorage.getItem(DEV_GAME_VERSION_STORAGE_KEY) || "V0.5.12");
+  const developerGameTitle = ref(window.localStorage.getItem(DEV_GAME_TITLE_STORAGE_KEY) || "零境交错：空界幻境更新包");
+  /**
+   * 加载界面常驻（开发/测试）：勾上后启动加载界面不再消失，方便调它的尺寸位置。
+   * 写进 localStorage，勾一次就记住；取消勾选时如果它还停在那儿，立刻收掉。
+   */
+  const developerHoldBootSplash = ref(
+    window.localStorage.getItem(HOLD_BOOT_SPLASH_STORAGE_KEY) === "1",
+  );
+  watch(developerHoldBootSplash, (enabled) => {
+    window.localStorage.setItem(HOLD_BOOT_SPLASH_STORAGE_KEY, enabled ? "1" : "0");
+    if (!enabled) releaseHeldBootSplash();
+  });
+  const developerTaskPending = ref(false);
   const developerTaskKind = ref<DeveloperTaskKind>("idle");
   const developerTaskPercent = ref(0);
   const developerTaskMessage = ref("");
@@ -609,6 +622,7 @@ export function useDeveloperConsole(host: DeveloperConsoleHost) {
     canResumeDeveloperUpload,
     chooseDeveloperPackagePath,
     developerGameTitle,
+    developerHoldBootSplash,
     developerGameUploadActive,
     developerGameVersion,
     developerNoticeContent,

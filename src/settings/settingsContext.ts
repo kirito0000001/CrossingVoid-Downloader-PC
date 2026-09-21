@@ -21,6 +21,7 @@ export type SettingsContext = {
   developerChannelsStatus: any;
   developerGameTitle: any;
   developerGameVersion: any;
+  developerHoldBootSplash: any;
   developerNoticeContent: any;
   developerNoticeLevel: any;
   developerNoticePending: any;

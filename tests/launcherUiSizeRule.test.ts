@@ -52,7 +52,8 @@ describe("启动器界面尺寸规则（整体）", () => {
 
   it("没有任何页面自己再引入一份窗口缩放", () => {
     // 唯一允许出现缩放开关的地方是这条测试和文档；源码里不许再有 uiScale / --ui-scale。
-    const offenders = sourceFiles().filter((file) => {
+    // index.html 也要一起查：启动加载界面就在那里，它同样属于"整体规则"。
+    const offenders = [...sourceFiles(), resolve(process.cwd(), "index.html")].filter((file) => {
       const text = readFileSync(file, "utf8");
       // 允许注释里提到它（说明为什么不用），只禁止真正的代码/声明。
       const code = text.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "");
@@ -69,9 +70,9 @@ describe("启动器界面尺寸规则（整体）", () => {
     expect(canvasEnd).toBeGreaterThan(canvasStart);
     const inside = appSource.slice(canvasStart, canvasEnd);
     // 逐个确认"每一个界面"都挂在画布内，避免出现"这页缩、那页不缩"。
+    // 启动加载界面不在这里：它是 index.html 里的静态层（必须早于打包 CSS，见 bootSplash.ts）。
     for (const marker of [
       'class="titlebar"',
-      "boot-splash",
       "<SettingsPanel",
       "remote-notice-mask",
       "<PlatformGameRail",

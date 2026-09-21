@@ -381,6 +381,38 @@ check()
 > 两个窗口是 1518×856 与 1502×846（同一台机器、同一 DPI）。
 > 全部元素都正好放大 **1.186 倍 = 1 / 0.843**，所以目标图就是"界面 1:1、超出窗口的部分裁掉"的旧行为。
 
+### 10.4 启动加载界面（必须是第一帧，2026-09-21 重构）
+
+**规则：加载界面是窗口里出现的第一帧，并且一直盖住主界面，直到加载完成才淡出。**
+它现在**不在 Vue 里**：
+
+| 部分 | 位置 | 职责 |
+| --- | --- | --- |
+| DOM + 样式 | `index.html` 内联（`#boot-splash`，`position: fixed; z-index: 500`） | 跟第一份 HTML 一起解析，不依赖打包后的 CSS |
+| 控制器 | `src/bootSplash.ts` | `updateBootSplash()` 改文案/换当前游戏的 logo；`finishBootSplash()` 淡出并**移除** |
+| 调用方 | `src/App.vue` | 各阶段推进文案（读取本地状态 → 准备界面资源 → 预载界面资源…），最短展示 1800ms |
+| 空白帧兜底 | `src-tauri/tauri.conf.json` `app.windows[0].backgroundColor: "#0a0e11"` | JS 起来之前窗口不是白的 |
+
+`finishBootSplash()` 必须是**移除**而不是隐藏：加载层盖在所有界面之上，留着就是一个挡住点击的空图层。
+
+加载层的内容缩放**和以前那套界面缩放是同一个系数**：`min(窗口宽/1200, 窗口高/675)`（contain）。
+做法是 `.boot-splash__scaled` 这一层按 1200×675 设计尺寸排版、整体乘 `--boot-scale` 并居中，
+系数由 `<head>` 里的内联脚本算好写在 `<html>` 上（第一帧就是缩放后的样子）；纹理层留在外面满铺。
+内容本身写死设计尺寸（logo 286px、进度线 284px），**不要再用 `max-width: 36%` 之类的百分比**——
+那个百分比在 `display: grid` 父级里是按"网格区域"解析的，会把 logo 卡到约 103px（现场就是 logo 缩水）。
+
+**为什么改成这样**（用户原话："会先闪一下才会有这个加载，加载本来就应该是最先出现的，不是像后面才贴上来一样"
++ 补充"是闪了别的页面"）：以前它是 `App.vue` 里的
+`<section v-if="bootSplashVisible" class="boot-splash">`，样式来自打包后的 CSS ——
+JS 先跑完、主界面先画出来，加载层在 CSS 到位前是个**没有样式**的普通块（不 fixed、不压层级），
+于是用户先看到主界面闪一下，加载层随后才"贴"上来。
+
+> 出处：用户反馈（2026-09-21）+ 本地验证：
+> ① `index.html` 与打包产物 `dist/index.html` 里，`#boot-splash` 的样式和标记都排在 app 脚本之前；
+> ② 浏览器打开 `http://localhost:1420/` 后实测：`position: fixed`、`z-index: 500`、尺寸铺满视口、
+> `document.elementFromPoint(窗口中心)` 命中的元素在加载层内部（`topmostInsideSplash = true`）；
+> ③ `tests/bootSplash.test.ts` 守住"只有一份加载层 + 样式必须内联在 index.html"。
+
 ## 11. 游戏版本与下载来源
 
 ### 11.1 OSS 官方源

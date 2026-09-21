@@ -15,16 +15,19 @@ const placeholderSource = readFileSync(
   resolve(process.cwd(), "src/components/PlatformPlaceholderPage.vue"),
   "utf8",
 );
+const bootSplashSource = readFileSync(resolve(process.cwd(), "src/bootSplash.ts"), "utf8");
 
 describe("platform shell integration", () => {
   it("uses the active game for boot branding and page rendering", () => {
-    expect(appSource).toContain(":src=\"activeGame.bootLogoSrc");
+    // 加载界面本体在 index.html（第一帧），logo 由 App.vue 按当前游戏交给控制器更新。
+    expect(appSource).toContain("logoSrc: activeGame.value.bootLogoSrc");
+    expect(bootSplashSource).toContain("logoSrc");
     expect(appSource).toContain(":src=\"activeGame.brandLogoSrc");
     expect(appSource).toContain("isCrossingVoidActive");
     expect(appSource).toContain("<PlatformPlaceholderPage");
     expect(placeholderSource).toContain("platform-placeholder-page");
     expect(placeholderSource).toContain("页面资源尚未接入");
-    expect(appSource).toContain('new URLSearchParams(window.location.search).has("holdBoot")');
+    expect(bootSplashSource).toContain('new URLSearchParams(window.location.search).has("holdBoot")');
   });
 
   it("shows a reusable game rail when details are collapsed", () => {
