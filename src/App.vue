@@ -1945,7 +1945,7 @@ async function refreshTrafficQuota() {
   if (trafficQuotaPending.value) return;
   trafficQuotaPending.value = true;
   try {
-    // The quota may change immediately after a user buys an OSS traffic package.
+    // The quota may change immediately after the download-site traffic package is topped up.
     // Avoid displaying a stale browser/WebView cache entry as an active download block.
     const next = await fetchRemoteJson<TrafficQuotaResponse>(`${officialUpdateApiUrl}/traffic-status?t=${Date.now()}`);
     if (!next.success) throw new Error(next.message || "traffic quota request failed");
