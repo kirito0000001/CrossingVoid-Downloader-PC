@@ -40,6 +40,10 @@ pub struct GamePackageFile {
     pub size_bytes: u64,
     #[serde(default)]
     pub sha256: String,
+    /// 候选下载地址：首选源排第一，另一个源兜底。
+    /// 只用于下载入参，不写进本地状态（状态里只记 path/size/sha256）。
+    #[serde(default, skip_serializing)]
+    pub urls: Vec<String>,
 }
 
 /// 本地状态文件：与清单的 `files[]` 同形，多了 productKey / version 便于诊断。
@@ -194,6 +198,7 @@ pub fn scan_local_files(
             path: entry.path.clone(),
             size_bytes: metadata.len(),
             sha256,
+            urls: Vec::new(),
         });
     }
     Ok(found)
@@ -413,38 +418,60 @@ fn download_one_file(context: &DownloadFileContext, entry: GamePackageFile) -> R
     }
 
     let part = part_path(&target);
-    let url = join_download_url(&context.base_url, &entry.path);
+    let candidates = file_url_candidates(context, &entry);
+    if candidates.is_empty() {
+        return Err(format!("{} 没有可用的下载地址。", entry.path));
+    }
     let file_counted = AtomicU64::new(0);
     let mut last_error = String::new();
 
-    for attempt in 1..=DOWNLOAD_RETRY_ATTEMPTS {
-        check_download_cancelled()?;
-        // 每次重试前把这个文件上一轮计入总进度的字节退回去，避免进度越界。
-        let previous = file_counted.swap(0, Ordering::SeqCst);
-        if previous > 0 {
-            context.done_bytes.fetch_sub(previous, Ordering::SeqCst);
-        }
-        match download_one_file_once(context, &url, &part, &target, &entry, &file_counted) {
-            Ok(()) => {
-                let done_files = context.done_files.fetch_add(1, Ordering::SeqCst) + 1;
-                emit_progress_throttled(
-                    context.on_progress.as_ref(),
-                    context.last_emit.as_ref(),
-                    context.done_bytes.load(Ordering::SeqCst),
-                    context.total_bytes,
-                    done_files,
-                    context.total_files,
-                    true,
-                );
-                return Ok(());
+    // 双源混用就落在这里：先把首选源试到放弃，再换下一个源的地址。
+    for (candidate_index, url) in candidates.iter().enumerate() {
+        for attempt in 1..=DOWNLOAD_RETRY_ATTEMPTS {
+            check_download_cancelled()?;
+            // 每次重试前把这个文件上一轮计入总进度的字节退回去，避免进度越界。
+            let previous = file_counted.swap(0, Ordering::SeqCst);
+            if previous > 0 {
+                context.done_bytes.fetch_sub(previous, Ordering::SeqCst);
             }
-            Err(error) if error == DOWNLOAD_CANCELLED_ERROR => return Err(error),
-            Err(error) => {
-                last_error = error;
-                if attempt < DOWNLOAD_RETRY_ATTEMPTS {
-                    sleep_with_cancel(Duration::from_millis(350 * attempt as u64))?;
+            match download_one_file_once(context, url, &part, &target, &entry, &file_counted) {
+                Ok(()) => {
+                    let done_files = context.done_files.fetch_add(1, Ordering::SeqCst) + 1;
+                    emit_progress_throttled(
+                        context.on_progress.as_ref(),
+                        context.last_emit.as_ref(),
+                        context.done_bytes.load(Ordering::SeqCst),
+                        context.total_bytes,
+                        done_files,
+                        context.total_files,
+                        true,
+                    );
+                    return Ok(());
+                }
+                Err(error) if error == DOWNLOAD_CANCELLED_ERROR => return Err(error),
+                Err(error) => {
+                    last_error = error;
+                    // 这个地址上压根没有这个文件（比如备用源的附件名对不上），
+                    // 重试没意义，直接换下一个源的地址。
+                    if last_error.contains("404") {
+                        break;
+                    }
+                    if attempt < DOWNLOAD_RETRY_ATTEMPTS {
+                        sleep_with_cancel(Duration::from_millis(350 * attempt as u64))?;
+                    }
                 }
             }
+        }
+        if candidate_index + 1 < candidates.len() {
+            emit_progress_throttled(
+                context.on_progress.as_ref(),
+                context.last_emit.as_ref(),
+                context.done_bytes.load(Ordering::SeqCst),
+                context.total_bytes,
+                context.done_files.load(Ordering::SeqCst),
+                context.total_files,
+                true,
+            );
         }
     }
 
@@ -457,6 +484,20 @@ fn download_one_file(context: &DownloadFileContext, entry: GamePackageFile) -> R
         "下载 {} 失败（已重试 {DOWNLOAD_RETRY_ATTEMPTS} 次）：{last_error}",
         entry.path
     ))
+}
+
+/// 一个文件的候选地址：优先用清单给的多源地址，没给就退回 `base_url + path`。
+fn file_url_candidates(context: &DownloadFileContext, entry: &GamePackageFile) -> Vec<String> {
+    if entry.urls.is_empty() {
+        return vec![join_download_url(&context.base_url, &entry.path)];
+    }
+    entry
+        .urls
+        .iter()
+        .map(|url| url.trim())
+        .filter(|url| url.starts_with("https://") || url.starts_with("http://"))
+        .map(str::to_string)
+        .collect()
 }
 
 fn download_one_file_once(
@@ -943,6 +984,7 @@ mod tests {
             path: path.to_string(),
             size_bytes: bytes.len() as u64,
             sha256: sha256_hex(bytes),
+            urls: Vec::new(),
         }
     }
 
@@ -965,6 +1007,34 @@ mod tests {
             entries.push(entry(path, &body));
         }
         (bodies, entries)
+    }
+
+    #[test]
+    fn falls_back_to_the_next_source_when_the_first_one_has_no_such_file() {
+        let (bodies, mut entries) = fixture();
+        let server = start_fake_server(bodies, StdHashMap::new());
+        let install = temp_dir("fallback");
+
+        // 首选源上这个文件不存在（404），第二个候选地址才是真的 —— 这就是双源兜底。
+        let good_url;
+        let expected_sha;
+        let target = entries
+            .iter_mut()
+            .find(|entry| entry.path == "CrossingVoid.exe")
+            .expect("fixture entry");
+        good_url = format!("{}/{}", server.base_url, target.path);
+        expected_sha = target.sha256.clone();
+        target.urls = vec![
+            format!("{}/{}", server.base_url, "missing/not-there.exe"),
+            good_url,
+        ];
+
+        download_files(&install, &server.base_url, &entries, 4, |_, _, _, _| {})
+            .expect("fallback download");
+
+        let bytes = fs::read(install.join("CrossingVoid.exe")).expect("downloaded file");
+        assert_eq!(sha256_hex(&bytes), expected_sha);
+        fs::remove_dir_all(install).expect("remove temp dir");
     }
 
     #[test]
@@ -1049,6 +1119,7 @@ mod tests {
             path: "../escape.txt".to_string(),
             size_bytes: 3,
             sha256: sha256_hex(b"abc"),
+            urls: Vec::new(),
         }];
 
         let error = download_files(&install, &server.base_url, &hostile, 4, |_, _, _, _| {})

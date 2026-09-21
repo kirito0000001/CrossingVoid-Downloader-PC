@@ -13,6 +13,9 @@ export const GAME_PACKAGE_CORE_VERSION = "1";
 /** 下载站根地址；清单与文件都在它下面。 */
 export const GAME_PACKAGE_BASE_URL = "https://dl.crossingvoid.top";
 
+/** 游戏包所在的 GitHub 仓库（备用源）。 */
+export const GAME_PACKAGE_GITHUB_REPOSITORY = "kirito0000001/CrossingVoid";
+
 export type GamePackagePlatform = "Windows" | "Android";
 export type GamePackageChannel = "stable" | "test";
 
@@ -92,6 +95,116 @@ const ILLEGAL_PATH_CHARACTERS = /[<>:"|?*]/;
 
 export function gamePackageManifestUrl(productSegment: string) {
   return `${GAME_PACKAGE_BASE_URL}/games/${productSegment}/latest.json`;
+}
+
+/** 下载站的文件地址：`baseUrl + path`（baseUrl 以 `/` 结尾）。 */
+export function officialGamePackageFileUrl(baseUrl: string, path: string) {
+  const base = baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`;
+  return `${base}${path.trim().replace(/\\/g, "/").replace(/^\/+/, "")}`;
+}
+
+/**
+ * GitHub Release 附件的命名规则：路径里的 `/` 换成 `__`。
+ *
+ * 例如 `CrossingVoid/Binaries/Win64/CrossingVoid-Win64-Shipping.exe`
+ * → `CrossingVoid__Binaries__Win64__CrossingVoid-Win64-Shipping.exe`。
+ * 根目录文件保持原名。上传侧与这里必须一致。
+ */
+export function githubGameAssetName(path: string) {
+  return path
+    .trim()
+    .replace(/\\/g, "/")
+    .split("/")
+    .filter((segment) => segment && segment !== ".")
+    .join("__");
+}
+
+/** Release 标签：`PC-V0.5.14` / `Android-V0.5.14`（版本号自带 v 时只保留一个）。 */
+export function githubGameReleaseTag(platformPrefix: string, version: string) {
+  return `${platformPrefix.trim()}-V${version.trim().replace(/^v/i, "")}`;
+}
+
+/** GitHub Release 的下载基址（末尾带 `/`）。 */
+export function githubGameReleaseBaseUrl(repository: string, tag: string) {
+  const repo = repository.trim().replace(/^\/+|\/+$/g, "");
+  return `https://github.com/${repo}/releases/download/${encodeURIComponent(tag)}/`;
+}
+
+/** Release 里那份清单附件（上传侧固定叫这个名字）。 */
+export const GITHUB_GAME_MANIFEST_ASSET = "manifest.json";
+
+/** GitHub Release 里清单附件的下载地址。 */
+export function githubGameManifestUrl(repository: string, tag: string) {
+  return `${githubGameReleaseBaseUrl(repository, tag)}${encodeURIComponent(GITHUB_GAME_MANIFEST_ASSET)}`;
+}
+
+export type GitHubReleaseAssetSummary = {
+  id?: number;
+  name?: string;
+  size?: number;
+  digest?: string;
+};
+
+export type GitHubReleaseSummary = {
+  tag_name?: string;
+  name?: string;
+  draft?: boolean;
+  prerelease?: boolean;
+  created_at?: string;
+  assets?: GitHubReleaseAssetSummary[];
+};
+
+/**
+ * 从 Release 列表里挑出"本平台、且带清单附件"的那一条。
+ *
+ * 只认标签前缀（`PC-V` / `Android-V`）与附件名（`manifest.json`），
+ * 所以列表里混着安卓/PC/旧流程的 release 也不会挑错。
+ */
+export function pickGitHubGameRelease(
+  releases: readonly GitHubReleaseSummary[],
+  options: { tagPrefix: string; assetName?: string; allowPrerelease?: boolean },
+) {
+  const prefix = options.tagPrefix.trim().toLowerCase();
+  const assetName = (options.assetName ?? GITHUB_GAME_MANIFEST_ASSET).trim().toLowerCase();
+  if (!prefix || !assetName) return null;
+
+  for (const release of releases) {
+    if (release.draft || (!options.allowPrerelease && release.prerelease)) continue;
+    const tag = (release.tag_name ?? "").trim();
+    if (!tag.toLowerCase().startsWith(prefix)) continue;
+    const asset = (release.assets ?? []).find(
+      (item) => (item.name ?? "").trim().toLowerCase() === assetName,
+    );
+    if (asset) return { tag, asset };
+  }
+  return null;
+}
+
+export type GamePackageSourceKey = "official" | "github";
+
+/**
+ * 每个文件的候选下载地址：**首选源排第一，另一个源兜底**。
+ *
+ * 这样"双源混用"是天然的：某个文件在首选源上 404 或校验失败时，
+ * 同一个文件会自动从另一个源取；一次会话里两个源可以同时供文件。
+ * 被渠道开关关掉的源不会进列表。
+ */
+export function buildGamePackageUrlCandidates(options: {
+  path: string;
+  officialBaseUrl: string;
+  githubReleaseBaseUrl: string;
+  preferred: GamePackageSourceKey;
+  officialEnabled?: boolean;
+  githubEnabled?: boolean;
+}): string[] {
+  const official = options.officialEnabled === false
+    ? ""
+    : officialGamePackageFileUrl(options.officialBaseUrl, options.path);
+  const github = options.githubEnabled === false || !options.githubReleaseBaseUrl
+    ? ""
+    : `${options.githubReleaseBaseUrl}${encodeURIComponent(githubGameAssetName(options.path))}`;
+  const ordered = options.preferred === "github" ? [github, official] : [official, github];
+  return ordered.filter((url) => Boolean(url));
 }
 
 export function withCacheBuster(url: string, now: number = Date.now()) {

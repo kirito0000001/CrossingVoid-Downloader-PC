@@ -13,7 +13,7 @@
 | # | 决策 | 含义 |
 | --- | --- | --- |
 | 1 | **切 v1-only** | 清单只认 `schemaVersion === 1`，来源改成 dl 的 `latest.json`；www 的 v2 链路**代码保留不删、不再调用**（回滚用） |
-| 2 | **GitHub 下载源本期不动** | `official` / `github` 两个选项都留着，本次只保证 `official` 指向 dl；GitHub 分支用户后续自己修 |
+| 2 | ~~**GitHub 下载源本期不动**~~ → **2026-09-21 已双向打通** | 上传侧修好后，两个平台都接上了 GitHub 备用源，见 1.1 |
 | 3 | **安卓本期一律重组 OBB** | 不做 `Saved/Paks` 快速路径；原因与代价见第六章，等真机验证优先级后再开 |
 
 ---
@@ -34,6 +34,26 @@
 | 断点续传 | PC `pakchunk0-Windows.ucas`(961,189,680)、安卓 `pakchunk0-Android.ucas`(683,705,488)、安卓 apk 三个大文件都实测 **206 + `Accept-Ranges: bytes`** |
 | 旧版 | `manifests/0.5.13.json` 已 **404**（树里只留最新版） |
 | ⚠️ 还在跑老流程的入口 | www 的 `manifests/game/windows-latest.json` / `android-latest.json` **仍是 v2 / V0.5.12**（OSS zip + 切片）→ 启动器必须改读 dl 的 `latest.json`，不要再读它们 |
+
+### 1.1 GitHub 备用源（2026-09-21 实测）
+
+同一份产物在 GitHub Release 里也放了一份，命名规则是**路径里的 `/` 换成 `__`**（根目录文件保持原名）：
+
+| 项 | 实测值 |
+| --- | --- |
+| 仓库 / 标签 | `kirito0000001/CrossingVoid`，标签 `PC-V<版本>`、`Android-V<版本>`（例：`PC-V0.5.14`） |
+| 附件名 | `CrossingVoid/Binaries/Win64/CrossingVoid-Win64-Shipping.exe` → `CrossingVoid__Binaries__Win64__CrossingVoid-Win64-Shipping.exe` |
+| 内容级比对 | 每个附件都带 `digest: sha256:…`，与清单里的 `files[].sha256` **完全一致** |
+| 覆盖度实测 | PC 清单 86 条 → **86/86 都能对上**；安卓 65 条 → **65/65 都能对上**；sha256 不一致 0 条 |
+| 额外附件 | 每个 Release 还多一个 `manifest.json`（就是那份 v1 清单本身），所以将来清单也能从 GitHub 读 |
+
+启动器侧的实现：每个文件带**候选地址列表**（首选源在前，另一个源兜底），
+首选源 404 或校验失败就自动换另一个源 —— 这就是"双源混用"。被远程渠道开关关掉的源不参与候选。
+
+**清单本身也有兜底**（2026-09-21 补）：正常情况下读 dl 的 `latest.json → manifestUrl`；
+下载站挂了或该渠道被关，就改成走 GitHub Releases API 挑出 `PC-V*` / `Android-V*` 里带
+`manifest.json` 的那条，再从 Release 里读同一份清单（两边 sha256 完全一致）。
+文件地址会跟着"清单实际来自哪条 release 的标签"走，不靠猜版本号。
 
 ---
 
@@ -216,7 +236,7 @@ B 的官方写法是用 `_P.pak` 命名（引擎会给 patch pak 提优先级）
 
 | 步骤 | 状态 |
 | --- | --- |
-| 共用内核 `src/services/gamePackage.ts`（与 PC 逐字相同，LF sha256 `57cc72b0…`） | ✅ 已落地，两边各有哈希守卫测试 |
+| 共用内核 `src/services/gamePackage.ts`（与 PC 逐字相同，LF sha256 `141469941f0c…`） | ✅ 已落地，两边各有哈希守卫测试 |
 | v1 服务层 `src/services/gamePackageUpdate.ts`：latest → 清单 → OBB 旁车 → 差异计划（含 `needsObbRebuild` 判定） | ✅ 已落地（9 项单测） |
 | 原生计划模型 `GamePackagePlan.java`（路径/sha256/大小/URL/旁车条目校验） | ✅ 已落地（6 项单测） |
 | 原生 OBB 组装 `ObbAssembler.java`（STORED + 复用旧 OBB 条目，见 6.1） | ✅ 已落地（5 项单测） |
@@ -232,6 +252,25 @@ B 的官方写法是用 `_P.pak` 命名（引擎会给 patch pak 提优先级）
 > **本机跑 Java 单测**：`JAVA_HOME` 要指到 JDK 21（PATH 里的 java 是 21，但 `JAVA_HOME` 是 17，
 > 用 17 会报 `无效的源发行版：21`）：
 > `$env:JAVA_HOME='C:\Program Files\Eclipse Adoptium\jdk-21.0.11.10-hotspot'; cd android; .\gradlew.bat :app:testDebugUnitTest`
+
+### 6.3 安卓接收 PC 开发页的公告与渠道开关（2026-09-21）
+
+目标：**公告板和下载渠道开关只从 PC 开发页发布一次**，安卓端只负责接收与展示，
+两边读同一份线上文档，玩家看到的开关状态因此完全一致。安卓不做自己的发布入口。
+
+| 项 | 做法 |
+| --- | --- |
+| 发布位置 | `https://www.crossingvoid.top/launcher-notice.json`、`…/launcher-download-channels.json`（PC 开发页写） |
+| 共用文件 | `src/remoteLauncherInfo.ts`，与 PC 的 `src/remoteLauncherInfo.ts` **逐字相同**（LF sha256 `f617fd8ca540…`），两边各有哈希守卫测试 |
+| 共用内容 | URL 常量、公告/渠道文档的类型、`parseRemoteLauncherNotice`、`parseRemoteDownloadChannels`、`resolveDownloadChannelStates`、渠道是否可用/自动换源/说明文案 |
+| 安卓接收层 | `src/services/remoteLauncherInfoClient.ts`：只负责用 `CapacitorHttp` 拉取，解析全部交给共用内核 |
+| 公告落位 | 公告页（原先是硬编码文案）显示标题/时间/正文 + 手动刷新；启动时另有一个可关闭的弹窗，和 PC 同形 |
+| 渠道落位 | 设置页的两个下载源按钮：被关的置灰并显示「已关闭」；当前渠道被关时首页提示「当前渠道已关闭，请更换」，并自动切到还开着的那个 |
+| 真正生效的地方 | 开关不只是画个灰按钮：清单请求（`fetchAndroidGamePackage`）与下载计划（`buildAndroidGameDownloadPlan`）都会拿到 `officialEnabled` / `githubEnabled`，被关的源连"试一下"都不做 |
+| 容错 | 公告拉不到／格式不对 → 按"没有公告"；渠道文档 404（线上现在就是）或格式不对 → 按"全部开放"，不把玩家挡在门外 |
+
+> PC 侧的改动是把原来散在 `App.vue` 里的公告解析和 `downloadChannels.ts` 一起并进这个共用文件，
+> 所以这次不是"再抄一遍"，而是**两端只剩一份解析逻辑**。
 
 ---
 

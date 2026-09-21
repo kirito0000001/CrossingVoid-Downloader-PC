@@ -26,9 +26,14 @@ use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
 };
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+};
 
 static DOWNLOAD_CANCELLED: AtomicBool = AtomicBool::new(false);
 mod game_package;
+mod single_instance;
 mod webview_cleanup;
 
 static DOWNLOAD_SPEED_LIMIT_BYTES_PER_SECOND: std::sync::atomic::AtomicU64 =
@@ -968,8 +973,22 @@ fn uninstall_launcher() -> Result<(), String> {
 }
 
 #[tauri::command]
-fn is_game_running() -> bool {
-    is_game_process_running()
+fn is_game_running(install_path: String) -> bool {
+    !game_processes_for_install(&install_path).is_empty()
+}
+
+/// 当前被判成"游戏在跑"的进程清单（pid / 进程名 / 可执行文件路径）。
+/// 界面用它来告诉玩家到底是哪个进程被认成了游戏，而不是只给一个没有出路的"游戏运行中"。
+#[tauri::command]
+fn list_game_processes(install_path: String) -> Vec<GameProcessInfo> {
+    game_processes_for_install(&install_path)
+}
+
+/// 强制结束被认成"游戏"的进程树（taskkill /T /F）。
+/// 用在"启动器卡在游戏运行中、但玩家其实没在玩"这种局面：先征得玩家同意，再清掉这个卡住的进程。
+#[tauri::command]
+fn stop_game_processes(install_path: String) -> Result<usize, String> {
+    stop_game_processes_internal(&install_path)
 }
 
 #[tauri::command]
@@ -4184,7 +4203,7 @@ fn launch_game_internal(
     if !exe_path.is_file() {
         return Err(format!("Game executable not found: {}", exe_path.display()));
     }
-    if is_game_process_running() {
+    if !game_processes_for_install(&install_dir.to_string_lossy()).is_empty() {
         if exit_launcher {
             app.exit(0);
         }
@@ -4240,11 +4259,29 @@ fn launch_game_internal(
 }
 
 #[cfg(windows)]
-fn is_game_process_running() -> bool {
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GameProcessInfo {
+    process_id: u32,
+    name: String,
+    path: String,
+}
+
+/// 游戏进程的两个名字：安装根目录那个是 UE 的引导壳（BootstrapPackagedGame，它会等真正的游戏），
+/// 里面 `Binaries\Win64` 那个才是游戏本体。两个都算"游戏在跑"。
+#[cfg(windows)]
+const GAME_PROCESS_NAMES: [&str; 2] = ["CrossingVoid.exe", "CrossingVoid-Win64-Shipping.exe"];
+
+/// 按进程名枚举候选进程，并尽量取到可执行文件路径。
+/// 2026-09-21 的 bug 就是只看名字不看路径：机器上任何位置有个叫 `CrossingVoid.exe` 的进程，
+/// 启动器就会永远停在"游戏运行中"，玩家点不动开始游戏。
+#[cfg(windows)]
+fn list_game_process_candidates() -> Vec<GameProcessInfo> {
+    let mut result = Vec::new();
     unsafe {
         let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if snapshot == INVALID_HANDLE_VALUE {
-            return false;
+            return result;
         }
 
         let mut entry = std::mem::zeroed::<PROCESSENTRY32W>();
@@ -4257,21 +4294,118 @@ fn is_game_process_running() -> bool {
                 .position(|&unit| unit == 0)
                 .unwrap_or(entry.szExeFile.len());
             let exe_name = String::from_utf16_lossy(&entry.szExeFile[..name_end]);
-            if exe_name.eq_ignore_ascii_case("CrossingVoid.exe") {
-                let _ = CloseHandle(snapshot);
-                return true;
+            if GAME_PROCESS_NAMES
+                .iter()
+                .any(|candidate| exe_name.eq_ignore_ascii_case(candidate))
+            {
+                result.push(GameProcessInfo {
+                    process_id: entry.th32ProcessID,
+                    name: exe_name,
+                    path: query_process_image_path(entry.th32ProcessID).unwrap_or_default(),
+                });
             }
             found = Process32NextW(snapshot, &mut entry) != 0;
         }
 
         let _ = CloseHandle(snapshot);
-        false
+    }
+    result
+}
+
+#[cfg(windows)]
+fn query_process_image_path(process_id: u32) -> Option<String> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id);
+        if handle.is_null() {
+            return None;
+        }
+        let mut buffer = vec![0u16; 1024];
+        let mut size = buffer.len() as u32;
+        let ok = QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut size);
+        let _ = CloseHandle(handle);
+        if ok == 0 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&buffer[..size as usize]))
     }
 }
 
+/// 比较路径用的小写形式：去掉 `\\?\` 前缀、统一反斜杠、去掉结尾的分隔符。
+#[cfg(windows)]
+fn normalize_path_for_compare(value: &str) -> String {
+    let mut text = value.trim().replace('/', "\\").to_lowercase();
+    if let Some(stripped) = text.strip_prefix("\\\\?\\") {
+        text = stripped.to_string();
+    }
+    while text.ends_with('\\') {
+        text.pop();
+    }
+    text
+}
+
+#[cfg(windows)]
+fn path_is_under(process_path: &str, install_root: &str) -> bool {
+    let path = normalize_path_for_compare(process_path);
+    if path.is_empty() {
+        return false;
+    }
+    path == install_root || path.starts_with(&format!("{}\\", install_root))
+}
+
+/// 真正的判定：只认**安装目录里**的那两个 exe。
+/// 传空安装目录时退回老行为（按名字全机器匹配），保证调用方没传路径时也不会误报"没在跑"。
+fn game_processes_for_install(install_path: &str) -> Vec<GameProcessInfo> {
+    let candidates = list_game_process_candidates();
+    let install_root = normalize_path_for_compare(install_path);
+    if install_root.is_empty() {
+        return candidates;
+    }
+    candidates
+        .into_iter()
+        .filter(|process| path_is_under(&process.path, &install_root))
+        .collect()
+}
+
+fn stop_game_processes_internal(install_path: &str) -> Result<usize, String> {
+    let processes = game_processes_for_install(install_path);
+    let mut stopped = 0usize;
+    for process in processes {
+        let output = Command::new("taskkill")
+            .arg("/PID")
+            .arg(process.process_id.to_string())
+            .arg("/T")
+            .arg("/F")
+            .output()
+            .map_err(|error| format!("无法结束游戏进程 {}：{}", process.process_id, error))?;
+        if output.status.success() {
+            stopped += 1;
+        }
+    }
+    Ok(stopped)
+}
+
 #[cfg(not(windows))]
-fn is_game_process_running() -> bool {
-    false
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GameProcessInfo {
+    process_id: u32,
+    name: String,
+    path: String,
+}
+
+#[cfg(not(windows))]
+fn list_game_process_candidates() -> Vec<GameProcessInfo> {
+    Vec::new()
+}
+
+#[cfg(not(windows))]
+fn game_processes_for_install(_install_path: &str) -> Vec<GameProcessInfo> {
+    Vec::new()
+}
+
+#[cfg(not(windows))]
+fn stop_game_processes_internal(_install_path: &str) -> Result<usize, String> {
+    Ok(0)
 }
 
 #[cfg(windows)]
@@ -4459,7 +4593,7 @@ fn platform_available_space(_path: &str) -> Result<u64, String> {
 /// 一旦标记和窗口真实状态不一致（窗口被系统藏起来、或状态被外部改动），
 /// 光调 show() 会什么都不做，所以这里补一次系统级调用兜底。
 #[cfg(target_os = "windows")]
-fn force_show_window(window: &tauri::WebviewWindow) {
+fn force_show_window<R: tauri::Runtime>(window: &tauri::WebviewWindow<R>) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
     };
@@ -4480,7 +4614,7 @@ fn force_show_window(window: &tauri::WebviewWindow) {
 }
 
 /// 把主窗口从托盘/最小化状态叫回前台：托盘点击和“重复启动”都走这一条路径。
-fn show_main_window(app: &tauri::AppHandle) {
+fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
         #[cfg(target_os = "windows")]
         force_show_window(&window);
@@ -4528,10 +4662,8 @@ fn webview_cleanup_plugin<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> 
 pub fn run() {
     tauri::Builder::default()
         // 单实例必须最先注册：再次点击启动器图标时，第二个进程会把已经藏起来的窗口叫回来，
-        // 然后自己退出，而不是并排再开一个启动器。
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            show_main_window(app);
-        }))
+        // 然后自己退出，而不是并排再开一个启动器。实现见 single_instance.rs。
+        .plugin(single_instance::plugin())
         .plugin(webview_cleanup_plugin())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -4586,6 +4718,8 @@ pub fn run() {
             delete_installed_game,
             uninstall_launcher,
             is_game_running,
+            list_game_processes,
+            stop_game_processes,
             exit_launcher,
             launch_game,
             create_game_desktop_shortcut_now,

@@ -8,7 +8,7 @@ import { downloadSources } from "../launcherData";
 import {
   parseRemoteDownloadChannels,
   resolveDownloadChannelStates,
-} from "../downloadChannels";
+} from "../remoteLauncherInfo";
 import type {
   DevScriptFinishedEvent,
   DevScriptProgressEvent,

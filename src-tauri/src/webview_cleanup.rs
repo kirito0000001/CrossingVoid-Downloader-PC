@@ -171,6 +171,28 @@ fn launcher_process_name(name: &str) -> bool {
         .any(|candidate| name.eq_ignore_ascii_case(candidate))
 }
 
+/// 除了自己以外，还在运行的启动器进程（按可执行文件名判断）。
+///
+/// 单实例逻辑用它兜底：没有登记消息窗口的实例（旧版本、或没走到登记那一步的进程）
+/// 只能按进程名找，然后直接把它已经开着的窗口显示出来。
+#[cfg(windows)]
+pub fn other_launcher_process_ids() -> Vec<u32> {
+    let Some(processes) = snapshot_processes() else {
+        return Vec::new();
+    };
+    let own_pid = std::process::id();
+    processes
+        .iter()
+        .filter(|process| process.pid != own_pid && launcher_process_name(&process.name))
+        .map(|process| process.pid)
+        .collect()
+}
+
+#[cfg(not(windows))]
+pub fn other_launcher_process_ids() -> Vec<u32> {
+    Vec::new()
+}
+
 #[cfg(not(windows))]
 pub fn cleanup_stale_webview_hosts() -> usize {
     0

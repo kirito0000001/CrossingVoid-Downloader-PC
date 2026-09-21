@@ -80,4 +80,49 @@ describe("launcher publishing", () => {
     expect(installerHooks).toContain("Sleep 250");
     expect(installerHooks).toContain("$R8 < 20");
   });
+
+  it("ships a Simplified Chinese installer instead of NSIS's English default", () => {
+    const config = JSON.parse(tauriConfig) as {
+      bundle: { windows: { nsis: { languages: string[]; displayLanguageSelector: boolean } } };
+    };
+    // 不写 languages 时 Tauri 只会生成 MUI_LANGUAGE "English"：
+    // 安装向导、卸载器、以及"已安装/维护操作"那一页全是英文。
+    expect(config.bundle.windows.nsis.languages).toEqual(["SimpChinese"]);
+    expect(config.bundle.windows.nsis.displayLanguageSelector).toBe(false);
+  });
+
+  it("keeps a manual setup.exe from uninstalling the launcher by accident", () => {
+    // Tauri 的 NSIS 模板里有一页"已安装 → 选择维护操作"，升级场景默认选中
+    // 「安装前卸载」，点下一步就真的先跑旧版卸载器。手动双击安装包时点错或者
+    // 中途关窗口，机器上就只剩一个空目录（用户实测踩到过）。
+    // 构建脚本在编译前把这一页整页跳过，模板结构变了就直接构建失败。
+    const scriptPath = resolve(process.cwd(), "Scripts/Build-LauncherUpdaterPackage.ps1");
+    const sample = [
+      "Page custom PageReinstall PageLeaveReinstall",
+      "Function PageReinstall",
+      "  ReadRegStr $R0 SHCTX 'k' ''",
+      "FunctionEnd",
+      "",
+    ].join("\r\n");
+    const command = [
+      `$source = Get-Content -Raw -LiteralPath '${scriptPath.replaceAll("'", "''")}'`,
+      `Invoke-Expression ([regex]::Match($source, '(?m)^\\$script:NsisReinstallPageMarker = .*').Value)`,
+      `Invoke-Expression ([regex]::Match($source, '(?s)function Disable-NsisReinstallPage.{0,3000}?\\r?\\n\\}\\r?\\n').Value)`,
+      `$sample = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${Buffer.from(sample, "utf8").toString("base64")}'))`,
+      `$patched = Disable-NsisReinstallPage -ScriptText $sample`,
+      `"patched:"`,
+      `$patched`,
+      `"unchanged:"`,
+      `(Disable-NsisReinstallPage -ScriptText $patched) -eq $patched`,
+    ].join("; ");
+
+    const output = execFileSync("pwsh", ["-NoProfile", "-Command", command], { encoding: "utf8" });
+    const patched = output.slice(output.indexOf("patched:") + "patched:".length, output.indexOf("unchanged:"));
+    const lines = patched.split(/\r?\n/).map((line) => line.trim());
+    const start = lines.indexOf("Function PageReinstall");
+    expect(start).toBeGreaterThanOrEqual(0);
+    // 页面函数第一句就是 Abort：整页跳过，永远走不到那个"安装前先卸载"的分支。
+    expect(lines.slice(start + 1, start + 6)).toContain("Abort");
+    expect(output.trimEnd().endsWith("True")).toBe(true);
+  });
 });

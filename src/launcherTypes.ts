@@ -1,5 +1,9 @@
 import type { TranslationKey } from "./i18n/launcherText";
 
+// 远程公告/渠道开关的类型定义在两端共用的解析内核里，这里只做转出，
+// 免得同一个契约出现第二份声明。
+export type { RemoteDownloadChannel, RemoteDownloadChannels, RemoteLauncherNotice, RemoteNoticeLevel } from "./remoteLauncherInfo";
+
 export type LauncherState =
   | "ready"
   | "downloading"
@@ -30,16 +34,6 @@ export type NoticeBoard = {
   subtitle: string;
   banner: string;
   sections: NoticeSection[];
-};
-export type RemoteNoticeLevel = "info" | "warning" | "error";
-export type RemoteLauncherNotice = {
-  schemaVersion: 1;
-  id: string;
-  enabled: boolean;
-  level: RemoteNoticeLevel;
-  title: string;
-  content: string;
-  publishedAt: number;
 };
 export type VideoItem = {
   title: string;
@@ -90,6 +84,15 @@ export type BackendArchiveChunk = {
   objectKey?: string;
   sha256?: string;
   sizeBytes?: number;
+};
+/**
+ * 被判定成"游戏在跑"的进程（Rust 侧 list_game_processes 的返回）。
+ * path 是进程可执行文件的完整路径；拿不到时是空字符串。
+ */
+export type GameProcessInfo = {
+  processId: number;
+  name: string;
+  path: string;
 };
 export type TrafficQuotaResponse = {
   success: boolean;

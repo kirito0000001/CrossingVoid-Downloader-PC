@@ -1,15 +1,92 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
   DOWNLOAD_CHANNELS_URL,
+  LAUNCHER_NOTICE_URL,
+  REMOTE_LAUNCHER_INFO_CORE_VERSION,
   downloadChannelNotice,
   isDownloadChannelEnabled,
   parseRemoteDownloadChannels,
+  parseRemoteLauncherNotice,
   pickAvailableDownloadChannel,
   resolveDownloadChannelStates,
-} from "../src/downloadChannels";
+} from "../src/remoteLauncherInfo";
 
 const CATALOG = ["official", "github"] as const;
+
+const appSource = readFileSync(resolve(process.cwd(), "src/App.vue"), "utf8");
+
+/**
+ * 共用内核守卫：`src/remoteLauncherInfo.ts` 与安卓仓库里的
+ * `src/services/remoteLauncherInfo.ts` **逐字相同**（换行按 LF 计算）。
+ * 安卓端只接收 PC 开发页发布的信息，靠的就是这一份解析逻辑。
+ */
+describe("shared remote launcher info core", () => {
+  it("keeps the core file identical across repos (hash check)", () => {
+    const source = readFileSync(resolve(process.cwd(), "src/remoteLauncherInfo.ts"), "utf8")
+      .split("\r\n")
+      .join("\n");
+    expect(REMOTE_LAUNCHER_INFO_CORE_VERSION).toBe("1");
+    expect(createHash("sha256").update(source, "utf8").digest("hex")).toBe(
+      "f617fd8ca540cd2c9ae5759e30abd2d6b9df73de4e1d70e4e37d720522fb8de7",
+    );
+  });
+
+  it("keeps the published URLs in one place for both platforms", () => {
+    expect(LAUNCHER_NOTICE_URL).toBe("https://www.crossingvoid.top/launcher-notice.json");
+    expect(DOWNLOAD_CHANNELS_URL).toBe("https://www.crossingvoid.top/launcher-download-channels.json");
+    // App.vue 不许再自己写一份解析；公告地址也只从共用内核取。
+    expect(appSource).not.toContain("function parseRemoteLauncherNotice");
+    expect(appSource).not.toContain("crossingvoid.top/launcher-notice.json");
+    expect(appSource).toContain("parseRemoteLauncherNotice");
+  });
+});
+
+describe("remote launcher notice", () => {
+  it("parses the notice the dev page publishes", () => {
+    const notice = parseRemoteLauncherNotice({
+      schemaVersion: 1,
+      id: "notice-1789902223135",
+      enabled: true,
+      level: "info",
+      title: " 维护公告 ",
+      content: " 暂不开放下载 ",
+      publishedAt: 1789902223135,
+    });
+    expect(notice).toEqual({
+      schemaVersion: 1,
+      id: "notice-1789902223135",
+      enabled: true,
+      level: "info",
+      title: "维护公告",
+      content: "暂不开放下载",
+      publishedAt: 1789902223135,
+    });
+  });
+
+  it("rejects a notice that would render as an empty popup", () => {
+    const base = {
+      schemaVersion: 1,
+      id: "notice-1",
+      enabled: true,
+      level: "info",
+      title: "标题",
+      content: "正文",
+      publishedAt: 1,
+    };
+    expect(parseRemoteLauncherNotice(null)).toBeNull();
+    expect(parseRemoteLauncherNotice({ ...base, schemaVersion: 2 })).toBeNull();
+    expect(parseRemoteLauncherNotice({ ...base, id: "   " })).toBeNull();
+    expect(parseRemoteLauncherNotice({ ...base, level: "debug" })).toBeNull();
+    expect(parseRemoteLauncherNotice({ ...base, title: "  " })).toBeNull();
+    expect(parseRemoteLauncherNotice({ ...base, publishedAt: "now" })).toBeNull();
+    // 关掉的公告允许空标题/空正文（"没有公告"就是这种形态）。
+    expect(parseRemoteLauncherNotice({ ...base, enabled: false, title: "", content: "" })?.enabled).toBe(false);
+  });
+});
 
 describe("remote download channels", () => {
   it("parses the array shape the dev page publishes", () => {
@@ -68,7 +145,7 @@ describe("remote download channels", () => {
       publishedAt: 2,
     });
     expect(pickAvailableDownloadChannel(states, "official")).toBeNull();
-    // 没写原因的渠道不在这里出现（"被关"本身由右上角提示表达）。
+    // 没写原因的渠道不在这里出现（"被关"本身由当前渠道的提示表达）。
     expect(downloadChannelNotice(states)).toBe("official：官方源维护");
     // 名称可注入，界面上显示的是本地化的渠道名。
     expect(downloadChannelNotice(states, (key) => `【${key}】`)).toBe("【official】：官方源维护");

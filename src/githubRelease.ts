@@ -14,31 +14,28 @@ export function githubGameChunkAssetName(chunk: { index?: number; fileName: stri
   return `CrossingVoid.${String(index).padStart(3, "0")}`;
 }
 
-export type GitHubReleaseAssetSummary = {
-  id?: number;
-  name?: string;
-};
+import { pickGitHubGameRelease, type GitHubReleaseSummary } from "./gamePackage";
 
-export type GitHubReleaseSummary = {
-  tag_name?: string;
-  draft?: boolean;
-  prerelease?: boolean;
-  assets?: GitHubReleaseAssetSummary[];
-};
+export type { GitHubReleaseAssetSummary, GitHubReleaseSummary } from "./gamePackage";
 
 export function selectGitHubPlatformRelease(
   releases: GitHubReleaseSummary[],
   options: { tagPrefix: string; manifestAssetName: string; allowPrerelease?: boolean },
 ) {
-  const prefix = options.tagPrefix.trim().toLowerCase();
-  const manifestName = options.manifestAssetName.trim().toLowerCase();
-  if (!prefix || !manifestName) return null;
+  // 挑选规则在共用内核里（安卓那边用同一份），这里只是保持原有返回结构：
+  // 调用方要的是 release 对象和带 id 的附件（用来走 GitHub 附件 API）。
+  const picked = pickGitHubGameRelease(releases, {
+    tagPrefix: options.tagPrefix,
+    assetName: options.manifestAssetName,
+    allowPrerelease: options.allowPrerelease,
+  });
+  if (!picked) return null;
 
-  for (const release of releases) {
-    if (release.draft || (!options.allowPrerelease && release.prerelease)) continue;
-    if (!release.tag_name?.toLowerCase().startsWith(prefix)) continue;
-    const manifestAsset = release.assets?.find((asset) => asset.name?.toLowerCase() === manifestName);
-    if (manifestAsset?.id) return { release, manifestAsset };
-  }
-  return null;
+  const release = releases.find((item) => (item.tag_name ?? "").trim() === picked.tag);
+  if (!release) return null;
+  const manifestAsset = release.assets?.find((asset) => asset === picked.asset);
+  if (!manifestAsset?.id) return null;
+  return { release, manifestAsset };
 }
+
+export { pickGitHubGameRelease };

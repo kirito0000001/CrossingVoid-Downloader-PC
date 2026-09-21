@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowRe
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open } from "@tauri-apps/plugin-dialog";
+import { ask, open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
@@ -34,11 +34,17 @@ import {
 import { createPlatformLauncher } from "./platform/platformLauncher";
 import { getGamePackageConfig, type PlatformGameId } from "./platform/gameCatalog";
 import {
+  GAME_PACKAGE_GITHUB_REPOSITORY,
   GamePackageError,
   assertNoGamePackageDowngrade,
+  buildGamePackageUrlCandidates,
   buildGamePackagePlan,
   describeGamePackageError,
+  githubGameReleaseBaseUrl,
+  githubGameReleaseTag,
+  githubGameManifestUrl,
   gamePackageManifestUrl,
+  pickGitHubGameRelease,
   parseGamePackageManifest,
   parseGamePackageState,
   parseLatestPointer,
@@ -46,18 +52,20 @@ import {
   type GamePackageFile,
   type GamePackageManifest,
   type GamePackagePlan,
+  type GitHubReleaseSummary,
 } from "./gamePackage";
 import {
   DOWNLOAD_CHANNELS_URL,
+  LAUNCHER_NOTICE_URL,
   downloadChannelState,
   downloadChannelNotice,
   isDownloadChannelEnabled,
   parseRemoteDownloadChannels,
+  parseRemoteLauncherNotice,
   pickAvailableDownloadChannel,
   resolveDownloadChannelStates,
-  type DownloadChannelState,
   type RemoteDownloadChannels,
-} from "./downloadChannels";
+} from "./remoteLauncherInfo";
 import {
   activateGameOverviewItem,
   openGameOverview,
@@ -106,6 +114,7 @@ import type {
   UpdateManifestPayload,
   DownloadArchiveChunk,
   BackendArchiveChunk,
+  GameProcessInfo,
   TrafficQuotaResponse,
   DownloadArchiveInfo,
   InstallProgressEvent,
@@ -307,6 +316,8 @@ const remoteLauncherNotice = ref<RemoteLauncherNotice | null>(null);
 const showRemoteLauncherNotice = ref(false);
 /** 远程下载渠道开关：开发页发布，玩家侧据此禁用/自动切换下载源。 */
 const remoteDownloadChannels = ref<RemoteDownloadChannels | null>(null);
+/** 本次清单是从哪个 GitHub Release 拿到的（下载站挂了时也能拼出备用源的文件地址）。 */
+const activeGamePackageGithubTag = ref("");
 const developerConsole = useDeveloperConsole({
   launcherVersion,
   language: currentLanguage,
@@ -366,6 +377,7 @@ const {
 const lastVersionCheckAt = ref(0);
 let lastCheckMessageTimer: number | undefined;
 let gameRunningPollTimer: number | undefined;
+let gameRunningCheckFailures = 0;
 let trafficQuotaRefreshTimer: number | undefined;
 const settingsScrollbar = useSettingsScrollbar({
   visible: showSettings,
@@ -404,7 +416,6 @@ const launcherLanguage = computed({
 });
 const officialUpdateApiUrl = "https://www.crossingvoid.top/api/toolbox-updates";
 const gameMetadataManifestUrl = "https://www.crossingvoid.top/manifests/game/windows-latest.json";
-const remoteLauncherNoticeUrl = "https://www.crossingvoid.top/launcher-notice.json";
 const officialProductKey = "crossingvoid-game";
 const officialRuntime = "Windows";
 const githubGameRepository = "kirito0000001/CrossingVoid";
@@ -993,7 +1004,9 @@ const primaryActionDisabled = computed(
     (developerTaskActive.value && !hasPrimaryOperationControl.value) ||
     (gameDownloadActive.value && launcherState.value !== "downloading") ||
     gameLaunchPending.value ||
-    gameRunning.value ||
+    // 注意：**不把 gameRunning 算进禁用条件**。以前它在这里，于是一旦进程判定出了岔子
+    // （2026-09-21：机器上有个同名进程），按钮就永远锁在"游戏运行中"，玩家没有任何出路。
+    // 现在的做法是：按钮照常可点，点下去再问玩家"要不要强制结束那个卡住的进程并重启"。
     ((launcherState.value === "installing" || launcherState.value === "checking" || launcherState.value === "repairing") &&
       !hasPrimaryOperationControl.value) ||
     versionCheckPending.value,
@@ -1448,7 +1461,7 @@ const downloadSourceNameByKey = computed(() =>
   Object.fromEntries(downloadSources.map((source) => [source.key, t(source.nameKey)])) as Record<DownloadSourceKey, string>,
 );
 /** 远程渠道开关落到本地渠道表上的结果（远端没提到的渠道默认开放）。 */
-const downloadChannelStates = computed<DownloadChannelState[]>(() =>
+const downloadChannelStates = computed(() =>
   resolveDownloadChannelStates(
     downloadSources.map((source) => source.key),
     remoteDownloadChannels.value,
@@ -1837,28 +1850,8 @@ async function fetchRemoteJson<T>(url: string) {
   return JSON.parse(text) as T;
 }
 
-function parseRemoteLauncherNotice(value: unknown): RemoteLauncherNotice | null {
-  if (!value || typeof value !== "object") return null;
-  const notice = value as Record<string, unknown>;
-  if (notice.schemaVersion !== 1 || typeof notice.id !== "string" || !notice.id.trim()) return null;
-  if (typeof notice.enabled !== "boolean") return null;
-  if (notice.level !== "info" && notice.level !== "warning" && notice.level !== "error") return null;
-  if (typeof notice.title !== "string" || typeof notice.content !== "string") return null;
-  if (typeof notice.publishedAt !== "number" || !Number.isFinite(notice.publishedAt)) return null;
-  if (notice.enabled && (!notice.title.trim() || !notice.content.trim())) return null;
-  return {
-    schemaVersion: 1,
-    id: notice.id.trim(),
-    enabled: notice.enabled,
-    level: notice.level,
-    title: notice.title.trim(),
-    content: notice.content.trim(),
-    publishedAt: notice.publishedAt,
-  };
-}
-
 async function fetchRemoteLauncherNotice() {
-  const payload = await fetchRemoteJson<unknown>(`${remoteLauncherNoticeUrl}?t=${Date.now()}`);
+  const payload = await fetchRemoteJson<unknown>(`${LAUNCHER_NOTICE_URL}?t=${Date.now()}`);
   const notice = parseRemoteLauncherNotice(payload);
   if (!notice) throw new Error("远程公告格式不正确");
   return notice;
@@ -2014,13 +2007,60 @@ async function fetchGamePackageManifest(): Promise<GamePackageManifest> {
   if (!config) {
     throw new GamePackageError("manifest-invalid", "当前游戏还没有接入下载站。");
   }
-  const pointer = parseLatestPointer(
-    await fetchRemoteJson<unknown>(withCacheBuster(gamePackageManifestUrl(config.productSegment))),
+  const expectation = { productKey: config.productKey, runtime: config.runtime };
+  const officialEnabled = isDownloadChannelEnabled(downloadChannelStates.value, "official");
+  const githubEnabled = isDownloadChannelEnabled(downloadChannelStates.value, "github");
+  const failures: string[] = [];
+
+  // ① 下载站：latest.json → manifestUrl
+  if (officialEnabled) {
+    try {
+      const pointer = parseLatestPointer(
+        await fetchRemoteJson<unknown>(withCacheBuster(gamePackageManifestUrl(config.productSegment))),
+      );
+      const manifest = parseGamePackageManifest(
+        await fetchRemoteJson<unknown>(withCacheBuster(pointer.manifestUrl)),
+        expectation,
+      );
+      activeGamePackageGithubTag.value = githubGameReleaseTag("PC", manifest.version);
+      return manifest;
+    } catch (error) {
+      failures.push(describeGamePackageError(error));
+    }
+  }
+
+  // ② 备用源：GitHub Release 里同样放了一份 manifest.json —— 下载站挂了这个还能用。
+  if (githubEnabled) {
+    try {
+      const releases = await fetchRemoteJson<GitHubReleaseSummary[]>(
+        withCacheBuster(githubGameReleasesUrl()),
+      );
+      const picked = pickGitHubGameRelease(releases, { tagPrefix: "PC-V" });
+      if (!picked) throw new GamePackageError("manifest-invalid", "GitHub 上没有找到本平台的游戏包。");
+      const manifest = parseGamePackageManifest(
+        await fetchRemoteJson<unknown>(
+          withCacheBuster(githubGameManifestUrl(GAME_PACKAGE_GITHUB_REPOSITORY, picked.tag)),
+        ),
+        expectation,
+      );
+      activeGamePackageGithubTag.value = picked.tag;
+      return manifest;
+    } catch (error) {
+      failures.push(describeGamePackageError(error));
+    }
+  }
+
+  throw new GamePackageError(
+    "network-interrupted",
+    failures.length > 0
+      ? `无法读取游戏清单：${failures.join("；")}`
+      : "当前没有开放的下载渠道，暂时无法获取游戏清单。",
   );
-  return parseGamePackageManifest(
-    await fetchRemoteJson<unknown>(withCacheBuster(pointer.manifestUrl)),
-    { productKey: config.productKey, runtime: config.runtime },
-  );
+}
+
+function githubGameReleasesUrl() {
+  const repo = GAME_PACKAGE_GITHUB_REPOSITORY.trim().replace(/^\/+|\/+$/g, "");
+  return `https://api.github.com/repos/${repo}/releases?per_page=10`;
 }
 
 /**
@@ -2075,10 +2115,28 @@ async function downloadGamePackageFiles() {
   persistDownloadState("paused", "immediate");
 
   if (plan.download.length > 0) {
+    // 每个文件带上候选地址：首选源排第一，另一个源兜底（被渠道开关关掉的源不参与）。
+    const githubReleaseBase = githubGameReleaseBaseUrl(
+      GAME_PACKAGE_GITHUB_REPOSITORY,
+      activeGamePackageGithubTag.value || githubGameReleaseTag("PC", manifest.version),
+    );
+    const officialEnabled = isDownloadChannelEnabled(downloadChannelStates.value, "official");
+    const githubEnabled = isDownloadChannelEnabled(downloadChannelStates.value, "github");
+    const files = plan.download.map((entry) => ({
+      ...entry,
+      urls: buildGamePackageUrlCandidates({
+        path: entry.path,
+        officialBaseUrl: manifest.baseUrl,
+        githubReleaseBaseUrl: githubReleaseBase,
+        preferred: downloadSource.value,
+        officialEnabled,
+        githubEnabled,
+      }),
+    }));
     await invoke("download_game_package", {
       installPath: installPath.value,
       baseUrl: manifest.baseUrl,
-      files: plan.download,
+      files,
       concurrency: 4,
     });
   }
@@ -2448,11 +2506,19 @@ function showCheckResult(message: string) {
 
 async function refreshGameRunningState() {
   try {
-    const running = await invoke<boolean>("is_game_running");
+    const running = await invoke<boolean>("is_game_running", { installPath: installPath.value });
     gameRunning.value = running;
+    gameRunningCheckFailures = 0;
     return running;
   } catch (error) {
     console.warn("Unable to check game process", error);
+    // 以前这里直接 return 当前值：只要查询失败过一次，就会永远停在"游戏运行中"。
+    // 现在连续失败到阈值就按"没在运行"处理，不让玩家被一个查不动的状态锁死。
+    gameRunningCheckFailures += 1;
+    if (gameRunningCheckFailures >= 3) {
+      gameRunning.value = false;
+      return false;
+    }
     return gameRunning.value;
   }
 }
@@ -2592,15 +2658,56 @@ async function openLocalGameFiles() {
   }
 }
 
+/**
+ * 检测到"游戏运行中"、但玩家仍然点了启动时的出路。
+ *
+ * 2026-09-21 的 bug：进程判定只要出错（或者机器上有个同名进程），按钮就永久锁在"游戏运行中"，
+ * 玩家既进不去游戏、也看不到任何解释。现在把具体是哪个进程（PID + 路径）摆出来，
+ * 玩家可以选择强制结束它再启动。
+ *
+ * 返回 true = 可以继续启动；false = 玩家取消或没清干净。
+ */
+async function resolveRunningGameBeforeLaunch() {
+  const processes = await invoke<GameProcessInfo[]>("list_game_processes", { installPath: installPath.value })
+    .catch((error) => {
+      console.warn("Unable to list game processes", error);
+      return [] as GameProcessInfo[];
+    });
+  const detail = processes.map((item) => `PID ${item.processId} · ${item.path || item.name}`).join("\n");
+  const confirmed = await ask(
+    `检测到游戏进程还在运行：\n${detail || "（拿不到进程详情）"}\n\n` +
+      "如果游戏其实没跑起来（窗口已经没了、或者卡住了），可以强制结束它再启动。",
+    { title: "游戏运行中", kind: "warning", okLabel: "强制结束并启动", cancelLabel: "取消" },
+  );
+  if (!confirmed) return false;
+
+  try {
+    const stopped = await invoke<number>("stop_game_processes", { installPath: installPath.value });
+    showCheckResult(stopped > 0 ? `已强制结束 ${stopped} 个游戏进程。` : "没有找到可以结束的游戏进程。");
+  } catch (error) {
+    console.warn("Unable to stop game processes", error);
+    showCheckResult(`强制结束游戏进程失败：${formatUnknownError(error)}`);
+    return false;
+  }
+
+  gameRunning.value = false;
+  await new Promise((resolve) => window.setTimeout(resolve, 1000));
+  await refreshGameRunningState();
+  if (gameRunning.value) {
+    showCheckResult("游戏进程还没有退出，稍后再试一次。");
+    return false;
+  }
+  return true;
+}
+
 async function launchInstalledGame() {
   showMenu.value = false;
-  if (gameLaunchPending.value || gameRunning.value) return;
+  if (gameLaunchPending.value) return;
   gameLaunchPending.value = true;
   try {
     await refreshGameRunningState();
     if (gameRunning.value) {
-      showCheckResult("游戏已经在运行中。");
-      return;
+      if (!(await resolveRunningGameBeforeLaunch())) return;
     }
     if (!(await ensureInstalledGameExistsBeforeLaunch())) return;
     await ensureFreshVersionBeforeLaunch();

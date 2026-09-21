@@ -134,6 +134,13 @@ export const quickLinks: QuickLink[] = [
     url: "https://www.crossingvoid.top/",
   },
   {
+    key: "wiki",
+    labelKey: "quick.wiki",
+    tipKey: "quick.wikiTip",
+    iconSrc: "/launcher/icons/wiki.svg",
+    url: "https://www.crossingvoid.top/wiki/crossing-void/docs/",
+  },
+  {
     key: "wechat",
     labelKey: "quick.wechat",
     tipKey: "quick.wechatTip",

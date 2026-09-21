@@ -24,6 +24,18 @@ describe("launcher quick links", () => {
     expect(svg).toContain("<path");
   });
 
+  it("adds a wiki entry in the top bar pointing at the docs site", () => {
+    const wiki = quickLinks.find((link) => link.key === "wiki");
+    expect(wiki?.url).toBe("https://www.crossingvoid.top/wiki/crossing-void/docs/");
+    expect(wiki?.iconSrc).toBe("/launcher/icons/wiki.svg");
+    expect(wiki?.compact).toBeUndefined();
+    expect(existsSync(resolve(process.cwd(), "public/launcher/icons/wiki.svg"))).toBe(true);
+    // 官网之后就是 Wiki，顶栏顺序别被后来的改动挤到后面去。
+    expect(quickLinks.findIndex((link) => link.key === "wiki")).toBe(
+      quickLinks.findIndex((link) => link.key === "game-site") + 1,
+    );
+  });
+
   it("keeps the afdian icon on disk for future games even though the entry is gone", () => {
     // 爱发电入口已换成 BUG 提交，但这个图标要留给之后别的游戏用，别当"无用资源"删掉。
     expect(existsSync(resolve(process.cwd(), "public/launcher/icons/afdian.svg"))).toBe(true);

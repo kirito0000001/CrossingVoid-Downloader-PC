@@ -167,6 +167,40 @@ function Get-MakensisCommand {
     throw "没有找到 makensis，无法重新生成带自定义文件图标的 NSIS 安装包。"
 }
 
+$script:NsisReinstallPageMarker = '; === 零境启动器：跳过“维护/重装”页面 ==='
+
+function Disable-NsisReinstallPage {
+    <#
+        手动双击 setup.exe 时，NSIS 模板会先弹一页"已安装 / 选择维护操作"：
+        默认选中「安装前卸载」，点下一步就真的去跑旧版卸载器。中途点错或关窗口，
+        机器上就只剩一个空目录 —— 用户实测踩过这个坑。
+
+        我们本来就是覆盖安装（同名文件直接替换），不需要先卸载，所以整页跳过。
+        Tauri 每次 bundle 都会重新生成 installer.nsi，这里在编译前打补丁；
+        模板结构变了就抛错，宁可构建失败也不要悄悄失去这道保护。
+    #>
+    param([string]$ScriptText)
+
+    if ($ScriptText.Contains($script:NsisReinstallPageMarker)) {
+        return $ScriptText
+    }
+
+    $pagePattern = '(?m)^Function[ \t]+PageReinstall[ \t\r]*$'
+    if ($ScriptText -notmatch $pagePattern) {
+        throw "NSIS 脚本里找不到 PageReinstall 页面，无法保证安装程序不会误卸载启动器。请检查 Tauri 的 NSIS 模板是否变了。"
+    }
+
+    $skipBlock = @(
+        'Function PageReinstall'
+        "  $($script:NsisReinstallPageMarker)"
+        '  ; 这一页默认选中"安装前卸载"，会真的调用旧版卸载器；我们改成直接跳过整页，'
+        '  ; 让安装程序只做覆盖安装。卸载仍然可以通过控制面板或启动器里的卸载入口完成。'
+        '  Abort'
+    ) -join "`r`n"
+
+    return [regex]::Replace($ScriptText, $pagePattern, $skipBlock.Replace('$', '$$'))
+}
+
 function Rebuild-NsisInstallerWithFileIcon {
     param(
         [string]$BundleInstallerPath,
@@ -195,6 +229,9 @@ function Rebuild-NsisInstallerWithFileIcon {
     } else {
         $scriptText = $scriptText -replace '(?m)^(!define MUI_UNICON "\$\{UNINSTALLERICON\}")', "`$1`r`nUninstallIcon `"$IconPath`""
     }
+
+    $scriptText = Disable-NsisReinstallPage -ScriptText $scriptText
+
     [System.IO.File]::WriteAllText(
         $installerScript,
         $scriptText,

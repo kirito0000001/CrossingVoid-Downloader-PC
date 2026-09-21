@@ -27,7 +27,12 @@
 
 .quick-links {
   position: absolute;
-  left: 322px;
+  /*
+   * 232px = logo 盒子右缘（42 + 148）+ 42，也就是让这排按钮的左边距和 logo 自己的左边距一样宽。
+   * 原来写的是 322px：logo 图形右边（≈177 CSS px）到第一个按钮之间空出 145px，中间那块空得发慌
+   * （2026-09-21 用户要求整体左移）。数值想再微调就只动这一个数。
+   */
+  left: 232px;
   top: 16px;
   display: flex;
   align-items: center;

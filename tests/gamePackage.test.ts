@@ -8,10 +8,17 @@ import {
   GamePackageError,
   assertNoGamePackageDowngrade,
   buildGamePackagePlan,
+  buildGamePackageUrlCandidates,
   compareGamePackageVersions,
   describeGamePackageError,
+  githubGameAssetName,
+  githubGameReleaseBaseUrl,
+  githubGameReleaseTag,
+  githubGameManifestUrl,
+  pickGitHubGameRelease,
   gamePackageManifestUrl,
   isSafeGamePackagePath,
+  officialGamePackageFileUrl,
   parseGamePackageManifest,
   parseGamePackageState,
   parseLatestPointer,
@@ -258,6 +265,106 @@ describe("versions and errors", () => {
 });
 
 describe("shared core guard", () => {
+  it("maps file paths to the GitHub release asset names the upload side uses", () => {
+    expect(githubGameAssetName("CrossingVoid.exe")).toBe("CrossingVoid.exe");
+    expect(githubGameAssetName("CrossingVoid/Binaries/Win64/CrossingVoid-Win64-Shipping.exe")).toBe(
+      "CrossingVoid__Binaries__Win64__CrossingVoid-Win64-Shipping.exe",
+    );
+    expect(githubGameAssetName("CrossingVoid/Content/Movies/Login_1_Low.mp4")).toBe(
+      "CrossingVoid__Content__Movies__Login_1_Low.mp4",
+    );
+    // 反斜杠、开头斜杠、多余空段都要吃掉，避免两端拼出不同的附件名。
+    expect(githubGameAssetName("/CrossingVoid\\Content//Paks/global.ucas")).toBe(
+      "CrossingVoid__Content__Paks__global.ucas",
+    );
+  });
+
+  it("builds the release tag and download base url", () => {
+    expect(githubGameReleaseTag("PC", "0.5.14")).toBe("PC-V0.5.14");
+    expect(githubGameReleaseTag("Android", "V0.5.14")).toBe("Android-V0.5.14");
+    expect(githubGameReleaseBaseUrl("kirito0000001/CrossingVoid", "PC-V0.5.14")).toBe(
+      "https://github.com/kirito0000001/CrossingVoid/releases/download/PC-V0.5.14/",
+    );
+    expect(githubGameManifestUrl("kirito0000001/CrossingVoid", "PC-V0.5.14")).toBe(
+      "https://github.com/kirito0000001/CrossingVoid/releases/download/PC-V0.5.14/manifest.json",
+    );
+  });
+
+  it("picks the release that carries the manifest for this platform", () => {
+    // 顺序按 GitHub Releases API 的真实返回：最新的在前（实测如此）。
+    const releases = [
+      {
+        tag_name: "PC-V0.5.14",
+        assets: [{ id: 3, name: "manifest.json" }, { id: 4, name: "CrossingVoid.exe" }],
+      },
+      {
+        tag_name: "Android-V0.5.14",
+        assets: [{ id: 1, name: "manifest.json" }],
+      },
+      {
+        tag_name: "PC-V0.5.13",
+        assets: [{ id: 2, name: "manifest.json" }],
+      },
+      {
+        tag_name: "PC-V0.5.15",
+        draft: true,
+        assets: [{ id: 5, name: "manifest.json" }],
+      },
+    ];
+
+    // 取第一条匹配的非草稿 release（顺序来自 API，新的在前）。
+    expect(pickGitHubGameRelease(releases, { tagPrefix: "PC-V" })?.tag).toBe("PC-V0.5.14");
+    expect(pickGitHubGameRelease(releases, { tagPrefix: "Android-V" })?.tag).toBe("Android-V0.5.14");
+
+    // 预发布默认跳过；显式放行才会用它。
+    const prereleaseFirst = [
+      {
+        tag_name: "PC-V0.5.16",
+        prerelease: true,
+        assets: [{ id: 6, name: "manifest.json" }],
+      },
+      { tag_name: "PC-V0.5.14", assets: [{ id: 3, name: "manifest.json" }] },
+    ];
+    expect(pickGitHubGameRelease(prereleaseFirst, { tagPrefix: "PC-V" })?.tag).toBe("PC-V0.5.14");
+    expect(
+      pickGitHubGameRelease(prereleaseFirst, { tagPrefix: "PC-V", allowPrerelease: true })?.tag,
+    ).toBe("PC-V0.5.16");
+
+    // 没有清单附件的平台直接判空，而不是拿一条残的凑数。
+    expect(pickGitHubGameRelease(releases, { tagPrefix: "Naruto-V" })).toBeNull();
+    expect(
+      pickGitHubGameRelease([{ tag_name: "PC-V0.5.14", assets: [{ id: 1, name: "other.json" }] }], {
+        tagPrefix: "PC-V",
+      }),
+    ).toBeNull();
+  });
+
+  it("orders per-file candidates by the preferred source and keeps the other as fallback", () => {
+    const options = {
+      path: "CrossingVoid/Content/Paks/pakchunk0-Windows.ucas",
+      officialBaseUrl: "https://dl.crossingvoid.top/games/crossingvoid/0.5.14/",
+      githubReleaseBaseUrl: "https://github.com/kirito0000001/CrossingVoid/releases/download/PC-V0.5.14/",
+    } as const;
+
+    const officialFirst = buildGamePackageUrlCandidates({ ...options, preferred: "official" });
+    expect(officialFirst).toEqual([
+      "https://dl.crossingvoid.top/games/crossingvoid/0.5.14/CrossingVoid/Content/Paks/pakchunk0-Windows.ucas",
+      "https://github.com/kirito0000001/CrossingVoid/releases/download/PC-V0.5.14/CrossingVoid__Content__Paks__pakchunk0-Windows.ucas",
+    ]);
+
+    const githubFirst = buildGamePackageUrlCandidates({ ...options, preferred: "github" });
+    expect(githubFirst[0]).toContain("releases/download/PC-V0.5.14/");
+    expect(githubFirst[1]).toContain("dl.crossingvoid.top");
+
+    // 渠道被关掉的源不参与候选（这就是"双源混用"受渠道开关约束的地方）。
+    expect(
+      buildGamePackageUrlCandidates({ ...options, preferred: "official", githubEnabled: false }),
+    ).toHaveLength(1);
+    expect(
+      buildGamePackageUrlCandidates({ ...options, preferred: "github", githubEnabled: false }),
+    ).toEqual([officialGamePackageFileUrl(options.officialBaseUrl, options.path)]);
+  });
+
   it("keeps the core file identical across repos (hash check)", () => {
     // 这份文件在 PC 与 Android 两个仓库里逐字相同；改动后要把新哈希同步到两边测试里。
     const source = readFileSync(resolve(process.cwd(), "src/gamePackage.ts"), "utf8")
@@ -265,7 +372,7 @@ describe("shared core guard", () => {
       .join("\n");
     expect(GAME_PACKAGE_CORE_VERSION).toBe("1");
     expect(createHash("sha256").update(source, "utf8").digest("hex")).toBe(
-      "57cc72b0cefd3d43fd055930695400556cd36ad6b40f8811cfc5d7bac8d46bb4",
+      "141469941f0cebd65a954ca4e806d513aa5fef0d1bb0612b6a4a8bb614894783",
     );
   });
 });

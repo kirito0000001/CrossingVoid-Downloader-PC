@@ -296,6 +296,64 @@ check()
 
 `src-tauri/tauri.conf.json` 中的 updater `pubkey` 是公开验证材料，可以提交。`src-tauri/private/updater.key` 是签名私钥，永远不能提交、上传日志或粘贴到文档。
 
+### 10.1 安装界面：必须是中文，而且不能误卸载
+
+| 项 | 做法 | 为什么 |
+| --- | --- | --- |
+| 界面语言 | `bundle.windows.nsis.languages = ["SimpChinese"]` | 不写这一项时 Tauri 只会生成 `MUI_LANGUAGE "English"`，安装向导、卸载器、以及"已安装 → 选择维护操作"那一页全是英文 |
+| 语言选择框 | `displayLanguageSelector = false` | 只有一种语言，不需要多一层选择；显式写出来防止以后误改成 true |
+| 禁止"安装前先卸载" | `Scripts/Build-LauncherUpdaterPackage.ps1` 在 makensis 编译前把 `Function PageReinstall` 改成第一句 `Abort`（整页跳过） | 见下 |
+
+手动双击 `setup.exe` 时，Tauri 的 NSIS 模板会弹出一页"已安装 / 选择维护操作"：升级场景下**默认选中「安装前卸载」**，点下一步就真的去调用旧版卸载器。只要在这一步点错、或者看到后面又冒出一个卸载窗口就顺手关掉，机器上最后只剩一个空目录 —— 用户实测踩过这个坑。
+
+这个项目本来就是覆盖安装（同名文件直接替换），不需要先卸载，所以那一页整页跳过：
+
+- 补丁在每次 `bundle` 之后重新打在 Tauri 生成的 `installer.nsi` 上，模板结构变了会直接抛错，宁可构建失败也不要悄悄失去这道保护；
+- 卸载仍然可以通过控制面板或启动器设置里的"卸载启动器"完成；
+  - 启动器自身更新走 Tauri updater 的 `installMode: "passive"`（`/P /R /UPDATE`），本来就跳过全部向导页，上面的补丁只影响"用户手动双击安装包"这条路径；
+  - 如果以后确实需要"先卸载再安装"，必须同时改脚本里的补丁和 `tests/launcherPublishing.test.ts` 里那条断言。
+
+### 10.2 重复启动：直接显示已经开着的那个窗口
+
+**要的行为（用户拍板）**：点启动器图标/快捷方式时，如果已经有一个启动器在跑（哪怕它正藏在托盘里），
+**直接把那个窗口显示出来**；不关旧的、不另开新的。
+
+实现放在 `src-tauri/src/single_instance.rs`，取代 `tauri-plugin-single-instance`：官方插件只认命名互斥量，
+互斥量命中、但老实例的隐藏消息窗口没找到时它会**静默地继续启动** —— 机器上多出一个看不见的启动器，
+而这个新进程自己也没登记，下一次点击又会再开一个（用户报的"点一次多一个"）。
+
+查找顺序（两条，任一命中就显示窗口然后本进程退出）：
+
+| 顺序 | 找什么 | 怎么显示 |
+| --- | --- | --- |
+| 1 | 老实例登记的隐藏消息窗口（类名 `{id}-sic`、窗口名 `{id}-siw`，新旧版本共用这套约定） | 发 `WM_COPYDATA`，让老实例自己 `show_main_window` —— Tauri 内部的可见状态也会同步 |
+| 2 | 它没登记过：按可执行文件名找到同款启动器进程，再按 PID 找它的 `Tauri Window`（隐藏到托盘的窗口也是这个类名） | 直接 `ShowWindowAsync(SW_SHOW/SW_RESTORE)` + `SetForegroundWindow` |
+
+几个必须守住的细节：
+
+- **绝不结束别人的进程**：`tests/singleInstanceBehavior.test.ts` 里有一条断言专门盯着这一点。
+- **挑实例的顺序**：先挑窗口还应答的，都能应答时挑已经显示在屏幕上的（那才是玩家正在用的）；
+  卡死的那个会被跳过并写进日志。
+- **叫不回来才算"没有实例"**：窗口不响应消息（`SMTO_ABORTIFHUNG` + 300ms）说明那个进程已经卡死，
+  它的窗口谁也显示不出来（实测 `ShowWindow` 对它无效），这时才让新实例正常启动，并写一行
+  `single-instance.log` —— 不允许"点一下什么都不发生"。
+- **互斥量只是兼容层**：仍然按老名字 `{id}-sim` 建一个并持有到进程结束，这样还在跑旧版本的机器
+  也能识别到"已经有一个在跑"。
+
+> 出处：知乎站内搜索「SetForegroundWindow 无效 窗口 前置 单实例」
+> （https://www.zhihu.com/search?type=content&q=SetForegroundWindow%20无效%20窗口%20前置%20单实例）
+> 原文："窗口状态异常：原有实例的窗口处于最小化或隐藏状态，未提前调用 ShowWindow 还原窗口，
+> 直接调用 SetForegroundWindow 无法生效。"；另一篇《windows api如果存在相同窗口就不开启将原先窗口置顶》
+> 给出的做法是 `EnumWindows` + `GetWindowThreadProcessId` 按 PID 找窗口再置顶。
+>
+> 我们的验证（2026-09-21，本机真实进程）：
+> ① 用 C# 探针按 PID 枚举，确认隐藏到托盘的启动器确实存在 `class="Tauri Window" title="零境启动器" visible=False` 的窗口；
+> ② 把可见实例的窗口 `ShowWindow(SW_HIDE)` 藏起来后运行新构建 → 新进程 `HasExited=True`、窗口 `visible=True`、
+> 进程列表没有多出任何启动器；
+> ③ 用一个临时改 identifier 的构建（模拟"没登记过的实例"）重复 ②，同样把窗口显示回来且不新开进程；
+> ④ 本机那个卡死的实例（`IsHungAppWindow=True`、`WM_NULL` 无应答）被正确跳过并记录，
+> 而不是被误当成"可显示的实例"而让点击落空。
+
 ## 11. 游戏版本与下载来源
 
 ### 11.1 OSS 官方源

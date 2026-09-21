@@ -143,6 +143,8 @@ export type TranslationKey =
   | "quick.teamSiteTip"
   | "quick.gameSite"
   | "quick.gameSiteTip"
+  | "quick.wiki"
+  | "quick.wikiTip"
   | "quick.wechat"
   | "quick.wechatTip"
   | "quick.wechatQrAlt"
@@ -337,6 +339,8 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "quick.teamSiteTip": "访问团队官网",
     "quick.gameSite": "游戏官网",
     "quick.gameSiteTip": "访问游戏官网",
+    "quick.wiki": "Wiki",
+    "quick.wikiTip": "查看 Wiki 与资料站",
     "quick.wechat": "微信",
     "quick.wechatTip": "扫描关注微信公众号",
     "quick.wechatQrAlt": "微信公众号二维码",
@@ -519,6 +523,8 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "quick.teamSiteTip": "造訪團隊官網",
     "quick.gameSite": "遊戲官網",
     "quick.gameSiteTip": "造訪遊戲官網",
+    "quick.wiki": "Wiki",
+    "quick.wikiTip": "查看 Wiki 與資料站",
     "quick.wechat": "微信",
     "quick.wechatTip": "掃描關注微信公眾號",
     "quick.wechatQrAlt": "微信公眾號 QR Code",
@@ -701,6 +707,8 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "quick.teamSiteTip": "Visit team website",
     "quick.gameSite": "Game Site",
     "quick.gameSiteTip": "Visit game website",
+    "quick.wiki": "Wiki",
+    "quick.wikiTip": "Browse the wiki and reference docs",
     "quick.wechat": "WeChat",
     "quick.wechatTip": "Scan to follow WeChat",
     "quick.wechatQrAlt": "WeChat official account QR code",
@@ -883,6 +891,8 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "quick.teamSiteTip": "チーム公式サイトへ",
     "quick.gameSite": "ゲーム公式",
     "quick.gameSiteTip": "ゲーム公式サイトへ",
+    "quick.wiki": "Wiki",
+    "quick.wikiTip": "Wiki・資料サイトを見る",
     "quick.wechat": "WeChat",
     "quick.wechatTip": "WeChat 公式をフォロー",
     "quick.wechatQrAlt": "WeChat 公式 QR コード",
