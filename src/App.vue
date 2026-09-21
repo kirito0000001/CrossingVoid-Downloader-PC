@@ -379,6 +379,7 @@ let lastCheckMessageTimer: number | undefined;
 let gameRunningPollTimer: number | undefined;
 let gameRunningCheckFailures = 0;
 let trafficQuotaRefreshTimer: number | undefined;
+
 const settingsScrollbar = useSettingsScrollbar({
   visible: showSettings,
   activeTab: activeSettingsTab,
@@ -4042,6 +4043,13 @@ provide(settingsContextKey, settingsContext);
     <div class="scanlines"></div>
     <div class="drag-surface"></div>
 
+    <!--
+      界面画布：标题栏、各面板、各种弹窗、开机动画全装在这里，按 1200×675 的设计坐标**原样**排版。
+      整套界面不做等比缩放（见 styles/shell-backdrop.css 的说明）：窗口比设计尺寸小时裁掉超出部分，
+      大时由 100vw/100vh 让贴边的元素各自靠边。背景 / 扫描线留在画布外面满铺。
+    -->
+    <div class="ui-canvas">
+
     <Transition name="boot-splash">
       <section v-if="bootSplashVisible" class="boot-splash">
         <div class="boot-splash__grain"></div>
@@ -4541,6 +4549,7 @@ provide(settingsContextKey, settingsContext);
       </div>
     </Transition>
 
+    </div>
   </main>
 </template>
 

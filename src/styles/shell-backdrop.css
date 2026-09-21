@@ -2,6 +2,16 @@
   position: relative;
   width: 100vw;
   height: 100vh;
+  /*
+   * 界面按 1200×675 的设计坐标排版，**不随窗口缩放**。
+   *
+   * 2026-09-21 用户以像素级对比指出（图1=现在 / 图2=应为的样子）：一旦把界面整体等比缩放，
+   * 按钮的大小和位置就跟着窗口变 —— 150% 缩放下窗口只有 1011×569 逻辑像素，界面被缩到
+   * 0.843 倍，看起来就是"按钮变小、位置也偏了"。图2 的比例正好是 1/0.843 = 1.186。
+   *
+   * 所以：窗口比设计尺寸小的时候**裁掉超出部分**（和旧版本一致），窗口比设计尺寸大的时候
+   * 由 100vw/100vh 让贴边的元素各自靠边（贴右/贴底的面板会跟着窗口走）。
+   */
   min-width: 1200px;
   min-height: 675px;
   overflow: hidden;
@@ -9,6 +19,22 @@
   background: var(--cv-bg-page);
   user-select: none;
   -webkit-user-select: none;
+}
+
+/*
+ * 界面画布：整套界面按 1200×675 的设计坐标排版，**不做等比缩放**。
+ *
+ * 这里只负责两件事：
+ * 1. 给画布内的 `position: fixed` 元素一个统一的坐标系（画布 = .launcher-shell = 至少 1200×675）；
+ * 2. 用 z-index 压过画布外面的 .drag-surface，否则整块界面会被它盖住、点不动。
+ *
+ * 画布自己有 transform 会形成独立层叠上下文，也会把 fixed 子元素的定位锁进画布；
+ * 以前那版 `scale(var(--ui-scale))` 就是靠它缩放整套界面的 —— 已被上面说的原因去掉。
+ */
+.ui-canvas {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
 }
 
 .background {
@@ -54,8 +80,9 @@
 .boot-splash {
   position: fixed;
   inset: 0;
-  width: 100vw;
-  height: 100vh;
+  /* 画布内元素：这里用 100% 指的是画布，不是窗口（100vw/vh 会绕开缩放）。 */
+  width: 100%;
+  height: 100%;
   z-index: 500;
   display: grid;
   place-items: center;
@@ -111,7 +138,7 @@
 
 .boot-splash__logo {
   width: 286px;
-  max-width: 36vw;
+  max-width: 36%;
   height: auto;
   object-fit: contain;
   filter:
@@ -138,7 +165,7 @@
   position: relative;
   width: 284px;
   height: 8px;
-  max-width: 36vw;
+  max-width: 36%;
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--cv-download-progress-end) 46%, transparent);
   background: color-mix(in srgb, var(--cv-bg-deep) 66%, transparent);

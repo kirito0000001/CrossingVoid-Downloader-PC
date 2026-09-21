@@ -20,8 +20,9 @@
 }
 
 .remote-notice-panel {
-  width: min(650px, calc(100vw - 64px));
-  max-height: min(520px, calc(100vh - 64px));
+  /* 面板在 .ui-canvas 里：100% 指画布（100vw/vh 会绕开等比缩放，窗口一大就撑爆）。 */
+  width: min(650px, calc(100% - 64px));
+  max-height: min(520px, calc(100% - 64px));
   overflow: hidden;
   padding: 28px;
   border: 1px solid rgba(155, 165, 174, 0.62);

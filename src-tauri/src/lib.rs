@@ -4624,6 +4624,52 @@ fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
+/// 让主窗口按屏幕开：**保持 16:9**（界面设计比例），大小取屏幕逻辑尺寸的 79%。
+///
+/// 以前窗口写死 1200×675：小屏上几乎顶满、4K 上缩成一小块，留给桌面的边距比例每台机器都不一样
+/// （用户 2026-09-21 要求"所有电脑启动器给桌面的留白比例一致"）。
+///
+/// 0.79 这个比例是从用户自己的标准观感反推的：他的窗口 1200×675 占他那台
+/// 1920×1080@125%（逻辑屏 1522×854）的 78.9% / 79.0%，所以在设计机上窗口尺寸不变，
+/// 小屏/大屏机器上则按同一比例缩放 —— 桌面留白的比例各机器一致。
+///
+/// 现在：按屏幕逻辑尺寸取 79% 的 16:9 矩形，居中显示。
+/// - 窗口保持 16:9 ⇒ 界面正好铺满窗口，没有内部留白（2026-09-21 第一版改成"按工作区两个方向各 89%"
+///   之后窗口变成了工作区的比例、界面在里面出现留白，用户当场指出"比例变大了、排版乱了"，所以改回 16:9）；
+/// - 尺寸跟着屏幕走 ⇒ 桌面留白比例在各机器上一致（左右 10.5%；16:10 屏上下会略大，
+///   这是"窗口必须 16:9"的必然结果）。
+fn fit_main_window_to_screen<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    const DESIGN_WIDTH: f64 = 1200.0;
+    const DESIGN_HEIGHT: f64 = 675.0;
+    // 窗口占屏幕逻辑尺寸的比例（见函数注释：0.79 = 用户标准窗口 ÷ 他的屏幕逻辑尺寸）。
+    const WINDOW_SHARE: f64 = 0.79;
+
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let Ok(Some(monitor)) = window.current_monitor() else {
+        return;
+    };
+
+    let scale = monitor.scale_factor();
+    let area = monitor.size();
+    let area_width = area.width as f64 / scale;
+    let area_height = area.height as f64 / scale;
+    if area_width <= 0.0 || area_height <= 0.0 {
+        return;
+    }
+
+    let mut width = area_width * WINDOW_SHARE;
+    let mut height = width * DESIGN_HEIGHT / DESIGN_WIDTH;
+    if height > area_height * WINDOW_SHARE {
+        height = area_height * WINDOW_SHARE;
+        width = height * DESIGN_WIDTH / DESIGN_HEIGHT;
+    }
+
+    let _ = window.set_size(tauri::LogicalSize::new(width.round(), height.round()));
+    let _ = window.center();
+}
+
 /// 清理残留 WebView2 之后写一行诊断日志，方便事后核对"卡死是不是这个原因"。
 fn log_webview_cleanup<R: tauri::Runtime>(app: &tauri::AppHandle<R>, killed: usize) {
     let Ok(log_dir) = app.path().app_log_dir() else {
@@ -4670,6 +4716,8 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
+            // 先把主窗口调成屏幕允许的最大 16:9（见函数注释），再做托盘等其余初始化。
+            fit_main_window_to_screen(app.handle());
             let mut builder = TrayIconBuilder::with_id("main")
                 .tooltip("零境交错:空界幻境")
                 .show_menu_on_left_click(false);

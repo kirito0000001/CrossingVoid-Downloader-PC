@@ -73,8 +73,9 @@ function handleWheel(event: WheelEvent) {
 .platform-game-overview {
   position: fixed;
   inset: 0;
-  width: 100vw;
-  height: 100vh;
+  /* 这一层在 .ui-canvas 内：用 100% 跟随画布，避免绕开等比缩放。 */
+  width: 100%;
+  height: 100%;
   z-index: 3;
   overflow: hidden;
   background: #10161b;
@@ -135,7 +136,7 @@ function handleWheel(event: WheelEvent) {
 .platform-game-covers {
   position: absolute;
   left: 50%;
-  top: 80vh;
+  top: 80%;
   bottom: auto;
   z-index: 1;
   width: min(900px, calc(100% - 64px));

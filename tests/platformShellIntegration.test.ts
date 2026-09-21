@@ -44,7 +44,9 @@ describe("platform shell integration", () => {
   it("renders a large-cover overview that enters the selected game page", () => {
     expect(overviewSource).toContain("platform-game-overview");
     expect(overviewSource).toContain("position: fixed");
-    expect(overviewSource).toContain("height: 100vh");
+    // 这一层在 .ui-canvas 里：尺寸要跟着画布（100%），用 100vh 会绕开等比缩放、窗口一大就撑爆。
+    expect(overviewSource).toContain("height: 100%");
+    expect(overviewSource).not.toContain("height: 100vh");
     expect(appSource).toContain("<PlatformGameOverview");
     expect(overviewSource).toContain("emit('select', game.id)");
     expect(appSource).toContain("activateGameOverviewItem(overviewSelection.value, id)");
@@ -52,7 +54,7 @@ describe("platform shell integration", () => {
     expect(overviewSource).toContain("查看详情");
     expect(overviewSource).not.toContain("width: 82px");
     expect(overviewSource).toContain("platform-game-overview__background");
-    expect(overviewSource).toContain("top: 80vh");
+    expect(overviewSource).toContain("top: 80%");
     expect(overviewSource).toContain("handleWheel");
     expect(overviewSource).toContain("games.length > 6");
     expect(overviewSource).toContain("grid-template-columns: repeat(5, minmax(0, 1fr))");
