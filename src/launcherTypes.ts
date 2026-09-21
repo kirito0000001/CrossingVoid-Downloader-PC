@@ -177,15 +177,22 @@ export type RepairProgressEvent = {
   currentFileTotalBytes?: number;
   percent: number;
 };
-export type ChunkImportProgressEvent = {
-  currentChunk: number;
-  totalChunks: number;
-  fileName: string;
-  processedBytes: number;
+/**
+ * 导入碎片的结果（`import_game_package_files`）。
+ *
+ * 碎片有散件也有压缩包，但压缩包里的条目名就是清单里的相对路径，
+ * 所以 Rust 侧只回"哪些没找到 / 哪些对不上"，不关心它们原来在哪个包里。
+ * `missing` 与 `mismatched` 都只列前若干条（给玩家看的，不是给机器用的）。
+ */
+export type GamePackageImportSummary = {
+  importedFiles: number;
+  importedBytes: number;
+  totalFiles: number;
   totalBytes: number;
-  currentChunkBytes: number;
-  currentChunkTotalBytes: number;
-  percent: number;
+  /** 实际用的源根：玩家选的那个文件夹下面几层（解压常常多套一层）。 */
+  sourceRoot: string;
+  missing: string[];
+  mismatched: string[];
 };
 export type LauncherUpdateConfirmStage = "idle" | "available";
 export type DevScriptProgressEvent = {

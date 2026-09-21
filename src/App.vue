@@ -125,7 +125,7 @@ import type {
   ManifestVerifySummary,
   LaunchGameResult,
   RepairProgressEvent,
-  ChunkImportProgressEvent,
+  GamePackageImportSummary,
   LauncherUpdateConfirmStage,
   QuickLink,
 } from "./launcherTypes";
@@ -542,7 +542,6 @@ let downloadProgressUnlisten: UnlistenFn | undefined;
 let packageScanProgressUnlisten: UnlistenFn | undefined;
 let packagePhaseUnlisten: UnlistenFn | undefined;
 let repairProgressUnlisten: UnlistenFn | undefined;
-let chunkImportProgressUnlisten: UnlistenFn | undefined;
 let gameProcessExitedUnlisten: UnlistenFn | undefined;
 let windowFocusUnlisten: UnlistenFn | undefined;
 let bootSplashTimer: number | undefined;
@@ -631,10 +630,6 @@ onBeforeUnmount(() => {
   if (repairProgressUnlisten) {
     repairProgressUnlisten();
     repairProgressUnlisten = undefined;
-  }
-  if (chunkImportProgressUnlisten) {
-    chunkImportProgressUnlisten();
-    chunkImportProgressUnlisten = undefined;
   }
   disposeDeveloperConsole();
   if (gameProcessExitedUnlisten) {
@@ -1021,6 +1016,18 @@ const progressPercent = computed(() =>
         ),
       ),
 );
+/**
+ * 进度栏用哪一档宽度。
+ *
+ * "下载 / 安装游戏"那一行有五段（状态 / 字节 / 文件数 / 剩余时间 / 百分比），短档放不下会把状态文字
+ * 硬裁掉，所以它用对齐"方块菜单"的长档（461）；启动器更新、开发页脚本、完整性检查、修复这些段数少，
+ * 用短档（310）更不占画面（用户 2026-09-21 拍板分两档）。
+ */
+const useLongDownloadDock = computed(
+  () =>
+    currentGamePackageConfig() !== null &&
+    ["downloading", "downloaded", "installing"].includes(launcherState.value),
+);
 const hasCompleteDownloadedArchive = computed(() => {
   const totalBytes = activeDownloadBytes.value ?? remoteArchiveBytes.value ?? 0;
   return launcherState.value !== "ready" && totalBytes > 0 && downloadedBytes.value >= totalBytes;
@@ -1274,14 +1281,11 @@ const statusCopy = computed(() => {
   if (gameRunning.value) return t("status.gameRunning");
   if (offlinePlayable.value) return t("status.ready");
   if (versionCheckPending.value) return t("status.versionChecking");
-  if (gameChunkImportPending.value && verificationCurrentFileName.value) {
+  if (gameChunkImportPending.value) {
     const current = repairProgressItems.value?.checked ?? 0;
     const total = repairProgressItems.value?.total ?? 0;
-    return total > 0
-      ? `正在校验游戏碎片 ${current}/${total}：${verificationCurrentFileName.value}`
-      : `正在校验游戏碎片：${verificationCurrentFileName.value}`;
+    return total > 0 ? `正在导入碎片 ${current}/${total}` : "正在导入碎片";
   }
-  if (gameChunkImportPending.value) return "正在校验游戏碎片";
   if (detailedVerificationActive.value && verificationCurrentFileName.value) {
     return t("status.checkingFile").replace("{file}", verificationCurrentFileName.value);
   }
@@ -2345,6 +2349,33 @@ async function downloadGamePackageFiles() {
 }
 
 /** 文件已经落位，安装阶段只剩：清旧文件（白名单）→ 写状态文件 → 复核 ready。 */
+/**
+ * 安装前拿清单把整包核一遍：**缺失的和 sha256 不一致的都要拦下来**。
+ *
+ * 为什么必须有这一步：碎片/网盘/QQ群来的文件不是我们下的，谁也没验过；
+ * 而 `validate_game_install_state("ready")` 只认三个标记文件，坏掉的 .pak 照样能过。
+ * 这里复用的还是"本地扫描 + 差异计划"那一套（和下载同一个真相源），
+ * 所以它的答案天然就是"还差哪些文件"——正好也是玩家要补齐的清单。
+ */
+async function verifyInstalledPackageFiles(manifest: GamePackageManifest) {
+  const scanned = await invoke<GamePackageFile[]>("scan_local_game_package", {
+    installPath: installPath.value,
+    files: manifest.files,
+  });
+  return buildGamePackagePlan(manifest, scanned);
+}
+
+/** 把"还差哪些文件"说成玩家能照着做的一句话。 */
+function describeMissingPackageFiles(plan: GamePackagePlan) {
+  const missingBytes = plan.download.reduce((sum, entry) => sum + entry.sizeBytes, 0);
+  const samples = plan.download.slice(0, 3).map((entry) => entry.path);
+  const more = plan.download.length > samples.length ? " 等" : "";
+  return (
+    `游戏文件没有就位：还有 ${plan.download.length} 个文件缺失或校验不一致（${formatBytes(missingBytes)}）——` +
+    `${samples.join("、")}${more}。可以用「导入碎片」补齐，或者直接下载缺的部分。`
+  );
+}
+
 async function finalizeGamePackageInstall() {
   const manifest = activeGamePackage.value;
   if (!manifest) throw new GamePackageError("manifest-invalid", "还没有取得游戏清单。");
@@ -2357,6 +2388,12 @@ async function finalizeGamePackageInstall() {
     installProgressItems.value = null;
     downloadPauseRequested.value = false;
     await ensureInstallProgressListener();
+
+    // ① 先核一遍整包，没核过之前不做任何"安装"动作（也不写 ready 状态）。
+    const verifiedPlan = await verifyInstalledPackageFiles(manifest);
+    if (verifiedPlan.download.length > 0) {
+      throw new GamePackageError("hash-mismatch", describeMissingPackageFiles(verifiedPlan));
+    }
 
     const prunePaths = activeGamePackagePlan.value?.prune ?? [];
     if (prunePaths.length > 0) {
@@ -2609,7 +2646,7 @@ function launcherErrorFileTimestamp(date: Date) {
 
 function resolveChineseErrorTitle(context: string) {
   const mappings: Array<[RegExp, string]> = [
-    [/Game chunk import failed/i, "安装游戏分片失败"],
+    [/Game fragment import failed/i, "导入碎片失败"],
     [/Game install failed/i, "安装游戏失败"],
     [/Game download failed/i, "下载游戏失败"],
     [/Automatic game file check failed/i, "自动检查游戏文件失败"],
@@ -3010,7 +3047,8 @@ async function ensureDownloadProgressListener() {
   if (downloadProgressUnlisten) return;
 
   downloadProgressUnlisten = await listen<DownloadProgressEvent>("game-download-progress", (event) => {
-    if (launcherState.value !== "downloading" && launcherState.value !== "repairing") return;
+    const importingFragments = gameChunkImportPending.value;
+    if (!importingFragments && launcherState.value !== "downloading" && launcherState.value !== "repairing") return;
     const payload = event.payload;
     const baseline = gamePackageBaseline.value;
     if (typeof payload.doneFiles === "number" && typeof payload.totalFiles === "number") {
@@ -3035,6 +3073,15 @@ async function ensureDownloadProgressListener() {
     if (launcherState.value === "downloading") {
       downloadEstimate.value = downloadTimeEstimator.record(nextDownloadedBytes, totalBytes, performance.now());
       persistDownloadState(nextDownloadedBytes >= totalBytes ? "downloaded" : "paused");
+    } else if (importingFragments) {
+      // 导入碎片走的是同一份进度事件（字节 + 文件数），喂给"正在导入碎片 N/M"那一行。
+      // 千万别在这里落盘状态：导入中途的字节数不代表"下载完了"。
+      repairProgressPercent.value = Math.max(0, Math.min(100, payload.percent || 0));
+      repairProgressItems.value = {
+        checked: Math.max(0, payload.doneFiles ?? 0),
+        total: Math.max(0, payload.totalFiles ?? 0),
+        repaired: 0,
+      };
     } else if (repairOperationStage.value === "downloading") {
       repairProgressPercent.value = Math.max(0, Math.min(100, payload.percent || 0));
     }
@@ -3045,10 +3092,16 @@ async function ensureDownloadProgressListener() {
     "game-package-scan-progress",
     (event) => {
       const payload = event.payload;
-      gamePackageScanProgress.value = {
-        checked: Math.max(0, payload.checkedFiles || 0),
-        total: Math.max(0, payload.totalFiles || 0),
-      };
+      const checked = Math.max(0, payload.checkedFiles || 0);
+      const total = Math.max(0, payload.totalFiles || 0);
+      gamePackageScanProgress.value = { checked, total };
+      // 安装前那次全量校验也走这条心跳：把它当成安装进度条（90% 之后那一段）。
+      if (launcherState.value === "installing") {
+        if (total > 0) {
+          installProgressPercent.value = Math.min(100, Number(((checked / total) * 100).toFixed(1)));
+        }
+        return;
+      }
       // 核对期间进度条就按"已经对上的文件字节"走 —— 和后面的下载是同一把尺子，
       // 所以核对一结束，进度条正好停在这次下载的起点上，中间不会跳（用户 2026-09-21 的提议）。
       if (launcherState.value !== "downloading" || !gamePackagePrepareStage.value) return;
@@ -3119,26 +3172,6 @@ async function ensureRepairProgressListener() {
     verificationTotalBytes.value = Math.max(0, payload.totalBytes || 0);
     verificationCurrentFileBytes.value = Math.max(0, payload.currentFileBytes || 0);
     verificationCurrentFileTotalBytes.value = Math.max(0, payload.currentFileTotalBytes || 0);
-  });
-}
-
-async function ensureChunkImportProgressListener() {
-  if (chunkImportProgressUnlisten) return;
-
-  chunkImportProgressUnlisten = await listen<ChunkImportProgressEvent>("game-chunk-import-progress", (event) => {
-    if (!gameChunkImportPending.value) return;
-    const payload = event.payload;
-    repairProgressPercent.value = Math.max(0, Math.min(100, payload.percent || 0));
-    repairProgressItems.value = {
-      checked: Math.max(0, payload.currentChunk || 0),
-      total: Math.max(0, payload.totalChunks || 0),
-      repaired: 0,
-    };
-    verificationCurrentFile.value = payload.fileName || "";
-    verificationProcessedBytes.value = Math.max(0, payload.processedBytes || 0);
-    verificationTotalBytes.value = Math.max(0, payload.totalBytes || 0);
-    verificationCurrentFileBytes.value = Math.max(0, payload.currentChunkBytes || 0);
-    verificationCurrentFileTotalBytes.value = Math.max(0, payload.currentChunkTotalBytes || 0);
   });
 }
 
@@ -3321,6 +3354,15 @@ async function installDownloadedGameArchive() {
   }
 }
 
+/**
+ * 玩家从网盘 / QQ 群拿到的碎片，导入进安装目录。
+ *
+ * 碎片有两种形态（AxTools《生成碎片》产出的）：保持目录结构的散件（分片），
+ * 以及压缩包（影片各自一个、其余文件一个）—— 压缩包里的条目名就是清单里的相对路径，
+ * 所以这里不用关心哪个包装了什么，**和下载共用同一把尺子**：
+ * 目标位置的文件 size + sha256 对得上清单就算"已就位"，对上的直接跳过。
+ * 于是导入是幂等的：导到一半中断、再点一次不会白拷。
+ */
 async function importGameChunks() {
   if (gameChunkImportDisabled.value) return;
   const selected = selectedChunkFolder.value;
@@ -3330,42 +3372,73 @@ async function importGameChunks() {
   const previousState = launcherState.value;
   gameChunkImportPending.value = true;
   try {
-    const archive = await fetchGameMetadataArchiveInfo();
     await stopActiveDownloadBeforeChunkImport();
-    await ensureChunkImportProgressListener();
     resetVerificationProgressDetail();
     repairProgressPercent.value = 0;
     repairProgressItems.value = null;
     launcherState.value = "checking";
-    const result = await invoke<{ importedChunks: number; totalChunks: number; complete: boolean }>("import_game_chunks", {
+
+    // 清单和本地核对都走下载那条既有链路（resolveGamePackage），不另造一份清单来源。
+    const { manifest } = await resolveGamePackage();
+    gamePackageBaseline.value = { bytes: 0, files: 0 };
+    activeDownloadBytes.value = gamePackageTotals.value.bytes;
+    remoteArchiveBytes.value = gamePackageTotals.value.bytes;
+    downloadedBytes.value = 0;
+    downloadedMb.value = 0;
+    gamePackagePrepareStage.value = "";
+    gamePackageScanProgress.value = { checked: 0, total: 0 };
+
+    const result = await invoke<GamePackageImportSummary>("import_game_package_files", {
       installPath: installPath.value,
-      chunks: archive.chunks ?? [],
-      sourcePaths: [selected],
+      files: manifest.files,
+      sourceDirectory: selected,
     });
-    activeDownloadBytes.value = archive.sizeBytes;
-    remoteArchiveBytes.value = archive.sizeBytes;
-    downloadedBytes.value = result.complete ? archive.sizeBytes : 0;
+
+    const complete = result.missing.length === 0 && result.mismatched.length === 0;
+    const totalBytes = result.totalBytes || gamePackageTotals.value.bytes;
+    activeDownloadBytes.value = totalBytes;
+    remoteArchiveBytes.value = totalBytes;
+    downloadedBytes.value = complete ? totalBytes : Math.min(totalBytes, result.importedBytes);
     downloadedMb.value = bytesToMb(downloadedBytes.value);
-    installStage.value = "downloaded";
-    launcherState.value = result.complete ? "downloaded" : "paused";
-    persistDownloadState(result.complete ? "downloaded" : "paused", "immediate");
+    gamePackageFileProgress.value = {
+      done: complete
+        ? result.totalFiles
+        : Math.max(0, result.totalFiles - result.missing.length - result.mismatched.length),
+      total: result.totalFiles,
+    };
+    // installStage 只描述"归档处理到哪一步"，没有"暂停"这一档；
+    // 不完整时保持原样（状态由 launcherState 表达）。
+    if (complete) installStage.value = "downloaded";
+    launcherState.value = complete ? "downloaded" : "paused";
+    persistDownloadState(complete ? "downloaded" : "paused", "immediate");
     showSettings.value = false;
-    showCheckResult(
-      result.complete
-        ? `已找到全部 ${result.totalChunks} 个游戏分片，可以开始安装。`
-        : `已找到 ${result.importedChunks}/${result.totalChunks} 个游戏分片，请补齐后重试。`,
-    );
+    showCheckResult(complete ? describeImportSuccess(result) : describeImportIncomplete(result));
   } catch (error) {
-    console.error("Game chunk import failed", error);
+    console.error("Game fragment import failed", error);
     const fallbackState = gameDownloadActive.value ? previousState : "paused";
     launcherState.value = fallbackState;
     persistDownloadState(fallbackState === "downloaded" ? "downloaded" : "paused", "immediate");
     showSettings.value = false;
-    showCheckResult(`安装游戏分片失败：${formatUnknownError(error)}`);
+    showCheckResult(`导入碎片失败：${formatUnknownError(error)}`);
   } finally {
     gameChunkImportPending.value = false;
     selectedChunkFolder.value = "";
   }
+}
+
+function describeImportSuccess(result: GamePackageImportSummary) {
+  return `已导入 ${result.importedFiles} 个文件（${bytesToMb(result.importedBytes).toFixed(1)} MB），可以开始安装。`;
+}
+
+function describeImportIncomplete(result: GamePackageImportSummary) {
+  const parts: string[] = [];
+  if (result.missing.length > 0) {
+    parts.push(`缺 ${result.missing.length} 个（${result.missing.slice(0, 3).join("、")}）`);
+  }
+  if (result.mismatched.length > 0) {
+    parts.push(`有 ${result.mismatched.length} 个内容对不上（${result.mismatched.slice(0, 3).join("、")}）`);
+  }
+  return `碎片还不齐：${parts.join("；")}。补齐后再点一次导入，已经对上的不会重拷。`;
 }
 
 function openGameChunkImportGuide() {
@@ -4546,7 +4619,7 @@ provide(settingsContextKey, settingsContext);
         </div>
       </section>
 
-      <section class="download-dock">
+      <section class="download-dock" :class="{ 'is-game-download': useLongDownloadDock }">
         <Transition name="download-progress-fade">
           <div v-if="showDownloadProgress && !compactStatusLine" class="download-progress-block" :class="{ warning: launcherState === 'repairPending' }">
             <div class="download-state" :class="{ compact: compactStatusLine }">
@@ -4743,7 +4816,9 @@ provide(settingsContextKey, settingsContext);
           </button>
           <h2>导入碎片</h2>
           <p class="chunk-import-description">
-            游戏碎片是将完整游戏包拆分后的文件。你可以从网盘或 QQ群下载，全部下载完成后，选择包含全部游戏碎片的文件夹进行校验和安装。
+            游戏碎片是把完整游戏包拆开后的文件：分片保持原来的目录结构，影片和其余文件是压缩包。
+            从网盘或 QQ 群下载后，选放着这些文件的文件夹就行 —— 压缩包不用自己解压，启动器会直接读，
+            已经对上的文件也不会重复拷贝。
           </p>
           <span class="chunk-import-section-title">获取游戏碎片</span>
           <div class="chunk-source-actions" aria-label="游戏碎片下载渠道">
@@ -4754,10 +4829,10 @@ provide(settingsContextKey, settingsContext);
           </div>
           <span class="chunk-import-section-title">选择碎片文件夹</span>
           <div class="install-path-row chunk-folder-row">
-            <span>{{ selectedChunkFolder || "尚未选择游戏碎片文件夹" }}</span>
+            <span>{{ selectedChunkFolder || "尚未选择碎片文件夹" }}</span>
             <button type="button" @click="chooseGameChunkFolder">选择</button>
           </div>
-          <p class="chunk-import-hint">启动器会在所选文件夹及其子文件夹中自动寻找当前版本的游戏碎片。</p>
+          <p class="chunk-import-hint">选放碎片的那一层就行，启动器会在里面（含子文件夹）自动找当前版本的文件，压缩包也会打开看。</p>
           <button
             class="install-continue chunk-import-continue"
             type="button"

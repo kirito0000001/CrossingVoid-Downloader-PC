@@ -195,13 +195,46 @@ describe("long-running progress controls", () => {
     );
   });
 
+  it("verifies the whole package before marking an install ready", () => {
+    // 碎片/网盘/QQ群来的文件不是我们下的，谁也没验过；而 validate_game_install_state("ready")
+    // 只认三个标记文件，坏掉的 .pak 照样能过。所以安装链路必须在动安装目录之前先核一遍整包。
+    const finalize = appSource.match(
+      /async function finalizeGamePackageInstall\(\) \{[\s\S]*?\n\}/,
+    )?.[0];
+    expect(finalize).toBeTruthy();
+    expect(finalize).toContain("const verifiedPlan = await verifyInstalledPackageFiles(manifest);");
+    expect(finalize).toContain("if (verifiedPlan.download.length > 0) {");
+    // 顺序：先校验，再 prune / 写状态 —— 没核过就不该动安装目录，更不该写 ready。
+    expect(finalize!.indexOf("verifyInstalledPackageFiles")).toBeGreaterThan(-1);
+    expect(finalize!.indexOf("verifyInstalledPackageFiles")).toBeLessThan(
+      finalize!.indexOf("prune_game_package"),
+    );
+    expect(finalize!.indexOf("verifyInstalledPackageFiles")).toBeLessThan(
+      finalize!.indexOf("write_game_package_state"),
+    );
+    // 复用同一套"本地扫描 + 差异计划"（不另造真相源），校验进度由扫描心跳驱动。
+    expect(appSource).toContain("buildGamePackagePlan(manifest, scanned)");
+    expect(appSource).toContain('if (launcherState.value === "installing") {');
+  });
+
   it("keeps the download dock wide enough for the whole progress line", () => {
     // 进度行有五段（状态 / 字节 / 文件数 / 剩余时间 / 百分比）。310px 放不下时 flex 会把
     // 左边的状态文字挤出容器、再被 overflow:hidden 硬裁掉（半个字，不是省略号）。
-    // 宽度对齐三个方块的按钮排：59 + 12 + 189 + 12 + 189 = 461，左端正好和"方形菜单"齐平。
-    const dock = launcherStyleSource.match(/\.download-dock\s*\{[\s\S]*?\n\}/)?.[0];
-    expect(dock).toBeTruthy();
-    expect(dock).toContain("width: 461px;");
-    expect(dock).toContain("min-width: 461px;");
+    // 但它只在"下载 / 安装游戏"时用长档（对齐三个方块的按钮排：59+12+189+12+189 = 461）；
+    // 启动器更新 / 开发页 / 检查 / 修复这些段数少，用短档更不占画面（用户 2026-09-21 拍板）。
+    const shortDock = launcherStyleSource.match(/\.download-dock\s*\{[\s\S]*?\n\}/)?.[0];
+    expect(shortDock).toBeTruthy();
+    expect(shortDock).toContain("width: 310px;");
+
+    const longDock = launcherStyleSource.match(
+      /\.download-dock\.is-game-download\s*\{[\s\S]*?\n\}/,
+    )?.[0];
+    expect(longDock).toBeTruthy();
+    expect(longDock).toContain("width: 461px;");
+    expect(longDock).toContain("min-width: 461px;");
+
+    // 长档由 useLongDownloadDock 决定（仅"有下载站配置的游戏"在 下载/已下载/安装 三档用）。
+    expect(appSource).toContain("'is-game-download': useLongDownloadDock");
+    expect(appSource).toContain('["downloading", "downloaded", "installing"].includes(launcherState.value)');
   });
 });

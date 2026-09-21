@@ -5,7 +5,7 @@
 //! 这一层只做"字节层面"的事：路径安全、Range 续传、`.part` → 原子改名、sha256 校验、白名单删除。
 //! "这次要下哪几个文件"由前端统一内核（`src/gamePackage.ts`）算好再传进来，两端同一份逻辑。
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -844,6 +844,434 @@ pub async fn write_game_package_state(
     .map_err(|error| format!("Write state task failed: {}", error))?
 }
 
+// ---------------------------------------------------------------------------
+// 导入：玩家从网盘 / QQ 群自己拿到的碎片
+// ---------------------------------------------------------------------------
+//
+// 分发形态（AxTools 的《生成碎片》产出，2026-09-21 定）：
+//   · 分片  `CrossingVoid/Content/Paks/*.pak|ucas|utoc` —— 散件，保持目录结构
+//   · 影片  `CrossingVoid/Content/Movies/<名字>.mp4.zip` —— 每个影片单独一个包
+//   · 其余  `其余文件.zip` —— 一个包，内部保持相对路径
+//
+// **压缩包里的条目名就是清单里的相对路径**，所以这里既不需要知道包叫什么、
+// 也不需要知道哪个包装了哪些文件 —— 拆开按路径对清单就够了。
+// 玩家把 `Login_1.mp4.zip` 改名成 `影片1.zip` 照样能导（条目名没动）。
+//
+// 判定和下载共用同一把尺子：目标位置的 size + sha256 对得上清单就算"已就位"。
+// 于是导入是幂等的、导到一半中断再导不会白拷 —— 已经对上的直接在进度里跳过。
+
+/// 玩家解压时常常多套一层同名文件夹，往下找这么多层。
+const IMPORT_ROOT_PROBE_DEPTH: usize = 3;
+
+/// 缺失 / 失配清单最多列几个 —— 只给人看，没必要把 86 条路径全塞回去。
+const IMPORT_REPORT_LIMIT: usize = 12;
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GamePackageImportSummary {
+    pub imported_files: u64,
+    pub imported_bytes: u64,
+    pub total_files: u64,
+    pub total_bytes: u64,
+    /// 实际用的源根（可能是玩家选的那个文件夹下面几层）。
+    pub source_root: String,
+    /// 清单里有、但源文件夹里找不到的。
+    pub missing: Vec<String>,
+    /// 找到了、但内容对不上清单的（文件坏了，或者版本不对）。
+    pub mismatched: Vec<String>,
+}
+
+/// 一个文件的来源。
+enum ImportSource {
+    /// 散件：直接就是这个路径。
+    Loose(PathBuf),
+    /// 压缩包里的条目：包路径 + **包内条目原始名**（取的时候要用原样，
+    /// 归一后的名字只用来对清单 —— Bandizip 有时会给条目加 `./` 前缀）。
+    Archived(PathBuf, String),
+}
+
+/// 把一张压缩包里的条目名归一成清单里那种相对路径。
+///
+/// Bandizip 有时会给条目名加 `./` 前缀，Windows 上可能用 `\`，
+/// 这里统一成 `/` 再去掉开头的 `./`，剩下的交给 `safe_relative_path` 把关（防 zip slip）。
+fn normalize_archive_entry_name(raw: &str) -> Option<String> {
+    let mut name = raw.trim().replace('\\', "/");
+    while let Some(rest) = name.strip_prefix("./") {
+        name = rest.to_string();
+    }
+    if name.is_empty() {
+        return None;
+    }
+    safe_relative_path(&name).ok()?;
+    Some(name)
+}
+
+/// 这个目录下有没有清单里的文件（散件）。用来判断"源根是不是就在这一层"。
+fn import_root_has_any(dir: &Path, files: &[GamePackageFile]) -> bool {
+    files.iter().any(|entry| {
+        safe_relative_path(&entry.path)
+            .map(|relative| dir.join(relative).is_file())
+            .unwrap_or(false)
+    })
+}
+
+/// 探源根：先看这一层，再往下找几层（玩家解压多套一层是常态）。
+///
+/// 一层都没命中也不要紧 —— 后面按 zip 条目名匹配，那些包平铺在选中的文件夹里也能用，
+/// 所以最终退回"玩家选的那个文件夹"本身。
+fn import_resolve_root(source_root: &Path, files: &[GamePackageFile]) -> PathBuf {
+    fn probe(dir: &Path, files: &[GamePackageFile], depth: usize) -> Option<PathBuf> {
+        if import_root_has_any(dir, files) {
+            return Some(dir.to_path_buf());
+        }
+        if depth == 0 {
+            return None;
+        }
+        let mut children: Vec<PathBuf> = fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+            .map(|entry| entry.path())
+            .collect();
+        children.sort();
+        children
+            .into_iter()
+            .find_map(|child| probe(&child, files, depth - 1))
+    }
+
+    probe(source_root, files, IMPORT_ROOT_PROBE_DEPTH).unwrap_or_else(|| source_root.to_path_buf())
+}
+
+/// 扫源文件夹，建"清单相对路径 → 来源"的索引。
+fn import_collect_sources(
+    source_root: &Path,
+) -> Result<(HashMap<String, ImportSource>, Vec<PathBuf>), String> {
+    let mut loose: HashMap<String, ImportSource> = HashMap::new();
+    let mut archives: Vec<PathBuf> = Vec::new();
+    let mut pending: Vec<PathBuf> = vec![source_root.to_path_buf()];
+
+    while let Some(directory) = pending.pop() {
+        check_download_cancelled()?;
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+
+            if path
+                .extension()
+                .map(|extension| extension.eq_ignore_ascii_case("zip"))
+                .unwrap_or(false)
+            {
+                archives.push(path);
+                continue;
+            }
+
+            let Ok(relative) = path.strip_prefix(source_root) else {
+                continue;
+            };
+            let normalized = relative.to_string_lossy().replace('\\', "/");
+            if !normalized.is_empty() {
+                loose.insert(normalized, ImportSource::Loose(path));
+            }
+        }
+    }
+
+    archives.sort();
+    Ok((loose, archives))
+}
+
+/// 打开每个压缩包，把条目按名字记下来（只读目录，不解压）。
+fn import_index_archives(
+    archives: &[PathBuf],
+) -> Result<HashMap<String, ImportSource>, String> {
+    let mut indexed: HashMap<String, ImportSource> = HashMap::new();
+    for archive_path in archives {
+        check_download_cancelled()?;
+        let file = match fs::File::open(archive_path) {
+            Ok(file) => file,
+            Err(error) => {
+                return Err(format!(
+                    "打不开碎片压缩包 {}：{}",
+                    archive_path.display(),
+                    error
+                ))
+            }
+        };
+        let mut archive = match zip::ZipArchive::new(file) {
+            Ok(archive) => archive,
+            Err(error) => {
+                return Err(format!(
+                    "碎片压缩包坏了或者不是 zip：{}（{}）",
+                    archive_path.display(),
+                    error
+                ))
+            }
+        };
+        for index in 0..archive.len() {
+            let entry = match archive.by_index(index) {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
+            if entry.is_dir() {
+                continue;
+            }
+            let raw_name = entry.name().to_string();
+            let Some(name) = normalize_archive_entry_name(&raw_name) else {
+                continue;
+            };
+            // 同名条目以先出现的为准（同一个文件不会在两处都放，真出现了也不算错）。
+            indexed
+                .entry(name)
+                .or_insert_with(|| ImportSource::Archived(archive_path.clone(), raw_name));
+        }
+    }
+
+    Ok(indexed)
+}
+
+/// 把一个来源落到目标位置，返回落盘字节数。
+///
+/// 一律先写 `<目标>.part`，校验通过才原子改名 —— 和下载那边同一套，
+/// 这样中途断了、或者文件是坏的，正式位置不会留半成品。
+fn import_write_source(source: &ImportSource, target: &Path) -> Result<u64, String> {
+    let temporary = part_path(target);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            format!("无法创建目录 {}：{}", parent.display(), error)
+        })?;
+    }
+    remove_file_if_exists(&temporary)?;
+
+    match source {
+        ImportSource::Loose(path) => {
+            import_copy_file(path, &temporary)?;
+        }
+        ImportSource::Archived(archive_path, entry_name) => {
+            let file = fs::File::open(archive_path).map_err(|error| {
+                format!("打不开碎片压缩包 {}：{}", archive_path.display(), error)
+            })?;
+            let mut archive = zip::ZipArchive::new(file).map_err(|error| {
+                format!("碎片压缩包坏了：{}（{}）", archive_path.display(), error)
+            })?;
+            let mut entry = archive
+                .by_name(entry_name)
+                .map_err(|error| format!("压缩包里找不到 {}：{}", entry_name, error))?;
+            let mut writer = fs::File::create(&temporary).map_err(|error| {
+                format!("无法写入 {}：{}", temporary.display(), error)
+            })?;
+            let mut buffer = vec![0u8; READ_BUFFER_BYTES];
+            loop {
+                check_download_cancelled()?;
+                let read = entry
+                    .read(&mut buffer)
+                    .map_err(|error| format!("读压缩包条目失败：{}", error))?;
+                if read == 0 {
+                    break;
+                }
+                writer
+                    .write_all(&buffer[..read])
+                    .map_err(|error| format!("写入 {} 失败：{}", temporary.display(), error))?;
+            }
+            writer
+                .flush()
+                .map_err(|error| format!("写入 {} 失败：{}", temporary.display(), error))?;
+        }
+    }
+
+    let written = fs::metadata(&temporary)
+        .map(|metadata| metadata.len())
+        .map_err(|error| format!("无法读取 {}：{}", temporary.display(), error))?;
+    Ok(written)
+}
+
+/// 散件拷贝：流式 + 每块检查取消（分片最大能到 900MB，必须能中途停）。
+fn import_copy_file(source: &Path, target: &Path) -> Result<u64, String> {
+    let mut input = fs::File::open(source)
+        .map_err(|error| format!("打不开碎片文件 {}：{}", source.display(), error))?;
+    let mut output = fs::File::create(target)
+        .map_err(|error| format!("无法写入 {}：{}", target.display(), error))?;
+    let mut buffer = vec![0u8; READ_BUFFER_BYTES];
+    let mut copied = 0u64;
+    loop {
+        check_download_cancelled()?;
+        let read = input
+            .read(&mut buffer)
+            .map_err(|error| format!("读 {} 失败：{}", source.display(), error))?;
+        if read == 0 {
+            break;
+        }
+        output
+            .write_all(&buffer[..read])
+            .map_err(|error| format!("写入 {} 失败：{}", target.display(), error))?;
+        copied += read as u64;
+    }
+    output
+        .flush()
+        .map_err(|error| format!("写入 {} 失败：{}", target.display(), error))?;
+    Ok(copied)
+}
+
+pub fn import_package_files<F>(
+    install_dir: &Path,
+    files: &[GamePackageFile],
+    source_directory: &Path,
+    on_progress: F,
+) -> Result<GamePackageImportSummary, String>
+where
+    F: Fn(u64, u64, u64, u64) + Send + Sync + 'static,
+{
+    if files.is_empty() {
+        return Err("当前游戏清单是空的，没有可导入的内容。".to_string());
+    }
+    if !source_directory.is_dir() {
+        return Err(format!(
+            "选择的碎片文件夹不存在：{}",
+            source_directory.display()
+        ));
+    }
+
+    // 清单路径先全验一遍：一条非法就整单拒绝，别导了一半才发现。
+    for entry in files {
+        safe_relative_path(&entry.path)?;
+    }
+
+    let install_root = fs::canonicalize(install_dir).unwrap_or_else(|_| install_dir.to_path_buf());
+    let chosen = fs::canonicalize(source_directory).unwrap_or_else(|_| source_directory.to_path_buf());
+    if chosen == install_root || chosen.starts_with(&install_root) {
+        return Err("碎片来源不能是游戏安装目录本身，请选择从网盘下载下来的那个文件夹。".to_string());
+    }
+
+    fs::create_dir_all(install_dir).map_err(|error| {
+        format!("无法创建安装目录 {}：{}", install_dir.display(), error)
+    })?;
+
+    let total_bytes = files
+        .iter()
+        .map(|entry| entry.size_bytes)
+        .fold(0u64, u64::saturating_add);
+    let total_files = files.len() as u64;
+
+    let source_root = import_resolve_root(&chosen, files);
+    let (loose, archives) = import_collect_sources(&source_root)?;
+    let archived = import_index_archives(&archives)?;
+
+    let mut done_bytes = 0u64;
+    let mut done_files = 0u64;
+    let mut imported_files = 0u64;
+    let mut imported_bytes = 0u64;
+    let mut missing = Vec::new();
+    let mut mismatched = Vec::new();
+
+    for entry in files {
+        check_download_cancelled()?;
+        let relative = safe_relative_path(&entry.path)?;
+        let target = install_dir.join(&relative);
+
+        // 已经对得上清单的（之前在启动器里下过、或者上一轮导入过）直接算进度，不重拷。
+        if file_matches_entry(&target, entry) {
+            done_bytes = done_bytes.saturating_add(entry.size_bytes);
+            done_files += 1;
+            on_progress(done_bytes.min(total_bytes), total_bytes, done_files, total_files);
+            continue;
+        }
+
+        let source = loose
+            .get(&entry.path)
+            .or_else(|| archived.get(&entry.path));
+        let Some(source) = source else {
+            missing.push(entry.path.clone());
+            done_files += 1;
+            on_progress(done_bytes.min(total_bytes), total_bytes, done_files, total_files);
+            continue;
+        };
+
+        let written = import_write_source(source, &target)?;
+        let temporary = part_path(&target);
+
+        let expected = entry.sha256.trim();
+        let ok = if expected.is_empty() {
+            entry.size_bytes == 0 || written == entry.size_bytes
+        } else {
+            match calculate_file_sha256(&temporary) {
+                Ok(hash) => hash.eq_ignore_ascii_case(expected),
+                Err(_) => false,
+            }
+        };
+
+        if !ok {
+            remove_file_if_exists(&temporary)?;
+            mismatched.push(entry.path.clone());
+            done_files += 1;
+            on_progress(done_bytes.min(total_bytes), total_bytes, done_files, total_files);
+            continue;
+        }
+
+        replace_file_atomic(&temporary, &target)?;
+        imported_files += 1;
+        imported_bytes = imported_bytes.saturating_add(written);
+        done_bytes = done_bytes.saturating_add(entry.size_bytes);
+        done_files += 1;
+        on_progress(done_bytes.min(total_bytes), total_bytes, done_files, total_files);
+    }
+
+    missing.truncate(IMPORT_REPORT_LIMIT);
+    mismatched.truncate(IMPORT_REPORT_LIMIT);
+    on_progress(total_bytes, total_bytes, total_files, total_files);
+
+    Ok(GamePackageImportSummary {
+        imported_files,
+        imported_bytes,
+        total_files,
+        total_bytes,
+        source_root: source_root.to_string_lossy().to_string(),
+        missing,
+        mismatched,
+    })
+}
+
+#[tauri::command]
+pub async fn import_game_package_files(
+    app: AppHandle,
+    install_path: String,
+    files: Vec<GamePackageFile>,
+    source_directory: String,
+) -> Result<GamePackageImportSummary, String> {
+    // 和下载一样：取消标志是进程级的，上一轮"暂停"留下的 true 会让这次导入
+    // 在第一条上立刻退出（前端还会把它当"用户主动取消"，静默无反应）。
+    crate::reset_download_cancelled();
+    tauri::async_runtime::spawn_blocking(move || {
+        let progress_app = app.clone();
+        import_package_files(
+            Path::new(&install_path),
+            &files,
+            Path::new(&source_directory),
+            move |copied, total, done_files, total_files| {
+                crate::emit_game_package_progress(
+                    &progress_app,
+                    copied,
+                    total,
+                    done_files,
+                    total_files,
+                );
+            },
+        )
+    })
+    .await
+    .map_err(|error| format!("Import task failed: {}", error))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1412,5 +1840,228 @@ mod tests {
         assert_eq!(bytes.len() as u64, target.size_bytes);
         assert_eq!(sha256_hex(&bytes), target.sha256);
         fs::remove_dir_all(install).expect("remove temp dir");
+    }
+
+    // -----------------------------------------------------------------------
+    // 导入碎片
+    // -----------------------------------------------------------------------
+
+    fn write_source_file(root: &Path, relative: &str, bytes: &[u8]) {
+        let path = root.join(relative.replace('/', std::path::MAIN_SEPARATOR_STR));
+        fs::create_dir_all(path.parent().expect("parent dir")).expect("create source dir");
+        fs::write(&path, bytes).expect("write source file");
+    }
+
+    /// 造一个碎片压缩包：条目名就用清单里的相对路径（AxTools《生成碎片》的约定）。
+    fn write_archive(path: &Path, entries: &[(&str, &[u8])]) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create archive dir");
+        }
+        let file = fs::File::create(path).expect("create archive");
+        let mut writer = zip::ZipWriter::new(file);
+        for (name, body) in entries {
+            writer
+                .start_file(*name, zip::write::SimpleFileOptions::default())
+                .expect("start zip entry");
+            writer.write_all(body).expect("write zip entry");
+        }
+        writer.finish().expect("finish zip");
+    }
+
+    fn fragment_payload() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        (vec![3u8; 8192], vec![5u8; 1024], vec![7u8; 2048])
+    }
+
+    #[test]
+    fn import_takes_loose_files_and_archives_by_manifest_path() {
+        let install = temp_dir("import-install");
+        let source = temp_dir("import-source");
+        let (chunk, exe, video) = fragment_payload();
+
+        write_source_file(
+            &source,
+            "CrossingVoid/Content/Paks/pakchunk0-Windows.ucas",
+            &chunk,
+        );
+        write_archive(
+            &source.join("CrossingVoid/Content/Movies/Login_1.mp4.zip"),
+            &[("CrossingVoid/Content/Movies/Login_1.mp4", &video)],
+        );
+        write_archive(&source.join("其余文件.zip"), &[("CrossingVoid.exe", &exe)]);
+
+        let files = vec![
+            entry("CrossingVoid/Content/Paks/pakchunk0-Windows.ucas", &chunk),
+            entry("CrossingVoid/Content/Movies/Login_1.mp4", &video),
+            entry("CrossingVoid.exe", &exe),
+        ];
+
+        let summary = import_package_files(&install, &files, &source, |_, _, _, _| {})
+            .expect("import fragments");
+
+        assert_eq!(summary.imported_files, 3);
+        assert_eq!(summary.total_files, 3);
+        assert!(summary.missing.is_empty());
+        assert!(summary.mismatched.is_empty());
+        assert_eq!(
+            fs::read(install.join("CrossingVoid.exe")).expect("read exe"),
+            exe
+        );
+        assert_eq!(
+            fs::read(install.join("CrossingVoid/Content/Movies/Login_1.mp4")).expect("read video"),
+            video
+        );
+        assert_eq!(
+            fs::read(install.join("CrossingVoid/Content/Paks/pakchunk0-Windows.ucas"))
+                .expect("read chunk"),
+            chunk
+        );
+        // 落位之后不能留下 .part
+        assert!(!part_path(&install.join("CrossingVoid.exe")).exists());
+
+        fs::remove_dir_all(&install).expect("remove install dir");
+        fs::remove_dir_all(&source).expect("remove source dir");
+    }
+
+    #[test]
+    fn a_renamed_archive_still_imports_because_matching_uses_entry_names() {
+        let install = temp_dir("import-renamed");
+        let source = temp_dir("import-renamed-source");
+        let (_, _, video) = fragment_payload();
+
+        // 玩家把 `Login_1.mp4.zip` 改成了 `影片1.zip` —— 条目名没动，照样能导
+        write_archive(
+            &source.join("影片1.zip"),
+            &[("CrossingVoid/Content/Movies/Login_1.mp4", &video)],
+        );
+
+        let files = vec![entry("CrossingVoid/Content/Movies/Login_1.mp4", &video)];
+        let summary = import_package_files(&install, &files, &source, |_, _, _, _| {})
+            .expect("import renamed archive");
+
+        assert_eq!(summary.imported_files, 1);
+        assert_eq!(
+            fs::read(install.join("CrossingVoid/Content/Movies/Login_1.mp4")).expect("read video"),
+            video
+        );
+
+        fs::remove_dir_all(&install).expect("remove install dir");
+        fs::remove_dir_all(&source).expect("remove source dir");
+    }
+
+    #[test]
+    fn import_probes_one_level_down_when_the_player_extracted_into_a_subfolder() {
+        let install = temp_dir("import-nested");
+        let source = temp_dir("import-nested-source");
+        let (chunk, _, _) = fragment_payload();
+
+        // 解压工具常常自动多套一层同名文件夹
+        write_source_file(
+            &source.join("零境交错PC碎片"),
+            "CrossingVoid/Content/Paks/pakchunk0-Windows.ucas",
+            &chunk,
+        );
+
+        let files = vec![entry(
+            "CrossingVoid/Content/Paks/pakchunk0-Windows.ucas",
+            &chunk,
+        )];
+        let summary = import_package_files(&install, &files, &source, |_, _, _, _| {})
+            .expect("import nested source");
+
+        assert_eq!(summary.imported_files, 1);
+        assert!(summary.source_root.contains("零境交错PC碎片"));
+
+        fs::remove_dir_all(&install).expect("remove install dir");
+        fs::remove_dir_all(&source).expect("remove source dir");
+    }
+
+    #[test]
+    fn importing_twice_does_not_copy_anything_the_second_time() {
+        let install = temp_dir("import-twice");
+        let source = temp_dir("import-twice-source");
+        let (chunk, exe, _) = fragment_payload();
+
+        write_source_file(
+            &source,
+            "CrossingVoid/Content/Paks/pakchunk0-Windows.ucas",
+            &chunk,
+        );
+        write_archive(&source.join("其余文件.zip"), &[("CrossingVoid.exe", &exe)]);
+
+        let files = vec![
+            entry("CrossingVoid/Content/Paks/pakchunk0-Windows.ucas", &chunk),
+            entry("CrossingVoid.exe", &exe),
+        ];
+
+        let first = import_package_files(&install, &files, &source, |_, _, _, _| {})
+            .expect("first import");
+        assert_eq!(first.imported_files, 2);
+
+        // 第二轮应该一个都不拷 —— 已经对上的直接算进度
+        // （进度回调要求 'static，所以用 Arc<Mutex> 收，不能直接捕获局部变量）
+        let final_progress = Arc::new(Mutex::new((0u64, 0u64, 0u64, 0u64)));
+        let captured = Arc::clone(&final_progress);
+        let second = import_package_files(&install, &files, &source, move |copied, total, done, all| {
+            *captured.lock().expect("progress lock") = (copied, total, done, all);
+        })
+        .expect("second import");
+
+        assert_eq!(second.imported_files, 0);
+        assert!(second.missing.is_empty());
+        assert_eq!(second.total_files, 2);
+        let progress = *final_progress.lock().expect("progress lock");
+        assert_eq!(progress.2, 2);
+        assert_eq!(progress.3, 2);
+
+        fs::remove_dir_all(&install).expect("remove install dir");
+        fs::remove_dir_all(&source).expect("remove source dir");
+    }
+
+    #[test]
+    fn import_reports_missing_and_mismatched_without_leaving_them_behind() {
+        let install = temp_dir("import-bad");
+        let source = temp_dir("import-bad-source");
+        let (chunk, _, _) = fragment_payload();
+
+        write_source_file(
+            &source,
+            "CrossingVoid/Content/Paks/pakchunk0-Windows.ucas",
+            &chunk,
+        );
+        // 版本不对：内容对不上清单里的 sha256
+        write_source_file(&source, "CrossingVoid.exe", &[9u8; 1024]);
+
+        let mut wrong_version = entry("CrossingVoid.exe", &[1u8; 1024]);
+        wrong_version.sha256 = sha256_hex(&[1u8; 1024]);
+        let files = vec![
+            entry("CrossingVoid/Content/Paks/pakchunk0-Windows.ucas", &chunk),
+            wrong_version,
+            entry("CrossingVoid/Content/Movies/Login_1.mp4", &[7u8; 2048]),
+        ];
+
+        let summary = import_package_files(&install, &files, &source, |_, _, _, _| {})
+            .expect("import with problems");
+
+        assert_eq!(summary.imported_files, 1);
+        assert_eq!(summary.missing, vec!["CrossingVoid/Content/Movies/Login_1.mp4"]);
+        assert_eq!(summary.mismatched, vec!["CrossingVoid.exe"]);
+        // 对不上的文件一个字节都不许落在正式位置，也不许留 .part
+        assert!(!install.join("CrossingVoid.exe").exists());
+        assert!(!part_path(&install.join("CrossingVoid.exe")).exists());
+
+        fs::remove_dir_all(&install).expect("remove install dir");
+        fs::remove_dir_all(&source).expect("remove source dir");
+    }
+
+    #[test]
+    fn import_refuses_the_install_directory_as_the_source() {
+        let install = temp_dir("import-self");
+        let (_, exe, _) = fragment_payload();
+        let files = vec![entry("CrossingVoid.exe", &exe)];
+
+        let result = import_package_files(&install, &files, &install, |_, _, _, _| {});
+        assert!(result.is_err());
+
+        fs::remove_dir_all(&install).expect("remove install dir");
     }
 }

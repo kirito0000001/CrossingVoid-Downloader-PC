@@ -565,6 +565,14 @@ Rust 侧 `scan_local_files` 每个文件都报一次、收尾报满。守卫见 
 
 不要直接把 ZIP 解压覆盖正在使用的正式目录。中断时直接覆盖会留下“看起来安装过但文件不完整”的状态。临时文件写入后再替换，下载状态 JSON 也使用同样原则。
 
+**安装前必须拿清单把整包核一遍**（2026-09-21，为碎片/网盘来源准备）：
+`finalizeGamePackageInstall` 在 prune / 写状态之前先跑 `verifyInstalledPackageFiles`
+（= `scan_local_game_package` + `buildGamePackagePlan`，和下载同一个真相源），
+只要有缺失或 sha256 不一致的就**拒绝安装**并说清还差哪些文件 ——
+因为 `validate_game_install_state("ready")` 只认三个标记文件（`CrossingVoid.version.json` /
+`CrossingVoid.manifest.json` / `CrossingVoid.exe`），坏掉的 `.pak` 照样能过。
+校验进度由 `game-package-scan-progress` 心跳驱动（`installing` 阶段映射成 0-100 的安装进度）。
+
 **下载成功后自动接着安装**（2026-09-21 用户拍板）：下载链路跑完不会停在「已下载」等玩家点按钮，
 而是直接进安装阶段；安装失败才退回「已下载」让玩家重试。
 

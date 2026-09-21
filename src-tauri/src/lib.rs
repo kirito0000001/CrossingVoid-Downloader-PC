@@ -139,27 +139,6 @@ struct ArchiveChunk {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ImportGameChunksResult {
-    imported_chunks: u64,
-    total_chunks: u64,
-    complete: bool,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ChunkImportProgress {
-    current_chunk: u64,
-    total_chunks: u64,
-    file_name: String,
-    processed_bytes: u64,
-    total_bytes: u64,
-    current_chunk_bytes: u64,
-    current_chunk_total_bytes: u64,
-    percent: f64,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct RepairSummary {
     checked_files: u64,
     repaired_files: u64,
@@ -1343,139 +1322,6 @@ async fn download_game_archive(
     })
     .await
     .map_err(|error| format!("Download task failed: {}", error))?
-}
-
-#[tauri::command]
-async fn import_game_chunks(
-    app: AppHandle,
-    install_path: String,
-    chunks: Vec<ArchiveChunk>,
-    source_paths: Vec<String>,
-) -> Result<ImportGameChunksResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        if chunks.is_empty() {
-            return Err("当前游戏清单没有可导入的碎片。".to_string());
-        }
-
-        let download_dir = PathBuf::from(install_path).join("_download");
-        let mut imported_sources = Vec::new();
-
-        for source_path in source_paths {
-            let source = PathBuf::from(source_path);
-            if source.is_dir() {
-                imported_sources.extend(collect_imported_chunk_files(&source, &chunks)?);
-            } else if source.is_file() {
-                imported_sources.push(source);
-            } else {
-                return Err(format!("选择的游戏分片路径不存在：{}", source.display()));
-            }
-        }
-        if imported_sources.is_empty() {
-            return Err("所选文件夹中没有找到当前版本的游戏分片。".to_string());
-        }
-
-        let mut sources_by_manifest_name = HashMap::new();
-        for source in imported_sources {
-            let source_name = sanitize_file_name(&source.to_string_lossy())
-                .ok_or_else(|| "Imported chunk file name is empty".to_string())?;
-            let expected = resolve_imported_chunk(&source_name, &chunks)
-                .ok_or_else(|| "Imported chunk is not part of the current manifest".to_string())?;
-            let destination_name = sanitize_file_name(&expected.file_name)
-                .ok_or_else(|| "Manifest chunk file name is empty".to_string())?;
-            sources_by_manifest_name
-                .entry(destination_name)
-                .or_insert((source, source_name));
-        }
-
-        let mut candidates = Vec::new();
-        for (destination_name, (source, source_name)) in sources_by_manifest_name {
-            if source.starts_with(&download_dir) {
-                return Err("请选择启动器下载缓存以外的游戏分片文件夹。".to_string());
-            }
-            let expected = resolve_imported_chunk(&destination_name, &chunks)
-                .ok_or_else(|| "Imported chunk is not part of the current manifest".to_string())?;
-            let metadata = fs::metadata(&source)
-                .map_err(|error| format!("Unable to inspect imported chunk {}: {}", source.display(), error))?;
-            if !metadata.is_file() {
-                return Err(format!("Imported chunk is not a file: {}", source.display()));
-            }
-            if let Some(expected_size) = expected.size_bytes {
-                if metadata.len() != expected_size {
-                    return Err(format!("Imported chunk size mismatch: {}", source_name));
-                }
-            }
-            candidates.push((
-                destination_name,
-                source,
-                source_name,
-                metadata.len(),
-                expected.sha256.clone(),
-            ));
-        }
-        candidates.sort_by(|left, right| left.0.cmp(&right.0));
-
-        let total_chunks = candidates.len() as u64;
-        let total_bytes = candidates
-            .iter()
-            .map(|candidate| candidate.3)
-            .sum::<u64>()
-            .max(1);
-        let mut processed_bytes = 0u64;
-        let mut validated_sources = Vec::new();
-        for (index, (destination_name, source, source_name, file_size, expected_hash)) in
-            candidates.into_iter().enumerate()
-        {
-            let current_chunk = index as u64 + 1;
-            let emit_progress = |current_chunk_bytes: u64| {
-                let absolute_bytes = processed_bytes
-                    .saturating_add(current_chunk_bytes.min(file_size))
-                    .min(total_bytes);
-                let _ = app.emit(
-                    "game-chunk-import-progress",
-                    ChunkImportProgress {
-                        current_chunk,
-                        total_chunks,
-                        file_name: source_name.clone(),
-                        processed_bytes: absolute_bytes,
-                        total_bytes,
-                        current_chunk_bytes: current_chunk_bytes.min(file_size),
-                        current_chunk_total_bytes: file_size,
-                        percent: absolute_bytes as f64 / total_bytes as f64 * 100.0,
-                    },
-                );
-            };
-            emit_progress(0);
-            if let Some(expected_hash) = expected_hash.as_deref() {
-                let normalized_expected = expected_hash.trim().to_ascii_lowercase();
-                let actual = calculate_file_sha256_with_progress(&source, emit_progress)?;
-                if !normalized_expected.is_empty() && actual != normalized_expected {
-                    return Err(format!("Imported chunk SHA256 mismatch: {}", source_name));
-                }
-            } else {
-                emit_progress(file_size);
-            }
-            processed_bytes = processed_bytes.saturating_add(file_size).min(total_bytes);
-            validated_sources.push((destination_name, source));
-        }
-
-        remove_download_artifacts(&download_dir)?;
-        fs::create_dir_all(&download_dir).map_err(|error| {
-            format!("Unable to create import directory {}: {}", download_dir.display(), error)
-        })?;
-        let mut imported_chunks = 0u64;
-        for (destination_name, source) in validated_sources {
-            let destination = download_dir.join(destination_name);
-            fs::copy(&source, &destination).map_err(|error| {
-                format!("Unable to import chunk {}: {}", source.display(), error)
-            })?;
-            imported_chunks = imported_chunks.saturating_add(1);
-        }
-
-        let complete = validate_staged_archive(&download_dir.parent().unwrap_or(&download_dir).to_string_lossy(), 0, "", &chunks, Some("downloaded"))?;
-        Ok(ImportGameChunksResult { imported_chunks, total_chunks: chunks.len() as u64, complete })
-    })
-    .await
-    .map_err(|error| format!("Import task failed: {}", error))?
 }
 
 #[tauri::command]
@@ -3055,80 +2901,6 @@ fn sanitize_file_name(file_name: &str) -> Option<String> {
     } else {
         Some(name)
     }
-}
-
-fn github_chunk_index(file_name: &str) -> Option<u32> {
-    let suffix = file_name.strip_prefix("CrossingVoid.")?;
-    if suffix.len() != 3 || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    suffix.parse::<u32>().ok().filter(|index| *index > 0)
-}
-
-fn resolve_imported_chunk<'a>(
-    source_name: &str,
-    chunks: &'a [ArchiveChunk],
-) -> Option<&'a ArchiveChunk> {
-    if let Some(chunk) = chunks.iter().find(|chunk| {
-        sanitize_file_name(&chunk.file_name).as_deref() == Some(source_name)
-    }) {
-        return Some(chunk);
-    }
-
-    let github_index = github_chunk_index(source_name)?;
-    chunks
-        .iter()
-        .find(|chunk| chunk.index == Some(github_index))
-}
-
-fn collect_imported_chunk_files(
-    root: &Path,
-    chunks: &[ArchiveChunk],
-) -> Result<Vec<PathBuf>, String> {
-    if !root.is_dir() {
-        return Err(format!("选择的游戏分片文件夹不存在：{}", root.display()));
-    }
-
-    const MAX_SCANNED_ENTRIES: usize = 10_000;
-    let mut pending = VecDeque::from([root.to_path_buf()]);
-    let mut found = Vec::new();
-    let mut scanned = 0usize;
-    while let Some(directory) = pending.pop_front() {
-        let mut entries = match fs::read_dir(&directory) {
-            Ok(entries) => entries.filter_map(Result::ok).collect::<Vec<_>>(),
-            Err(error) if directory == root => {
-                return Err(format!("无法读取游戏分片文件夹 {}：{}", root.display(), error));
-            }
-            Err(_) => continue,
-        };
-        entries.sort_by_key(|entry| entry.file_name());
-
-        for entry in entries {
-            scanned += 1;
-            if scanned > MAX_SCANNED_ENTRIES {
-                return Err("游戏分片文件夹内容过多，请选择更接近分片的位置。".to_string());
-            }
-            let file_type = match entry.file_type() {
-                Ok(file_type) => file_type,
-                Err(_) => continue,
-            };
-            if file_type.is_symlink() {
-                continue;
-            }
-            if file_type.is_dir() {
-                pending.push_back(entry.path());
-                continue;
-            }
-            if !file_type.is_file() {
-                continue;
-            }
-            let file_name = entry.file_name().to_string_lossy().to_string();
-            if resolve_imported_chunk(&file_name, chunks).is_some() {
-                found.push(entry.path());
-            }
-        }
-    }
-    Ok(found)
 }
 
 fn download_state_file_path(install_path: &str) -> PathBuf {
@@ -4900,10 +4672,10 @@ pub fn run() {
             check_game_manifest_files,
             validate_downloaded_archive_state,
             download_game_archive,
-            import_game_chunks,
             install_downloaded_game_archive,
             game_package::scan_local_game_package,
             game_package::download_game_package,
+            game_package::import_game_package_files,
             game_package::prune_game_package,
             game_package::read_game_package_state,
             game_package::write_game_package_state,
@@ -4927,43 +4699,6 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn test_archive_chunk(index: u32, file_name: &str) -> ArchiveChunk {
-        ArchiveChunk {
-            index: Some(index),
-            file_name: file_name.to_string(),
-            url: String::new(),
-            sha256: None,
-            size_bytes: None,
-        }
-    }
-
-    #[test]
-    fn imported_chunk_resolves_manifest_name_and_github_numeric_alias() {
-        let chunks = vec![
-            test_archive_chunk(1, "CrossingVoid电脑端.碎片001"),
-            test_archive_chunk(2, "CrossingVoid电脑端.碎片002"),
-        ];
-
-        assert_eq!(
-            resolve_imported_chunk("CrossingVoid电脑端.碎片001", &chunks)
-                .map(|chunk| chunk.index),
-            Some(Some(1))
-        );
-        assert_eq!(
-            resolve_imported_chunk("CrossingVoid.002", &chunks).map(|chunk| chunk.index),
-            Some(Some(2))
-        );
-    }
-
-    #[test]
-    fn imported_chunk_rejects_unrelated_numeric_files() {
-        let chunks = vec![test_archive_chunk(1, "CrossingVoid电脑端.碎片001")];
-
-        assert!(resolve_imported_chunk("OtherGame.001", &chunks).is_none());
-        assert!(resolve_imported_chunk("CrossingVoid.999", &chunks).is_none());
-        assert!(resolve_imported_chunk("CrossingVoid.exe", &chunks).is_none());
-    }
 
     #[test]
     fn cancelling_download_removes_cache_without_touching_installed_game_files() {
@@ -4991,36 +4726,6 @@ mod tests {
             b"installed"
         );
         fs::remove_dir_all(root).expect("remove cancel test directory");
-    }
-
-    #[test]
-    fn imported_chunk_folder_scan_finds_nested_manifest_and_github_names() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be after unix epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!(
-            "cv-launcher-chunk-folder-{}-{}",
-            std::process::id(),
-            unique
-        ));
-        let nested = root.join("网盘下载");
-        fs::create_dir_all(&nested).expect("create nested chunk directory");
-        fs::write(root.join("说明.txt"), "ignore").expect("write unrelated file");
-        fs::write(root.join("CrossingVoid电脑端.碎片001"), "one")
-            .expect("write manifest chunk");
-        fs::write(nested.join("CrossingVoid.002"), "two").expect("write github chunk");
-
-        let chunks = vec![
-            test_archive_chunk(1, "CrossingVoid电脑端.碎片001"),
-            test_archive_chunk(2, "CrossingVoid电脑端.碎片002"),
-        ];
-        let found = collect_imported_chunk_files(&root, &chunks).expect("scan chunk folder");
-
-        assert_eq!(found.len(), 2);
-        assert!(found.iter().any(|path| path.ends_with("CrossingVoid电脑端.碎片001")));
-        assert!(found.iter().any(|path| path.ends_with("CrossingVoid.002")));
-        fs::remove_dir_all(root).expect("remove chunk folder");
     }
 
     #[test]
