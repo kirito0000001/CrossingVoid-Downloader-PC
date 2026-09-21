@@ -8,6 +8,10 @@ export const USE_DX11_STORAGE_KEY = "crossing-void.launcher.use-dx11";
 export const CLOSE_TO_TRAY_STORAGE_KEY = "crossing-void.launcher.close-to-tray";
 export const AUTO_REPAIR_STORAGE_KEY = "crossing-void.launcher.auto-repair";
 export const HIDE_AFTER_GAME_LAUNCH_STORAGE_KEY = "crossing-void.launcher.hide-after-game-launch";
+/** 下载时要不要在首选源取不到的情况下自动改用另一个源（关掉就只用玩家选的那个，测速用）。 */
+export const AUTO_SOURCE_FALLBACK_STORAGE_KEY = "crossing-void.launcher.auto-source-fallback";
+/** GitHub 域名要不要借系统代理下载（关掉走直连；直连更快/代理解析 GitHub 慢的人用得上）。 */
+export const GITHUB_USE_SYSTEM_PROXY_STORAGE_KEY = "crossing-void.launcher.github-use-system-proxy";
 export const DEV_PACKAGE_PATH_STORAGE_KEY = "crossing-void.launcher.dev-package-path";
 export const DEV_GAME_VERSION_STORAGE_KEY = "crossing-void.launcher.dev-game-version";
 export const DEV_GAME_TITLE_STORAGE_KEY = "crossing-void.launcher.dev-game-title";

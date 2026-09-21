@@ -114,6 +114,56 @@ describe("launcher behavior settings", () => {
     expect(appSource).toContain('showCheckResult(`无法打开游戏目录：${formatUnknownError(error)}`)');
   });
 
+  it("lets the player turn off the system proxy for Github downloads", () => {
+    // 2026-09-21 用户实测：某些本地代理在大流量长传输上断崖衰减（5.9 MB/s → 124 KB/s → 29 KB/s），
+    // 同一个文件直连稳在 10 MB/s。但"不挂代理连不上 GitHub"的人也存在，所以做成开关、默认开（老行为）。
+    expect(appSource).toContain("GITHUB_USE_SYSTEM_PROXY_STORAGE_KEY");
+    expect(appSource).toContain("const githubUseSystemProxy = ref(");
+    expect(appSource).toContain("await syncGithubProxySetting()");
+    expect(appSource).toContain('invoke("set_github_use_system_proxy"');
+    expect(readSource("src/components/SettingsPanel.vue")).toContain("githubUseSystemProxy");
+    expect(launcherSource).toContain("settings.githubUseSystemProxy");
+
+    expect(nativeSource).toContain("static GITHUB_USE_SYSTEM_PROXY");
+    expect(nativeSource).toContain("fn set_github_use_system_proxy(enabled: bool)");
+    expect(nativeSource).toContain("            set_github_use_system_proxy,");
+    // 下载和"网络检测"必须同一个判据：不然检测说"已检测到代理"，实际下载却走直连。
+    expect(nativeSource).toContain("is_github_url(url) && GITHUB_USE_SYSTEM_PROXY.load(Ordering::SeqCst)");
+    expect(nativeSource).toContain("let proxy_url = GITHUB_USE_SYSTEM_PROXY");
+  });
+
+  it("lets the player turn off the automatic download-source fallback", () => {
+    // 用户 2026-09-21：默认还是自动换源（首选源取不到就换另一个），但设置里要能关掉 ——
+    // 关掉后每个文件只带一个地址（只用玩家选的那个源），测某个源的速度才有意义。
+    expect(appSource).toContain("AUTO_SOURCE_FALLBACK_STORAGE_KEY");
+    expect(appSource).toContain("const autoSourceFallback = ref(");
+    expect(readSource("src/components/SettingsPanel.vue")).toContain("autoSourceFallback");
+    expect(launcherSource).toContain("settings.autoSourceFallback");
+
+    const packageDownload = appSource.slice(
+      appSource.indexOf("async function downloadGamePackageFiles()"),
+      appSource.indexOf("async function finalizeGamePackageInstall()"),
+    );
+    expect(packageDownload).toContain("const allowFallback = autoSourceFallback.value");
+    expect(packageDownload).toContain(
+      "officialEnabled: preferOfficial || (allowFallback && officialChannelOn)",
+    );
+    expect(packageDownload).toContain(
+      "githubEnabled: !preferOfficial || (allowFallback && githubChannelOn)",
+    );
+  });
+
+  it("does not nudge the player to support the author in the download settings", () => {
+    // 用户 2026-09-21 要求去掉官方源下面那句"可以在启动器主界面顶部支持一下作者"。
+    // 留下的是流量不足的告警；Github 那条提示必须写成 v-else-if，
+    // 否则官方源正常时也会跟着冒出来（原来它是 v-else）。
+    expect(launcherSource).not.toContain("supportHint");
+    const panel = readSource("src/components/SettingsPanel.vue");
+    expect(panel).toContain("v-if=\"downloadSource === 'official' && officialTrafficBlocked\"");
+    expect(panel).toContain("v-else-if=\"downloadSource === 'github'\"");
+    expect(panel).toContain('t("traffic.lowHint")');
+  });
+
   it("opens the game log folder through its own native command", () => {
     // 「打开游戏日志」以前是个没有 @click 的按钮（点了什么都不发生）。
     // 日志落在 %LOCALAPPDATA%\<工程名>\Saved\Logs，和安装目录无关，

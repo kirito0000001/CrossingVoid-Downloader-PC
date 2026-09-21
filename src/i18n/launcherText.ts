@@ -76,6 +76,10 @@ export type TranslationKey =
   | "settings.display"
   | "settings.hideAfterGameLaunch"
   | "settings.downloadSource"
+  | "settings.autoSourceFallback"
+  | "settings.autoSourceFallbackHint"
+  | "settings.githubUseSystemProxy"
+  | "settings.githubUseSystemProxyHint"
   | "settings.downloadSpeed"
   | "settings.cancelDownload"
   | "settings.cancelDownloadHint"
@@ -122,7 +126,6 @@ export type TranslationKey =
   | "traffic.title"
   | "traffic.remaining"
   | "traffic.expires"
-  | "traffic.supportHint"
   | "traffic.lowHint"
   | "traffic.updating"
   | "traffic.unavailable"
@@ -272,6 +275,10 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "settings.display": "显示设置",
     "settings.hideAfterGameLaunch": "退出游戏后不弹出启动器",
     "settings.downloadSource": "下载源",
+    "settings.autoSourceFallback": "自动换源",
+    "settings.autoSourceFallbackHint": "首选源下载失败时自动改用另一个源，下载更稳定。关掉后只从你选择的源下载。",
+    "settings.githubUseSystemProxy": "GitHub 走系统代理",
+    "settings.githubUseSystemProxyHint": "开着时通过系统代理访问 GitHub。如果你的网络能直连 GitHub，关掉通常更快。",
     "settings.downloadSpeed": "下载速度",
     "settings.cancelDownload": "取消下载",
     "settings.cancelDownloadHint": "停止当前下载，并清除已经下载的游戏碎片和缓存。",
@@ -318,7 +325,6 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "traffic.title": "服务器可用下载流量",
     "traffic.remaining": "剩余流量",
     "traffic.expires": "最近到期",
-    "traffic.supportHint": "可以在启动器主界面顶部支持一下作者，谢谢了。",
     "traffic.lowHint": "服务器当前流量不足，请更换下载源。",
     "traffic.updating": "正在获取服务器流量额度…",
     "traffic.unavailable": "暂时无法获取流量额度，不影响下载。",
@@ -456,6 +462,10 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "settings.display": "顯示設定",
     "settings.hideAfterGameLaunch": "退出遊戲後不彈出啟動器",
     "settings.downloadSource": "下載源",
+    "settings.autoSourceFallback": "自動換源",
+    "settings.autoSourceFallbackHint": "首選來源下載失敗時自動改用另一個來源，下載更穩定。關掉後只從你選擇的來源下載。",
+    "settings.githubUseSystemProxy": "GitHub 走系統代理",
+    "settings.githubUseSystemProxyHint": "開著時透過系統代理存取 GitHub。如果你的網路能直連 GitHub，關掉通常更快。",
     "settings.downloadSpeed": "下載速度",
     "settings.cancelDownload": "取消下載",
     "settings.cancelDownloadHint": "停止目前下載，並清除已下載的遊戲碎片與快取。",
@@ -502,7 +512,6 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "traffic.title": "伺服器可用下載流量",
     "traffic.remaining": "剩餘流量",
     "traffic.expires": "最近到期",
-    "traffic.supportHint": "可以在啟動器主介面頂部支持一下作者，謝謝了。",
     "traffic.lowHint": "伺服器流量不足，可以切換 Github 源進行下載。",
     "traffic.updating": "正在取得伺服器流量額度…",
     "traffic.unavailable": "暫時無法取得流量額度，不影響下載。",
@@ -640,6 +649,10 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "settings.display": "Display",
     "settings.hideAfterGameLaunch": "Do not show launcher after exiting game",
     "settings.downloadSource": "Download Source",
+    "settings.autoSourceFallback": "Automatic source fallback",
+    "settings.autoSourceFallbackHint": "Switch to the other source automatically when the preferred one fails, for a more reliable download. Turn it off to use only the source you picked.",
+    "settings.githubUseSystemProxy": "Use system proxy for GitHub",
+    "settings.githubUseSystemProxyHint": "Route GitHub through your system proxy. If your network can reach GitHub directly, turning this off is usually faster.",
     "settings.downloadSpeed": "Download Speed",
     "settings.cancelDownload": "Cancel Download",
     "settings.cancelDownloadHint": "Stop the current download and remove downloaded game chunks and cache.",
@@ -686,7 +699,6 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "traffic.title": "Available Server Download Traffic",
     "traffic.remaining": "Remaining",
     "traffic.expires": "Next expiry",
-    "traffic.supportHint": "You can support the author from the top of the launcher home page. Thank you.",
     "traffic.lowHint": "Server traffic is low. You can switch to the Github source to download.",
     "traffic.updating": "Checking server traffic quota…",
     "traffic.unavailable": "Traffic quota is temporarily unavailable. Downloads remain enabled.",
@@ -824,6 +836,10 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "settings.display": "表示設定",
     "settings.hideAfterGameLaunch": "ゲーム終了後にランチャーを表示しない",
     "settings.downloadSource": "ダウンロード元",
+    "settings.autoSourceFallback": "自動でソースを切り替え",
+    "settings.autoSourceFallbackHint": "優先ソースでのダウンロードに失敗したとき、もう一方のソースへ自動で切り替えて安定させます。オフにすると選択したソースだけを使います。",
+    "settings.githubUseSystemProxy": "GitHub はシステムプロキシを使用",
+    "settings.githubUseSystemProxyHint": "GitHub へのアクセスにシステムプロキシを使います。GitHub に直接接続できる環境では、オフにすると速くなることがあります。",
     "settings.downloadSpeed": "ダウンロード速度",
     "settings.cancelDownload": "ダウンロードを中止",
     "settings.cancelDownloadHint": "現在のダウンロードを停止し、ダウンロード済みのゲーム分割ファイルとキャッシュを削除します。",
@@ -870,7 +886,6 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "traffic.title": "サーバーの利用可能なダウンロード通信量",
     "traffic.remaining": "残り通信量",
     "traffic.expires": "直近の有効期限",
-    "traffic.supportHint": "ランチャーのホーム画面上部から作者を応援できます。ありがとうございます。",
     "traffic.lowHint": "サーバー通信量が不足しています。Githubソースに切り替えてダウンロードできます。",
     "traffic.updating": "サーバー通信量を確認しています…",
     "traffic.unavailable": "通信量を取得できません。ダウンロードは引き続き利用できます。",

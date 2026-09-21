@@ -119,6 +119,8 @@ import type {
   DownloadArchiveInfo,
   InstallProgressEvent,
   DownloadProgressEvent,
+  GamePackageScanProgressEvent,
+  GamePackagePhaseEvent,
   RepairSummary,
   ManifestVerifySummary,
   LaunchGameResult,
@@ -139,10 +141,12 @@ import {
 } from "./launcherData";
 import {
   AUTO_REPAIR_STORAGE_KEY,
+  AUTO_SOURCE_FALLBACK_STORAGE_KEY,
   CLOSE_TO_TRAY_STORAGE_KEY,
   DOWNLOAD_LIMITED_STORAGE_KEY,
   DOWNLOAD_SOURCE_STORAGE_KEY,
   DOWNLOAD_STATE_STORAGE_KEY,
+  GITHUB_USE_SYSTEM_PROXY_STORAGE_KEY,
   HIDE_AFTER_GAME_LAUNCH_STORAGE_KEY,
   LANGUAGE_STORAGE_KEY,
   OFFLINE_MODE_STORAGE_KEY,
@@ -312,12 +316,31 @@ const gamePackageFileProgress = ref({ done: 0, total: 0 });
  */
 const gamePackageBaseline = ref({ bytes: 0, files: 0 });
 /**
+ * 整包的字节数 / 文件数 —— 进度条的分母。
+ *
+ * 拿到清单就填上（比"核对本地文件"早），因为核对阶段进度条已经在走了。
+ */
+const gamePackageTotals = ref({ bytes: 0, files: 0 });
+/**
  * "继续下载"按下去到真正开始下之间的准备阶段文案。
  *
  * 这一段要拉清单、再把本地文件跟清单逐条对一遍（没有逐文件状态文件时要整盘哈希，慢起来几十秒），
  * 期间进度条是不动的 —— 以前界面上一个字都不说，看着就是卡死。
  */
 const gamePackagePrepareStage = ref("");
+/**
+ * 「核对下载进度」的心跳：已核对到第几条 / 一共几条。
+ *
+ * 只喂右侧那行文字，**不动字节进度** —— 核对期间进度条该停在"上次对上的位置"。
+ */
+const gamePackageScanProgress = ref({ checked: 0, total: 0 });
+/**
+ * Rust 侧此刻的阶段：`""` / `"downloading"` / `"verifying"`。
+ *
+ * 收尾给最后一个大文件算 sha256 时要好几秒、期间没有字节事件，
+ * 前端会判成"停滞" —— 这时该说"校验文件"而不是"网络不佳"。
+ */
+const gamePackagePhase = ref("");
 const remoteGameVersion = ref("");
 const lastCheckMessage = ref("");
 const trafficQuota = ref<TrafficQuotaResponse | null>(null);
@@ -462,6 +485,23 @@ const hideAfterGameLaunch = ref(
 );
 const useDx11 = ref(typeof window !== "undefined" && window.localStorage.getItem(USE_DX11_STORAGE_KEY) === "1");
 const downloadLimited = ref(typeof window !== "undefined" && window.localStorage.getItem(DOWNLOAD_LIMITED_STORAGE_KEY) === "1");
+/**
+ * 首选源取不到时要不要自动改用另一个源。
+ *
+ * 默认开（保持原行为）；关掉就只用玩家选的那个源 —— 测速/测某个源时要用。
+ */
+const autoSourceFallback = ref(
+  typeof window === "undefined" || window.localStorage.getItem(AUTO_SOURCE_FALLBACK_STORAGE_KEY) !== "0",
+);
+/**
+ * GitHub 的下载要不要借系统代理。
+ *
+ * 默认开（老行为）。关掉走直连 —— 实测某些本地代理传了 100MB 之后会从 6 MB/s 掉到几十 KB/s，
+ * 直连反而稳在 10 MB/s；但不挂代理连不上 GitHub 的人也确实存在，所以做成开关。
+ */
+const githubUseSystemProxy = ref(
+  typeof window === "undefined" || window.localStorage.getItem(GITHUB_USE_SYSTEM_PROXY_STORAGE_KEY) !== "0",
+);
 const speedLimit = ref(typeof window !== "undefined" ? window.localStorage.getItem(SPEED_LIMIT_STORAGE_KEY) || "1.0" : "1.0");
 const downloadedMb = ref(bytesToMb(savedDownloadedBytes));
 const downloadedBytes = ref(savedDownloadedBytes);
@@ -499,6 +539,8 @@ const totalMb = computed(() => bytesToMb(activeDownloadBytes.value ?? remoteArch
 const appWindow = getCurrentWindow();
 let installProgressUnlisten: UnlistenFn | undefined;
 let downloadProgressUnlisten: UnlistenFn | undefined;
+let packageScanProgressUnlisten: UnlistenFn | undefined;
+let packagePhaseUnlisten: UnlistenFn | undefined;
 let repairProgressUnlisten: UnlistenFn | undefined;
 let chunkImportProgressUnlisten: UnlistenFn | undefined;
 let gameProcessExitedUnlisten: UnlistenFn | undefined;
@@ -577,6 +619,14 @@ onBeforeUnmount(() => {
   if (downloadProgressUnlisten) {
     downloadProgressUnlisten();
     downloadProgressUnlisten = undefined;
+  }
+  if (packageScanProgressUnlisten) {
+    packageScanProgressUnlisten();
+    packageScanProgressUnlisten = undefined;
+  }
+  if (packagePhaseUnlisten) {
+    packagePhaseUnlisten();
+    packagePhaseUnlisten = undefined;
   }
   if (repairProgressUnlisten) {
     repairProgressUnlisten();
@@ -832,6 +882,8 @@ onMounted(() => {
         await showLauncherWindow();
       });
       await refreshDeveloperLauncherVersion();
+      // GitHub 代理偏好是 Rust 侧的进程级开关，启动时同步一次（默认 true，玩家关过就别悄悄开回去）。
+      await syncGithubProxySetting();
       const diskStateRestored = await restoreDownloadStateFromDisk();
       if (!diskStateRestored) {
         await validateCurrentPersistedState();
@@ -937,6 +989,14 @@ async function fetchRemoteOnSetVideos() {
   return (await response.json()) as { videos?: VideoItem[] };
 }
 
+/**
+ * 进度条的刻度（用户 2026-09-21 拍板）：**前 90% 给"核对 + 下载"，最后 10% 给"校验 + 安装"**。
+ *
+ * 尺子从头到尾只有一把：整包里"已经对得上"的字节。核对期间它也在走（在发现哪些文件已经对上），
+ * 所以核对一结束，进度条正好落在这次下载的起点上；下载跑到满时进度条是 90%，
+ * 剩下 10% 交给安装 —— 不会再有"下载满格 → 安装又从 0 开始"那种断档。
+ */
+const DOWNLOAD_PROGRESS_SHARE = 90;
 const progressPercent = computed(() =>
   developerTaskActive.value
     ? developerTaskProgressPercent.value
@@ -953,8 +1013,13 @@ const progressPercent = computed(() =>
     : launcherState.value === "repairing"
     ? Math.min(100, Number(repairProgressPercent.value.toFixed(2)))
     : launcherState.value === "installing"
-    ? Math.min(100, Number(installProgressPercent.value.toFixed(2)))
-    : Math.min(100, Number(((downloadedMb.value / Math.max(totalMb.value, 0.1)) * 100).toFixed(2))),
+    ? Math.min(100, DOWNLOAD_PROGRESS_SHARE + Number((installProgressPercent.value * 0.1).toFixed(2)))
+    : Math.min(
+        100,
+        Number(
+          ((downloadedMb.value / Math.max(totalMb.value, 0.1)) * DOWNLOAD_PROGRESS_SHARE).toFixed(2),
+        ),
+      ),
 );
 const hasCompleteDownloadedArchive = computed(() => {
   const totalBytes = activeDownloadBytes.value ?? remoteArchiveBytes.value ?? 0;
@@ -1103,7 +1168,14 @@ const actionCopy = computed(() => {
   if (offlinePlayable.value) return t("action.launchGame");
   if (versionCheckPending.value) return t("status.versionChecking");
   if (repairDownloadPauseRequested.value) return "正在暂停";
-  if (downloadPauseRequested.value && gameDownloadActive.value) return "正在暂停";
+  // 任务在收尾期间点按钮是没用的（Rust 侧可能还卡在"核对本地文件"里），
+  // 这时候按钮不能写着"继续下载"骗人 —— 用户会以为点了没反应。
+  // 只在 paused / downloaded 这两档生效：install / checking / repairing 有自己的文案。
+  if (
+    gameDownloadActive.value &&
+    (launcherState.value === "paused" || launcherState.value === "downloaded")
+  )
+    return "正在停止下载";
   if (gameOperationCancelRequested.value) return t("action.cancelling");
   if (canPauseRepairDownload.value) return t("action.pauseDownload");
   if (launcherState.value === "installing" && canCancelCurrentGameOperation.value) return t("action.cancelInstall");
@@ -1246,7 +1318,13 @@ const statusCopy = computed(() => {
 });
 const downloadEstimateCopy = computed(() => {
   if (launcherState.value !== "downloading") return "";
-  if (downloadEstimate.value.status === "stalled") return "网络不佳";
+  // 准备阶段还没有开始下，ETA 只会显示一句没意义的 "--:--"。
+  if (gamePackagePrepareStage.value) return "";
+  if (downloadEstimate.value.status === "stalled") {
+    // 收尾给最后一个大文件算 sha256（几百 MB 要好几秒）时没有任何字节事件，
+    // 这时说"网络不佳"是冤枉网络 —— Rust 会先报 verifying（用户 2026-09-21 报的现场）。
+    return gamePackagePhase.value === "verifying" ? "校验文件" : "网络不佳";
+  }
   if (downloadEstimate.value.status !== "ready") return "--:--";
   return formatEtaClock(downloadEstimate.value.remainingSeconds) ?? "网络不佳";
 });
@@ -1283,6 +1361,11 @@ const installProgressDetail = computed(() => {
 });
 const gamePackageProgressDetail = computed(() => {
   if (launcherState.value !== "downloading") return "";
+  // 核对阶段先报"已核对到第几条"：这一步要整盘哈希，右侧数字不动就会被当成卡死。
+  const scan = gamePackageScanProgress.value;
+  if (gamePackagePrepareStage.value && scan.total > 0) {
+    return `已核对 ${Math.min(scan.checked, scan.total)}/${scan.total} 个文件`;
+  }
   const progress = gamePackageFileProgress.value;
   if (progress.total <= 0) return "";
   return `${Math.min(progress.done, progress.total)}/${progress.total} 个文件`;
@@ -1587,6 +1670,15 @@ watch(autoRepair, (enabled) => {
   window.localStorage.setItem(AUTO_REPAIR_STORAGE_KEY, enabled ? "1" : "0");
 });
 
+watch(autoSourceFallback, (enabled) => {
+  window.localStorage.setItem(AUTO_SOURCE_FALLBACK_STORAGE_KEY, enabled ? "1" : "0");
+});
+
+watch(githubUseSystemProxy, () => {
+  window.localStorage.setItem(GITHUB_USE_SYSTEM_PROXY_STORAGE_KEY, githubUseSystemProxy.value ? "1" : "0");
+  void syncGithubProxySetting();
+});
+
 watch(hideAfterGameLaunch, (enabled) => {
   window.localStorage.setItem(HIDE_AFTER_GAME_LAUNCH_STORAGE_KEY, enabled ? "1" : "0");
 });
@@ -1638,6 +1730,20 @@ function syncDownloadSpeedLimit() {
     speedLimitBytesPerSecond: getDownloadSpeedLimitBytes(),
   }).catch((error) => {
     console.warn("Unable to update download speed limit", error);
+  });
+}
+
+/**
+ * 把"GitHub 走系统代理"的偏好推给 Rust。
+ *
+ * 它是进程级静态量（默认 true），所以启动时也要同步一次 —— 玩家上次关掉过的话，
+ * 这次启动不能又回到走代理。
+ */
+function syncGithubProxySetting() {
+  return invoke("set_github_use_system_proxy", {
+    enabled: githubUseSystemProxy.value,
+  }).catch((error) => {
+    console.warn("Unable to update Github proxy preference", error);
   });
 }
 
@@ -2135,8 +2241,13 @@ async function resolveGamePackagePlan(manifest: GamePackageManifest) {
 async function resolveGamePackage() {
   const manifest = await fetchGamePackageManifest();
   assertNoGamePackageDowngrade(manifest, localGameVersion.value);
-  const { plan } = await resolveGamePackagePlan(manifest);
+  // 先落清单：核对阶段的心跳要靠它算进度条的分母（plan 之后才用得上 activeGamePackagePlan）。
   activeGamePackage.value = manifest;
+  gamePackageTotals.value = {
+    bytes: manifest.files.reduce((sum, entry) => sum + entry.sizeBytes, 0),
+    files: manifest.files.length,
+  };
+  const { plan } = await resolveGamePackagePlan(manifest);
   activeGamePackagePlan.value = plan;
   return { manifest, plan };
 }
@@ -2145,7 +2256,7 @@ async function resolveGamePackage() {
 async function downloadGamePackageFiles() {
   gamePackagePrepareStage.value = "获取游戏清单";
   const { manifest, plan } = await resolveGamePackage();
-  const packageBytes = manifest.files.reduce((sum, entry) => sum + entry.sizeBytes, 0);
+  const packageBytes = gamePackageTotals.value.bytes;
   // 进度按"文件对得上"算：分母是整包，分子是本地已经对上的那些文件。
   // 事件只报"本轮要下的文件"的进度，所以这里先记下基线补回整包坐标 ——
   // 这样暂停→继续、重启后继续，进度条都不会回到 0。
@@ -2169,15 +2280,26 @@ async function downloadGamePackageFiles() {
   persistDownloadState("paused", "immediate");
   // 清单和差异都算好了：准备阶段到此结束，后面交给进度事件。
   gamePackagePrepareStage.value = "";
+  gamePackageScanProgress.value = { checked: 0, total: 0 };
+
+  // 上面那一步（拉清单 / 核对本地文件）可能跑了几十秒，中途用户按了暂停的话
+  // 别再真的开始下 —— Rust 侧此刻还没有任务可以取消，只有这里拦住才算数。
+  if (downloadPauseRequested.value) throw new Error("DOWNLOAD_CANCELLED");
 
   if (plan.download.length > 0) {
-    // 每个文件带上候选地址：首选源排第一，另一个源兜底（被渠道开关关掉的源不参与）。
+    // 每个文件带上候选地址。首选源永远给（能走到这里说明它的渠道开着）；
+    // 另一个源只有在"渠道也开着 + 玩家允许自动换源"时才作为兜底 ——
+    // 关掉自动换源就只用玩家选的那个源，每个文件只有一个地址（测速/测源用）。
+    // 注意 `gamePackage.ts` 是 PC/Android 逐字共用的内核，改不得：这里用
+    // officialEnabled / githubEnabled 这两个入参把"另一个源"关掉。
     const githubReleaseBase = githubGameReleaseBaseUrl(
       GAME_PACKAGE_GITHUB_REPOSITORY,
       activeGamePackageGithubTag.value || githubGameReleaseTag("PC", manifest.version),
     );
-    const officialEnabled = isDownloadChannelEnabled(downloadChannelStates.value, "official");
-    const githubEnabled = isDownloadChannelEnabled(downloadChannelStates.value, "github");
+    const preferOfficial = downloadSource.value === "official";
+    const allowFallback = autoSourceFallback.value;
+    const officialChannelOn = isDownloadChannelEnabled(downloadChannelStates.value, "official");
+    const githubChannelOn = isDownloadChannelEnabled(downloadChannelStates.value, "github");
     const files = plan.download.map((entry) => ({
       ...entry,
       urls: buildGamePackageUrlCandidates({
@@ -2185,8 +2307,8 @@ async function downloadGamePackageFiles() {
         officialBaseUrl: manifest.baseUrl,
         githubReleaseBaseUrl: githubReleaseBase,
         preferred: downloadSource.value,
-        officialEnabled,
-        githubEnabled,
+        officialEnabled: preferOfficial || (allowFallback && officialChannelOn),
+        githubEnabled: !preferOfficial || (allowFallback && githubChannelOn),
       }),
     }));
     await invoke("download_game_package", {
@@ -2900,6 +3022,32 @@ async function ensureDownloadProgressListener() {
       repairProgressPercent.value = Math.max(0, Math.min(100, payload.percent || 0));
     }
   });
+
+  // 「核对下载进度」是另一条事件：逐条哈希本地文件时报"已核对到第几条"。
+  packageScanProgressUnlisten = await listen<GamePackageScanProgressEvent>(
+    "game-package-scan-progress",
+    (event) => {
+      const payload = event.payload;
+      gamePackageScanProgress.value = {
+        checked: Math.max(0, payload.checkedFiles || 0),
+        total: Math.max(0, payload.totalFiles || 0),
+      };
+      // 核对期间进度条就按"已经对上的文件字节"走 —— 和后面的下载是同一把尺子，
+      // 所以核对一结束，进度条正好停在这次下载的起点上，中间不会跳（用户 2026-09-21 的提议）。
+      if (launcherState.value !== "downloading" || !gamePackagePrepareStage.value) return;
+      const totals = gamePackageTotals.value;
+      if (totals.bytes <= 0) return;
+      activeDownloadBytes.value = totals.bytes;
+      remoteArchiveBytes.value = totals.bytes;
+      downloadedBytes.value = Math.min(Math.max(0, payload.matchedBytes || 0), totals.bytes);
+      downloadedMb.value = bytesToMb(downloadedBytes.value);
+    },
+  );
+
+  // 「现在在干什么」：下载中 / 校验文件。用来把收尾算 sha256 时那句"网络不佳"换掉。
+  packagePhaseUnlisten = await listen<GamePackagePhaseEvent>("game-package-phase", (event) => {
+    gamePackagePhase.value = event.payload.phase || "";
+  });
 }
 
 async function ensureAutomaticRepairBeforeLaunch() {
@@ -2987,7 +3135,12 @@ function resetVerificationProgressDetail() {
 
 async function downloadGameArchive() {
   if (!(await ensureLatestLauncherForNetworkDownload())) return;
-  if (gameDownloadActive.value) return;
+  if (gameDownloadActive.value) {
+    // 绝对不能静默咽掉这一下：上一次任务还在收尾（Rust 侧可能正卡在"核对本地文件"里），
+    // 以前这里直接 return，现场就是"点了继续下载没反应"。
+    showCheckResult("上一次下载还在收尾，请稍等两秒再点继续下载。");
+    return;
+  }
   if (!isDownloadChannelEnabled(downloadChannelStates.value, downloadSource.value)) {
     showCheckResult(
       downloadChannelNoticeText.value || "当前下载渠道已被关闭，请稍后再试或在设置里换个渠道。",
@@ -3002,11 +3155,13 @@ async function downloadGameArchive() {
   installPathHasPartialWork.value = true;
   // 文件级基线每轮任务先清零：逐文件链路会在算完差异后填上，v1 归档链路保持 0。
   gamePackageBaseline.value = { bytes: 0, files: 0 };
+  gamePackagePhase.value = "";
   downloadTimeEstimator.reset();
   downloadEstimate.value = { status: "calculating" };
   launcherState.value = "downloading";
   downloadPauseRequested.value = false;
   gameDownloadActive.value = true;
+  let downloadSucceeded = false;
   try {
     await ensureDownloadProgressListener();
     if (currentGamePackageConfig()) {
@@ -3018,6 +3173,7 @@ async function downloadGameArchive() {
     launcherState.value = "downloaded";
     updateAvailable.value = false;
     persistDownloadState("downloaded", "immediate");
+    downloadSucceeded = true;
   } catch (error) {
     if (!downloadPauseRequested.value && String(error) !== "DOWNLOAD_CANCELLED") {
       console.error("Game download failed", error);
@@ -3030,8 +3186,19 @@ async function downloadGameArchive() {
   } finally {
     // 准备阶段的文案不能留到下一轮（下一轮开始时会重新设）。
     gamePackagePrepareStage.value = "";
+    gamePackageScanProgress.value = { checked: 0, total: 0 };
+    gamePackagePhase.value = "";
     gameDownloadActive.value = false;
     downloadPauseRequested.value = false;
+  }
+
+  // 下完直接接着装，不要让玩家再点一次「安装游戏」（用户 2026-09-21）。
+  // 放在 finally 之后：避免"收尾闸门还没放开"和安装阶段的按钮文案打架。
+  // 安装失败时 installDownloadedGameArchive 自己会退回「已下载」并给提示，这里只兜一层底。
+  if (downloadSucceeded) {
+    await installDownloadedGameArchive().catch((error) => {
+      console.warn("Unable to continue into game install", error);
+    });
   }
 }
 
@@ -4038,6 +4205,7 @@ function handleContextMenu(event: MouseEvent) {
 const settingsContext = {
   activeSettingsTab,
   autoRepair,
+  autoSourceFallback,
   canCancelGameDownload,
   checkLauncherUpdate,
   closeToTray,
@@ -4074,6 +4242,7 @@ const settingsContext = {
   githubLatencyText,
   githubNetworkWarningText,
   githubProxyText,
+  githubUseSystemProxy,
   hideAfterGameLaunch,
   installPath,
   launcherLanguage,

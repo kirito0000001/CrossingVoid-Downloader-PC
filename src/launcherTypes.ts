@@ -130,6 +130,28 @@ export type DownloadProgressEvent = {
   doneFiles?: number;
   totalFiles?: number;
 };
+/**
+ * 「核对下载进度」阶段的心跳：逐条哈希本地文件时报"已核对到第几条"。
+ *
+ * 走单独一条事件（`game-package-scan-progress`）：这一步只该改右侧那行文字，
+ * 不能碰字节进度 —— 否则进度条会先掉到 0 再爬回来。
+ */
+export type GamePackageScanProgressEvent = {
+  checkedFiles: number;
+  totalFiles: number;
+  /** 已经对得上清单的条数与字节数：前端拿它驱动进度条（和后面的下载是同一把尺子）。 */
+  matchedFiles: number;
+  matchedBytes: number;
+};
+/**
+ * Rust 侧"现在在干什么"：`downloading`（在读字节）/ `verifying`（在算 sha256）。
+ *
+ * 给 900MB 的文件算 sha256 要好几秒，这期间没有字节事件、前端会判成"停滞"，
+ * 有了它才能把"网络不佳"换成"校验文件"。
+ */
+export type GamePackagePhaseEvent = {
+  phase: string;
+};
 export type RepairSummary = {
   checkedFiles: number;
   repairedFiles: number;

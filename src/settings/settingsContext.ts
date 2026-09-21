@@ -9,6 +9,7 @@ import type { InjectionKey } from "vue";
 export type SettingsContext = {
   activeSettingsTab: any;
   autoRepair: any;
+  autoSourceFallback: any;
   canCancelGameDownload: any;
   checkLauncherUpdate: any;
   closeToTray: any;
@@ -45,6 +46,7 @@ export type SettingsContext = {
   githubLatencyText: any;
   githubNetworkWarningText: any;
   githubProxyText: any;
+  githubUseSystemProxy: any;
   hideAfterGameLaunch: any;
   installPath: any;
   launcherLanguage: any;

@@ -173,13 +173,30 @@ fn file_matches_entry(path: &Path, entry: &GamePackageFile) -> bool {
 
 /// 逐条哈希本地已存在的文件；磁盘上没有的直接不出现在结果里。
 ///
-/// 只在"没有状态文件"（老安装升级上来）时用一次，用来 bootstrap 出本地状态。
-pub fn scan_local_files(
+/// 只在"没有状态文件"（老安装升级上来、或者上回下到一半就退了）时用一次，用来 bootstrap 出本地状态。
+///
+/// `on_progress(已核对条数, 总条数, 已对上条数, 已对上字节)` **每个文件都报一次**：
+/// 这一步要整盘哈希，界面上得看得出在动；而"已对上字节"就是前端进度条的那把尺子
+/// （和后面的下载同尺，所以核对一结束进度条正好停在下载起点上）。
+pub fn scan_local_files<F>(
     install_dir: &Path,
     files: &[GamePackageFile],
-) -> Result<Vec<GamePackageFile>, String> {
+    on_progress: F,
+) -> Result<Vec<GamePackageFile>, String>
+where
+    F: Fn(u64, u64, u64, u64),
+{
     let mut found = Vec::new();
-    for entry in files {
+    let total = files.len() as u64;
+    let mut matched_files = 0u64;
+    let mut matched_bytes = 0u64;
+    for (index, entry) in files.iter().enumerate() {
+        // 核对可能要跑几十秒到几分钟，中途按暂停得能立刻停：
+        // 不停的话这次任务会一直挂在"下载中"，前端那个"别再点"的闸门就不会放开。
+        check_download_cancelled()?;
+        // 每个文件都报一次：这一步的瓶颈是哈希，发一条事件的开销可以忽略，
+        // 而"每 N 条报一次"会让小清单只看到 0/N → N/N 两下，看不出在动。
+        on_progress(index as u64, total, matched_files, matched_bytes);
         let relative = match safe_relative_path(&entry.path) {
             Ok(relative) => relative,
             Err(_) => continue,
@@ -194,6 +211,12 @@ pub fn scan_local_files(
         let Ok(sha256) = calculate_file_sha256(&target) else {
             continue;
         };
+        // 顺便替前端算一份"对得上的量"（前端拿到 found 之后还要再比一次，这里不省它的活，
+        // 只是让心跳能驱动进度条）。
+        if !entry.sha256.trim().is_empty() && sha256.eq_ignore_ascii_case(entry.sha256.trim()) {
+            matched_files += 1;
+            matched_bytes = matched_bytes.saturating_add(entry.size_bytes);
+        }
         found.push(GamePackageFile {
             path: entry.path.clone(),
             size_bytes: metadata.len(),
@@ -201,6 +224,8 @@ pub fn scan_local_files(
             urls: Vec::new(),
         });
     }
+    // 收尾一定报满，界面上停在 N/N 而不是 N-3/N。
+    on_progress(total, total, matched_files, matched_bytes);
     Ok(found)
 }
 
@@ -303,6 +328,13 @@ pub fn prune_files(install_dir: &Path, paths: &[String]) -> GamePackagePruneSumm
 /// 进度回调：(已完成字节, 总字节, 已完成文件数, 总文件数)
 type ProgressSink = dyn Fn(u64, u64, u64, u64) + Send + Sync;
 
+/// 阶段回调：Rust 侧此刻在干什么。目前两态 ——
+/// `"downloading"`（在读字节）、`"verifying"`（在给某个文件算 sha256）。
+///
+/// 为什么要有它：给 900MB 的文件算 sha256 要好几秒，这期间没有任何字节事件，
+/// 前端会判成"停滞"并显示"网络不佳" —— 那是冤枉网络（用户 2026-09-21 的现场）。
+type PhaseSink = dyn Fn(&str) + Send + Sync;
+
 fn emit_progress_throttled(
     on_progress: &ProgressSink,
     last_emit: &Mutex<Instant>,
@@ -390,6 +422,7 @@ struct DownloadFileContext {
     done_files: Arc<AtomicU64>,
     last_emit: Arc<Mutex<Instant>>,
     on_progress: Arc<ProgressSink>,
+    on_phase: Arc<PhaseSink>,
 }
 
 fn download_one_file(context: &DownloadFileContext, entry: GamePackageFile) -> Result<(), String> {
@@ -508,6 +541,8 @@ fn download_one_file_once(
     entry: &GamePackageFile,
     file_counted: &AtomicU64,
 ) -> Result<(), String> {
+    // 每次尝试一开始都算"在读字节"（上一轮可能是停在 verifying 上出错退出的）。
+    (context.on_phase)("downloading");
     let expected_size = entry.size_bytes;
     let mut resume_from = existing_download_size(part, expected_size)?;
 
@@ -601,7 +636,10 @@ fn download_one_file_once(
 
     let expected_hash = entry.sha256.trim();
     if !expected_hash.is_empty() {
+        // 告诉界面：接下来这几秒在算 sha256，不是网络卡了。
+        (context.on_phase)("verifying");
         let actual = calculate_file_sha256(part)?;
+        (context.on_phase)("downloading");
         if !actual.eq_ignore_ascii_case(expected_hash) {
             remove_file_if_exists(part)?;
             return Err(format!(
@@ -636,15 +674,17 @@ fn download_one_file_once(
 /// 并发下载给定文件到安装目录（`.part` → sha256 → 原子改名）。
 ///
 /// `files` 是**已经算好差异**的待下清单：本地一致的文件不在里面。
-pub fn download_files<F>(
+pub fn download_files<F, G>(
     install_dir: &Path,
     base_url: &str,
     files: &[GamePackageFile],
     concurrency: usize,
     on_progress: F,
+    on_phase: G,
 ) -> Result<GamePackageDownloadSummary, String>
 where
     F: Fn(u64, u64, u64, u64) + Send + Sync + 'static,
+    G: Fn(&str) + Send + Sync + 'static,
 {
     fs::create_dir_all(install_dir).map_err(|error| {
         format!(
@@ -676,6 +716,7 @@ where
     let done_files = Arc::new(AtomicU64::new(0));
     let last_emit = Arc::new(Mutex::new(Instant::now() - PROGRESS_EMIT_INTERVAL));
     let on_progress: Arc<ProgressSink> = Arc::new(on_progress);
+    let on_phase: Arc<PhaseSink> = Arc::new(on_phase);
     let concurrency = concurrency.clamp(1, MAX_CONCURRENCY);
 
     let context = Arc::new(DownloadFileContext {
@@ -687,6 +728,7 @@ where
         done_files: Arc::clone(&done_files),
         last_emit: Arc::clone(&last_emit),
         on_progress: Arc::clone(&on_progress),
+        on_phase: Arc::clone(&on_phase),
     });
 
     run_parallel(validated, concurrency, move |entry| {
@@ -705,12 +747,31 @@ where
 
 #[tauri::command]
 pub async fn scan_local_game_package(
+    app: AppHandle,
     install_path: String,
     files: Vec<GamePackageFile>,
 ) -> Result<Vec<GamePackageFile>, String> {
-    tauri::async_runtime::spawn_blocking(move || scan_local_files(Path::new(&install_path), &files))
-        .await
-        .map_err(|error| format!("Scan task failed: {}", error))?
+    // 取消标志是进程级的：上一轮"暂停"留下的 true 必须先清掉，
+    // 否则这次核对会在第一条就中止（见 lib.rs 的 reset_download_cancelled）。
+    crate::reset_download_cancelled();
+    tauri::async_runtime::spawn_blocking(move || {
+        let progress_app = app.clone();
+        scan_local_files(
+            Path::new(&install_path),
+            &files,
+            move |checked, total, matched_files, matched_bytes| {
+                crate::emit_game_package_scan_progress(
+                    &progress_app,
+                    checked,
+                    total,
+                    matched_files,
+                    matched_bytes,
+                );
+            },
+        )
+    })
+    .await
+    .map_err(|error| format!("Scan task failed: {}", error))?
 }
 
 #[tauri::command]
@@ -721,8 +782,14 @@ pub async fn download_game_package(
     files: Vec<GamePackageFile>,
     concurrency: Option<usize>,
 ) -> Result<GamePackageDownloadSummary, String> {
+    // ⚠️ 这一句是"暂停之后还能继续"的关键：取消标志是进程级的，
+    // 上一轮暂停留下的 true 会让本次下载在第一个 check_download_cancelled 上立刻退出，
+    // 而前端把 DOWNLOAD_CANCELLED 当"用户主动暂停"，于是静默回到已暂停 ——
+    // 现场就是"点继续下载没反应"。v1 的四条命令入口都有这一句，逐文件链路以前漏了。
+    crate::reset_download_cancelled();
     tauri::async_runtime::spawn_blocking(move || {
         let progress_app = app.clone();
+        let phase_app = app.clone();
         download_files(
             Path::new(&install_path),
             &base_url,
@@ -737,6 +804,7 @@ pub async fn download_game_package(
                     total_files,
                 )
             },
+            move |phase| crate::emit_game_package_phase(&phase_app, phase),
         )
     })
     .await
@@ -1029,7 +1097,7 @@ mod tests {
             good_url,
         ];
 
-        download_files(&install, &server.base_url, &entries, 4, |_, _, _, _| {})
+        download_files(&install, &server.base_url, &entries, 4, |_, _, _, _| {}, |_| {})
             .expect("fallback download");
 
         let bytes = fs::read(install.join("CrossingVoid.exe")).expect("downloaded file");
@@ -1043,7 +1111,7 @@ mod tests {
         let server = start_fake_server(bodies, StdHashMap::new());
         let install = temp_dir("fresh");
 
-        let summary = download_files(&install, &server.base_url, &entries, 4, |_, _, _, _| {})
+        let summary = download_files(&install, &server.base_url, &entries, 4, |_, _, _, _| {}, |_| {})
             .expect("download package");
 
         assert_eq!(summary.files, entries.len() as u64);
@@ -1071,7 +1139,7 @@ mod tests {
             .expect("fixture body");
         fs::write(part_path(&target), &full[..4096]).expect("write partial file");
 
-        download_files(&install, &server.base_url, &entries, 4, |_, _, _, _| {}).expect("resume download");
+        download_files(&install, &server.base_url, &entries, 4, |_, _, _, _| {}, |_| {}).expect("resume download");
 
         let bytes = fs::read(&target).expect("downloaded file");
         assert_eq!(sha256_hex(&bytes), sha256_hex(&full));
@@ -1091,7 +1159,7 @@ mod tests {
         corrupt.insert(format!("/{target_path}"), 1usize);
         let server = start_fake_server(bodies.clone(), corrupt);
         let install = temp_dir("retry");
-        download_files(&install, &server.base_url, &entries, 4, |_, _, _, _| {})
+        download_files(&install, &server.base_url, &entries, 4, |_, _, _, _| {}, |_| {})
             .expect("second attempt should succeed");
         assert!(server.requests_for(&format!("/{target_path}")) >= 2);
         fs::remove_dir_all(&install).expect("remove temp dir");
@@ -1100,7 +1168,7 @@ mod tests {
         always_corrupt.insert(format!("/{target_path}"), usize::MAX);
         let server = start_fake_server(bodies, always_corrupt);
         let install = temp_dir("retry-fail");
-        let error = download_files(&install, &server.base_url, &entries, 4, |_, _, _, _| {})
+        let error = download_files(&install, &server.base_url, &entries, 4, |_, _, _, _| {}, |_| {})
             .expect_err("permanently corrupt file must fail");
         assert!(
             error.contains(target_path),
@@ -1122,7 +1190,7 @@ mod tests {
             urls: Vec::new(),
         }];
 
-        let error = download_files(&install, &server.base_url, &hostile, 4, |_, _, _, _| {})
+        let error = download_files(&install, &server.base_url, &hostile, 4, |_, _, _, _| {}, |_| {})
             .expect_err("unsafe path must be rejected");
         assert!(error.contains(".."), "unexpected error: {error}");
         assert_eq!(
@@ -1195,11 +1263,27 @@ mod tests {
             entry("CrossingVoid/keep.bin", b"keep"),
             entry("CrossingVoid/content.bin", b"missing"),
         ];
-        let found = scan_local_files(&install, &wanted).expect("scan");
+        let heartbeat = Mutex::new(Vec::new());
+        let found = scan_local_files(
+            &install,
+            &wanted,
+            |checked, total, matched_files, matched_bytes| {
+                heartbeat
+                    .lock()
+                    .expect("lock heartbeat")
+                    .push((checked, total, matched_files, matched_bytes));
+            },
+        )
+        .expect("scan");
 
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].path, "CrossingVoid/keep.bin");
         assert_eq!(found[0].sha256, sha256_hex(b"keep"));
+        // 心跳：每个文件都报一次、收尾报满；最后一条里"已对上"是 keep.bin（4 字节）。
+        // 前端拿 matched_bytes 驱动进度条，所以这个数必须对得上。
+        let heartbeat = heartbeat.into_inner().expect("read heartbeat");
+        assert_eq!(heartbeat.first(), Some(&(0, 2, 0, 0)));
+        assert_eq!(heartbeat.last(), Some(&(2, 2, 1, 4)));
         fs::remove_dir_all(install).expect("remove temp dir");
     }
 
@@ -1251,6 +1335,7 @@ mod tests {
                     .expect("progress sink")
                     .push((done, total_bytes, done_files, files_total));
             },
+            |_| {},
         )
         .expect("download");
 
@@ -1279,7 +1364,7 @@ mod tests {
         let server = start_fake_server(bodies, StdHashMap::new());
         let install = temp_dir("clamp");
         // 传 99 也不应该打爆服务器（内部 clamp 到 6）。
-        download_files(&install, &server.base_url, &entries, 99, |_, _, _, _| {}).expect("download");
+        download_files(&install, &server.base_url, &entries, 99, |_, _, _, _| {}, |_| {}).expect("download");
         fs::remove_dir_all(install).expect("remove temp dir");
     }
 
@@ -1318,6 +1403,7 @@ mod tests {
             &[target.clone()],
             1,
             |_, _, _, _| {},
+            |_| {},
         )
         .expect("download NOTICE.txt");
 

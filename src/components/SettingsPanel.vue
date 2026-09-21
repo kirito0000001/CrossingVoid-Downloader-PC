@@ -29,6 +29,7 @@ if (!settingsContext) {
 const {
   activeSettingsTab,
   autoRepair,
+  autoSourceFallback,
   canCancelGameDownload,
   checkLauncherUpdate,
   closeToTray,
@@ -65,6 +66,7 @@ const {
   githubLatencyText,
   githubNetworkWarningText,
   githubProxyText,
+  githubUseSystemProxy,
   hideAfterGameLaunch,
   installPath,
   launcherLanguage,
@@ -183,10 +185,16 @@ const {
                   :options="downloadSourceOptions"
                   :disabled="downloadSourceDisabled"
                 />
-                <p v-if="downloadSource === 'official'" class="traffic-quota__notice" :class="{ low: officialTrafficBlocked }">
-                  {{ t(officialTrafficBlocked ? "traffic.lowHint" : "traffic.supportHint") }}
+                <!-- 官方源正常时不再显示任何提示（原来那句"可以在启动器主界面顶部支持一下作者"已去掉）；
+                     只有流量不足才说话。下面那条 Github 提示因此要写成 v-else-if，
+                     否则官方源正常时也会跟着冒出来。 -->
+                <p
+                  v-if="downloadSource === 'official' && officialTrafficBlocked"
+                  class="traffic-quota__notice low"
+                >
+                  {{ t("traffic.lowHint") }}
                 </p>
-                <p v-else class="traffic-quota__notice" :class="{ low: Boolean(githubNetworkWarningText) }">
+                <p v-else-if="downloadSource === 'github'" class="traffic-quota__notice" :class="{ low: Boolean(githubNetworkWarningText) }">
                   {{ githubNetworkWarningText || "Github 网络连接正常。" }}
                 </p>
                 <p v-if="downloadChannelNoticeText" class="traffic-quota__notice low">
@@ -213,6 +221,16 @@ const {
                   </div>
                   <small>代理：{{ githubProxyText }}</small>
                 </div>
+                <LauncherCheckbox
+                  v-model="autoSourceFallback"
+                  :label="t('settings.autoSourceFallback')"
+                />
+                <p class="setting-hint">{{ t("settings.autoSourceFallbackHint") }}</p>
+                <LauncherCheckbox
+                  v-model="githubUseSystemProxy"
+                  :label="t('settings.githubUseSystemProxy')"
+                />
+                <p class="setting-hint">{{ t("settings.githubUseSystemProxyHint") }}</p>
               </div>
 
                <div class="setting-block">

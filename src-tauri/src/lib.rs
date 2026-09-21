@@ -38,6 +38,12 @@ mod webview_cleanup;
 
 static DOWNLOAD_SPEED_LIMIT_BYTES_PER_SECOND: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
+/// GitHub 域名要不要走系统代理。默认开（等于老行为）；玩家可以在设置里关掉走直连。
+///
+/// 2026-09-21：用户实测某些本地代理（Clash 那类）在大流量长传输上会断崖衰减 ——
+/// 同一个文件同一个 URL，走代理 5.9 MB/s → 124 KB/s → 29 KB/s，直连稳定 10 MB/s。
+/// 但"不挂代理连不上 GitHub"的用户也存在，所以做成开关而不是改默认值。
+static GITHUB_USE_SYSTEM_PROXY: AtomicBool = AtomicBool::new(true);
 #[cfg(debug_assertions)]
 static DEV_SCRIPT_PROCESS_ID: AtomicU32 = AtomicU32::new(0);
 #[cfg(debug_assertions)]
@@ -294,6 +300,16 @@ fn pause_game_download() {
     DOWNLOAD_CANCELLED.store(true, Ordering::SeqCst);
 }
 
+/// 每个"会跑下载 / 修复 / 扫描"的命令都必须在入口清一次取消标志。
+///
+/// 这个标志是**进程级**的，`pause_game_download` / `cancel_game_operation` 会把它置 true；
+/// 下一次任务要是不清，就会在第一个 `check_download_cancelled()` 上立刻退出 ——
+/// 前端把 `DOWNLOAD_CANCELLED` 当作"用户主动暂停"，于是**不打日志、不弹提示**，
+/// 表现就是"暂停过一次之后，这一整个进程里再也继续不了"（用户 2026-09-21 报的现场）。
+pub(crate) fn reset_download_cancelled() {
+    DOWNLOAD_CANCELLED.store(false, Ordering::SeqCst);
+}
+
 #[tauri::command]
 fn cancel_game_operation() {
     DOWNLOAD_CANCELLED.store(true, Ordering::SeqCst);
@@ -303,6 +319,12 @@ fn cancel_game_operation() {
 fn set_download_speed_limit(speed_limit_bytes_per_second: Option<u64>) {
     DOWNLOAD_SPEED_LIMIT_BYTES_PER_SECOND
         .store(speed_limit_bytes_per_second.unwrap_or(0), Ordering::SeqCst);
+}
+
+/// 设置 GitHub 的下载要不要走系统代理（见 `GITHUB_USE_SYSTEM_PROXY` 的说明）。
+#[tauri::command]
+fn set_github_use_system_proxy(enabled: bool) {
+    GITHUB_USE_SYSTEM_PROXY.store(enabled, Ordering::SeqCst);
 }
 
 #[tauri::command]
@@ -1051,7 +1073,7 @@ async fn repair_game_from_archive(
     file_name: String,
     chunks: Vec<ArchiveChunk>,
 ) -> Result<RepairSummary, String> {
-    DOWNLOAD_CANCELLED.store(false, Ordering::SeqCst);
+    reset_download_cancelled();
     tauri::async_runtime::spawn_blocking(move || {
         repair_game_from_staged_archive(app, install_path, expected_size, file_name, chunks)
     })
@@ -1064,7 +1086,7 @@ async fn verify_game_manifest(
     app: AppHandle,
     install_path: String,
 ) -> Result<ManifestVerifySummary, String> {
-    DOWNLOAD_CANCELLED.store(false, Ordering::SeqCst);
+    reset_download_cancelled();
     tauri::async_runtime::spawn_blocking(move || verify_game_manifest_internal(app, install_path))
         .await
         .map_err(|error| format!("Manifest verify task failed: {}", error))?
@@ -1136,7 +1158,11 @@ async fn fetch_github_release_asset_text(url: String) -> Result<String, String> 
 #[tauri::command]
 async fn get_github_network_status() -> GithubNetworkStatus {
     tauri::async_runtime::spawn_blocking(|| {
-        let proxy_url = system_proxy_url();
+        // 这个探测要跟"真正下载时怎么走"一致：关掉代理开关后，检测也走直连。
+        let proxy_url = GITHUB_USE_SYSTEM_PROXY
+            .load(Ordering::SeqCst)
+            .then(system_proxy_url)
+            .flatten();
         let proxy_detected = proxy_url.is_some();
         let started = Instant::now();
         let reachable = build_http_agent_with_proxy(
@@ -1163,7 +1189,12 @@ async fn get_github_network_status() -> GithubNetworkStatus {
 }
 
 fn build_http_agent(url: &str, connect_timeout: Duration, read_timeout: Duration) -> ureq::Agent {
-    let proxy_url = is_github_url(url).then(system_proxy_url).flatten();
+    // GitHub 域名默认借系统代理；玩家在设置里关掉这个开关就直连。
+    let proxy_url = if is_github_url(url) && GITHUB_USE_SYSTEM_PROXY.load(Ordering::SeqCst) {
+        system_proxy_url()
+    } else {
+        None
+    };
     build_http_agent_with_proxy(connect_timeout, read_timeout, proxy_url.as_deref())
 }
 
@@ -1304,7 +1335,7 @@ async fn download_game_archive(
     chunks: Vec<ArchiveChunk>,
     speed_limit_bytes_per_second: Option<u64>,
 ) -> Result<(), String> {
-    DOWNLOAD_CANCELLED.store(false, Ordering::SeqCst);
+    reset_download_cancelled();
     DOWNLOAD_SPEED_LIMIT_BYTES_PER_SECOND
         .store(speed_limit_bytes_per_second.unwrap_or(0), Ordering::SeqCst);
     tauri::async_runtime::spawn_blocking(move || {
@@ -1458,7 +1489,7 @@ async fn install_downloaded_game_archive(
     chunks: Vec<ArchiveChunk>,
     install_stage: Option<String>,
 ) -> Result<(), String> {
-    DOWNLOAD_CANCELLED.store(false, Ordering::SeqCst);
+    reset_download_cancelled();
     tauri::async_runtime::spawn_blocking(move || {
         install_staged_archive(
             app,
@@ -1516,6 +1547,58 @@ fn emit_progress_event(
             percent,
             done_files,
             total_files,
+        },
+    );
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GamePackageScanProgress {
+    checked_files: u64,
+    total_files: u64,
+    /// 已经对得上清单的条数与字节数：前端拿它驱动进度条（和后面的下载同一把尺子）。
+    matched_files: u64,
+    matched_bytes: u64,
+}
+
+/// 逐文件"核对本地包"时的心跳。
+///
+/// 这一步要整盘哈希（几十秒到几分钟），不报点什么，界面上的「核对下载进度」就是一个不动的死字。
+/// 单独走一条事件、**不碰字节进度**：核对期间进度条该停在"上次对上的位置"，
+/// 要是把它当下载进度报，数字会先掉到 0 再爬回来 —— 看起来就是进度又被弄坏了。
+fn emit_game_package_scan_progress(
+    app: &AppHandle,
+    checked_files: u64,
+    total_files: u64,
+    matched_files: u64,
+    matched_bytes: u64,
+) {
+    let _ = app.emit(
+        "game-package-scan-progress",
+        GamePackageScanProgress {
+            checked_files,
+            total_files,
+            matched_files,
+            matched_bytes,
+        },
+    );
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GamePackagePhase {
+    phase: String,
+}
+
+/// 告诉界面"Rust 侧现在在干什么"：`downloading`（在读字节）/ `verifying`（在算 sha256）。
+///
+/// 为什么要单开一条：给一个 900MB 的文件算 sha256 要好几秒，这期间**一个字节事件都没有**，
+/// 前端会据此判成"停滞"并显示"网络不佳" —— 那是冤枉网络（用户 2026-09-21 报的现场）。
+fn emit_game_package_phase(app: &AppHandle, phase: &str) {
+    let _ = app.emit(
+        "game-package-phase",
+        GamePackagePhase {
+            phase: phase.to_string(),
         },
     );
 }
@@ -4792,6 +4875,7 @@ pub fn run() {
             pause_game_download,
             cancel_game_operation,
             set_download_speed_limit,
+            set_github_use_system_proxy,
             read_download_state_file,
             write_download_state_file,
             clear_download_state_file,
