@@ -55,7 +55,9 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
     englishName: "CROSSING VOID",
     description: "在空界幻境中，连接角色与故事。",
     shortLabel: "零",
-    iconSrc: "/launcher/logo_white.png",
+    // 侧栏那一格放的是**游戏图标**，不是品牌 logo —— 原来和下面两个共用 logo_white.png，
+    // 那是 932 KB 的整张 logo，塞进 38px 的格子里既不对味也白背体积。
+    iconSrc: "/launcher/icons/crossing-void.png",
     bootLogoSrc: "/launcher/logo_white.png",
     brandLogoSrc: "/launcher/logo_white.png",
     backgroundSrc: "/launcher/hero-bg.jpeg",
@@ -86,7 +88,7 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
     englishName: "NARUTO BP SIMULATOR",
     description: "火影忍者手游 BP 模拟器。",
     shortLabel: "忍",
-    iconSrc: null,
+    iconSrc: "/launcher/icons/naruto-bp.png",
     bootLogoSrc: null,
     brandLogoSrc: null,
     backgroundSrc: null,

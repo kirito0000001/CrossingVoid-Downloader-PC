@@ -11,6 +11,9 @@
    *
    * 所以：窗口比设计尺寸小的时候**裁掉超出部分**（和旧版本一致），窗口比设计尺寸大的时候
    * 由 100vw/100vh 让贴边的元素各自靠边（贴右/贴底的面板会跟着窗口走）。
+   *
+   * 这条规则只管**界面**：背景 / 遮罩 / 扫描线要铺满"用户看得见的窗口"，不跟画布一起被裁
+   * （下面 .background 的注释写清了为什么）。
    */
   min-width: 1200px;
   min-height: 675px;
@@ -37,19 +40,39 @@
   z-index: 2;
 }
 
+/*
+ * 背景图 / 遮罩 / 扫描线：**锚在窗口（视口）上，不是锚在 .launcher-shell 上。**
+ *
+ * 2026-09-22 用户附图反馈"背景被裁剪的有点多"。根因不是 `object-fit: cover`，而是这几层原来
+ * 挂在 .launcher-shell 上：外壳为了保住 1200×675 的设计坐标带 min-width/min-height，而实际窗口的
+ * CSS 视口比它小（从用户截图量出来约 1012×571，只有设计尺寸的 84%）。于是外壳仍是 1200×675、
+ * 由 overflow: hidden 把右边和下边裁掉 —— 背景正好铺在这块 1200×675 上，就被连带多裁掉了
+ * 右边约 200px、下边约 100px；图宽一共少了 23%（设计只需要 9%，而且是左右对称的）。
+ * 界面本身看不出异常，是因为右侧那些控件要么是 `position: fixed`、要么锚在偏左的位置，刚好还在可见区内。
+ *
+ * 改成 fixed 之后，cover 直接在"用户能看到的窗口"上取值：裁切量恒等于几何最小值
+ * （图 1920×983 = 1.953，窗口 16:9 = 1.778，左右各裁 4.5%、纵向不裁），且永远居中，
+ * 与窗口大小、显示缩放都无关。平台页 `.platform-game-overview` 本来就是这么锚的
+ * （`position: fixed`），这次把外壳对齐它。
+ *
+ * 原来的 `transform: scale(1.005)` 一并去掉：它只是为了盖住 cover 亚像素对齐时可能露出的 1px 缝，
+ * 现在改用 1px 外扩（`left/top: -1px` + `calc(100% + 2px)`），既不额外裁切，也没有缩放带来的模糊。
+ *
+ * 还想再少裁，只能动构图：调 `object-position` 把要保的人往上/往中间提，或者把图重新按 16:9 出。
+ */
 .background {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+  position: fixed;
+  left: -1px;
+  top: -1px;
+  width: calc(100% + 2px);
+  height: calc(100% + 2px);
   object-fit: cover;
-  transform: scale(1.025);
   z-index: -4;
 }
 
 .cinematic-shade {
-  position: absolute;
-  inset: 0;
+  position: fixed;
+  inset: -1px;
   z-index: -3;
   background:
     radial-gradient(circle at 82% 42%, var(--cv-accent-glow), transparent 23%),
@@ -68,8 +91,8 @@
 }
 
 .scanlines {
-  position: absolute;
-  inset: 0;
+  position: fixed;
+  inset: -1px;
   pointer-events: none;
   z-index: -2;
   opacity: 0.2;

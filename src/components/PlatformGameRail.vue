@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Grid2X2, House } from "lucide-vue-next";
+import { House } from "lucide-vue-next";
 import type { PlatformGameDefinition, PlatformGameId } from "../platform/gameCatalog";
 
 defineProps<{
@@ -42,7 +42,7 @@ const emit = defineEmits<{
       title="全部游戏"
       @click="emit('overview')"
     >
-      <Grid2X2 :size="24" stroke-width="2.2" aria-hidden="true" />
+      <span class="platform-overview-icon" aria-hidden="true"></span>
       <i></i>
     </button>
   </nav>
@@ -104,10 +104,16 @@ const emit = defineEmits<{
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 8px 22px rgba(0, 0, 0, 0.28);
 }
 
+/*
+ * 图标要**铺满整格**：以前写死 38×38（比 46 的格子小一圈），四周就露出一道缝。
+ * 现在跟着格子的内容盒走，圆角用 inherit 跟按钮一致 ——
+ * 按钮自己是 overflow: visible（那个选中指示条要露到格子外面），所以图得自己裁圆角。
+ */
 .platform-game-button img {
-  width: 38px;
-  height: 38px;
-  object-fit: contain;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
 }
 
 .platform-game-button i {
@@ -127,5 +133,21 @@ const emit = defineEmits<{
 
 .platform-overview-button {
   flex: 0 0 auto;
+}
+
+/*
+ * 「更多」图标走的是自己那张 PNG，不是 lucide 的描边图标 —— 所以用遮罩取形状、
+ * 用 background-color 上色，颜色跟着主题色走。
+ *
+ * 主题色不是写死的：运行时按 onSet 清单算好之后写到 :root 的 --cv-theme-accent
+ * （见 App.vue 的 loadOnSetColors），拉不到清单时退回 --cv-theme-default-accent。
+ * 把颜色印进图片里就跟着变了，所以这里只借它当 mask。
+ */
+.platform-overview-icon {
+  width: 24px;
+  height: 24px;
+  background-color: var(--cv-theme-accent);
+  -webkit-mask: url("../assets/more-app.png") center / contain no-repeat;
+  mask: url("../assets/more-app.png") center / contain no-repeat;
 }
 </style>

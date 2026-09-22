@@ -740,8 +740,20 @@ fn move_game_installation_internal(source: &Path, destination_base: &Path) -> Re
     let game_directory_name = source_game
         .file_name()
         .ok_or_else(|| "无法识别当前游戏目录名称。".to_string())?;
-    let source_to_move = game_migration_source(&source_game);
-    let moves_container = source_to_move != source_game;
+    let source_container = game_migration_source(&source_game);
+    // 整包搬（把 TFAC-hz64 容器一起带走）只在目标容器**还不存在**时可行 ——
+    // rename 的目标必须先不存在。目标容器已经在了就退化成"只把游戏目录搬进去"，
+    // 容器里原有别的东西一律不动（不替用户决定它们的去留）。
+    //
+    // ⚠️ "搬什么"和"搬到哪"必须成对改：整包搬时源是容器，退化时源就是游戏目录本身。
+    // 只改一半的话，整个容器会被 rename 到游戏目录的位置上，凭空多套一层。
+    let moves_container = source_container != source_game
+        && !destination_base.join("TFAC-hz64").exists();
+    let source_to_move = if moves_container {
+        source_container
+    } else {
+        source_game.clone()
+    };
     let destination_container = destination_base.join("TFAC-hz64");
     let destination_game = destination_container.join(game_directory_name);
     let destination_to_move = if moves_container {
@@ -764,11 +776,35 @@ fn move_game_installation_internal(source: &Path, destination_base: &Path) -> Re
     if canonical_destination_to_move.starts_with(&source_to_move) {
         return Err("新的安装位置不能位于当前游戏目录内。".to_string());
     }
-    if destination_to_move.exists() {
-        return Err(format!(
-            "新的安装位置已存在同名游戏目录：{}",
-            destination_to_move.display()
+
+    // 这里要看的是**目标游戏目录**，不是整个容器：容器里可能有别的东西，
+    // 也可能躺着一份下载中途留下的半成品（缺标记文件）—— 那都不该挡着搬家。
+    // （2026-09-21 用户报的"迁移没生效"就是这个：`D:\NewData\TFAC-hz64` 里有一份
+    //  14:34 下载断掉的残壳，容器名被占住，于是整个迁移在第一步就被拒。）
+    if destination_game.exists() {
+        if validate_install_state(destination_game.to_string_lossy().as_ref(), "ready")? {
+            return Err(format!(
+                "新的安装位置里已经有一份完整的游戏：{}，请换一个位置。",
+                destination_game.display()
+            ));
+        }
+        // 半成品：让路。它是启动器自己的中间产物（玩家的存档在 %LOCALAPPDATA%，不在这里面），
+        // 但**改名保留**而不是删 —— 万一判断错了也还捡得回来。
+        let retired = destination_container.join(format!(
+            "{}.replaced-{}",
+            game_directory_name.to_string_lossy(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_secs())
+                .unwrap_or(0)
         ));
+        fs::rename(&destination_game, &retired).map_err(|error| {
+            format!(
+                "新的安装位置里有一份没装完的游戏（{}），但把它挪开失败：{}",
+                destination_game.display(),
+                error
+            )
+        })?;
     }
     if !moves_container {
         fs::create_dir_all(&destination_container).map_err(|error| {
@@ -5214,6 +5250,91 @@ mod tests {
             "extra data"
         );
         assert!(validate_install_state(destination.to_string_lossy().as_ref(), "ready").expect("validate moved game"));
+
+        fs::remove_dir_all(root).expect("remove move test directory");
+    }
+
+    /// 用户 2026-09-21 报的现场：目标容器（`TFAC-hz64`）**已经存在**，里面还躺着
+    /// 一份下载中途断掉的残壳（只有 exe 和 `_download`，缺两个标记文件）。
+    ///
+    /// 以前这时候整个迁移会被一句"已存在同名游戏目录"直接拒掉 —— 用户看到的就是"没生效"。
+    /// 现在应该：残壳让路（**改名保留**，不删），游戏照样搬过去。
+    #[test]
+    fn move_game_installation_replaces_a_half_downloaded_leftover() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "cv-launcher-move-leftover-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let source = root.join("old").join("TFAC-hz64").join("CrossingVoid");
+        let destination_base = root.join("new");
+        let destination_container = destination_base.join("TFAC-hz64");
+        let leftover = destination_container.join("CrossingVoid");
+
+        fs::create_dir_all(&source).expect("create source game directory");
+        fs::create_dir_all(leftover.join("_download")).expect("create leftover directory");
+        for marker in ["CrossingVoid.version.json", "CrossingVoid.manifest.json"] {
+            fs::write(source.join(marker), "{}").expect("write source marker");
+        }
+        fs::write(source.join("CrossingVoid.exe"), []).expect("write source executable");
+        fs::write(leftover.join("CrossingVoid.exe"), []).expect("write leftover executable");
+
+        let destination = move_game_installation_internal(&source, &destination_base)
+            .expect("move complete game over a leftover");
+
+        assert_eq!(destination, destination_container.join("CrossingVoid"));
+        assert!(
+            validate_install_state(destination.to_string_lossy().as_ref(), "ready")
+                .expect("validate moved game")
+        );
+        let retired = fs::read_dir(&destination_container)
+            .expect("read destination container")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("CrossingVoid.replaced-")
+            })
+            .count();
+        assert_eq!(retired, 1, "残壳应该被改名留在旁边，而不是丢掉");
+
+        fs::remove_dir_all(root).expect("remove move test directory");
+    }
+
+    /// 目标位置已经有一份**完整**的同款游戏时不能悄悄覆盖 —— 那是别人的安装。
+    #[test]
+    fn move_game_installation_refuses_to_overwrite_a_complete_game() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "cv-launcher-move-clash-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        let source = root.join("old").join("TFAC-hz64").join("CrossingVoid");
+        let destination_base = root.join("new");
+        let existing = destination_base.join("TFAC-hz64").join("CrossingVoid");
+
+        for directory in [&source, &existing] {
+            fs::create_dir_all(directory).expect("create game directory");
+            for marker in ["CrossingVoid.version.json", "CrossingVoid.manifest.json"] {
+                fs::write(directory.join(marker), "{}").expect("write marker");
+            }
+            fs::write(directory.join("CrossingVoid.exe"), []).expect("write executable");
+        }
+
+        let error = move_game_installation_internal(&source, &destination_base)
+            .expect_err("refuse to overwrite a complete game");
+        assert!(error.contains("已经有一份完整的游戏"), "unexpected error: {error}");
+        assert!(source.join("CrossingVoid.exe").is_file(), "源应该原样不动");
+        assert!(existing.join("CrossingVoid.exe").is_file(), "目标应该原样不动");
 
         fs::remove_dir_all(root).expect("remove move test directory");
     }

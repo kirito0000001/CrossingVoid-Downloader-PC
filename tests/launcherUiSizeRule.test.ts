@@ -84,6 +84,22 @@ describe("启动器界面尺寸规则（整体）", () => {
     }
   });
 
+  it("背景 / 遮罩 / 扫描线锚在窗口上，不跟着画布一起被裁", () => {
+    // .launcher-shell 带 min-width/min-height，窗口比设计尺寸小时它自己会被 overflow 裁掉右边和下边。
+    // 这三层要是还挂在它身上（position: absolute），就会跟着被裁 —— 2026-09-22 用户报的
+    // "背景被裁剪的有点多"就是这个（量到图宽少了 23%，而 cover 的几何下限只有 9%）。
+    for (const selector of [".background", ".cinematic-shade", ".scanlines"]) {
+      const rule = ruleOf(shellCss, selector);
+      expect(rule, selector).toContain("position: fixed");
+      expect(rule, selector).not.toContain("position: absolute");
+    }
+    // 背景图不许再靠 transform 去盖 1px 缝：那会多裁一圈。改用 1px 外扩（-1px + calc(100% + 2px)）。
+    const backgroundRule = ruleOf(shellCss, ".background");
+    expect(backgroundRule).toContain("object-fit: cover");
+    expect(backgroundRule).not.toContain("transform");
+    expect(backgroundRule).not.toContain("scale(");
+  });
+
   it("画布内不许用 vw/vh 绕开这套坐标系", () => {
     // 只允许外壳自己用 100vw/100vh；画布内一律用 100%。
     expect((shellCss.match(/width:\s*100vw/g) ?? []).length).toBe(1);
