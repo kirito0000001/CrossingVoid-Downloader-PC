@@ -941,6 +941,31 @@ cargo test --manifest-path src-tauri\Cargo.toml
 本例：`启动游戏` 按钮右缘 1445px ÷（1200−236 = 964）= 1.5 → 视口宽 ≈ 1518 / 1.5 ≈ 1012px ≠ 1200px，
 直接坐实"窗口比设计坐标小"。同理也能用品牌 logo 宽度、图标行 50px 间距反推。
 
+### 配了主题色的档位，界面还是金色（或只红了一半）
+
+症状：给某一档游戏配了 `themeAccent`，该红的地方没红，或者只有一部分红了。
+
+根因：`--cv-theme-accent` 的替换只发生在 `:root`。`App.vue` 的 `:root` 里
+`--cv-accent-title` / `--cv-panel-accent` / `--cv-bg-surface` / `--cv-accent-soft` / `--cv-icon-hover-*` …
+全都是 `color-mix(in srgb, var(--cv-theme-accent) …)` 声明的，而 **`var()` 在"声明它的那个元素"上
+就已经替换完了**，后代继承到的是替换后的结果。所以把 `--cv-theme-accent` 挂到 `.launcher-shell`
+之类的**后代**元素上，只能改到"在 use-site 里直接写 `var(--cv-theme-accent)`"的那几处
+（`PlatformGameRail.vue` 的选中指示条、`LauncherSelect.vue` 的边框/文字），其余派生色纹丝不动 ——
+表现出来就是"一半红一半金"。挂到不存在的元素上或变量名拼错，则是完全没反应。
+
+修法：统一走 root。`App.vue` 的 `applyThemeAccent()` 把
+`activeGame.themeAccent ?? OnSet/Color.json 的 accent` 写到 `document.documentElement.style`；
+`loadOnSetColors()` 不再自己写 `--cv-theme-accent`，只把值交给这个函数。优先级为
+**本档 `themeAccent` > OnSet 全局 > `:root` 默认（金）**。代价是画布外的开机动画
+（`index.html` 那一层）也跟着变色 —— 但它同步的本来就是 `activeGame.bootLogoSrc` / `shortLabel`，
+跟着当前档走才对。守卫：`tests/platformLauncher.test.ts`（资源路径存在 + `themeAccent` 必须是 `#rrggbb`）。
+
+**注意配色公式**：`:root` 里那批派生色是拿主题色和**金色**（`#ffe2a3` / `#ffe28f` / `#ffe45d` /
+`#fff4b8`）混出来的，所以换成红主题之后标题/面板/进度条会明显偏橙 ——
+`themeAccent #f83020` → `--cv-accent-title #fb7b57`、`--cv-panel-accent #fc8d5a`、
+`--cv-download-progress-start #fa6a34`。想要更纯的红，得改 `:root` 里的混色配方，
+换 `themeAccent` 的取值解决不了这件事。
+
 ## 26. 制作心得与设计原则
 
 1. **状态必须来自文件事实。** “上一次显示可启动”不能证明游戏还存在；“上一次显示下载”也不能覆盖用户刚还原的完整文件。

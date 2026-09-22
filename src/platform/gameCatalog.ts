@@ -18,6 +18,15 @@ export type PlatformGameDefinition = {
   bootLogoSrc: string | null;
   brandLogoSrc: string | null;
   backgroundSrc: string | null;
+  /**
+   * 这一档的主题色（`#rrggbb`）。
+   *
+   * null = 跟随全局配色：`OnSet/Color.json`（没配就是 `:root` 里的 `--cv-theme-default-accent`，金色）。
+   * 非 null 时优先级最高，由 App.vue 的 `applyThemeAccent()` 写到 `document.documentElement`
+   * 上覆盖 `--cv-theme-accent`（必须写 root：`:root` 里那批派生变量是在声明处替换 var() 的，
+   * 挂到画布内的元素上传不下去）。
+   */
+  themeAccent: string | null;
   implemented: boolean;
   /** 下载站（dl.crossingvoid.top）配置；没接入的游戏为 null。 */
   gamePackage: GamePackageConfig | null;
@@ -46,6 +55,7 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
     bootLogoSrc: null,
     brandLogoSrc: null,
     backgroundSrc: null,
+    themeAccent: null,
     implemented: false,
     gamePackage: null,
   },
@@ -61,6 +71,7 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
     bootLogoSrc: "/launcher/logo_white.png",
     brandLogoSrc: "/launcher/logo_white.png",
     backgroundSrc: "/launcher/hero-bg.jpeg",
+    themeAccent: null,
     implemented: true,
     gamePackage: {
       productSegment: "crossingvoid",
@@ -79,6 +90,7 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
     bootLogoSrc: null,
     brandLogoSrc: null,
     backgroundSrc: null,
+    themeAccent: null,
     implemented: false,
     gamePackage: null,
   },
@@ -89,9 +101,13 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
     description: "火影忍者手游 BP 模拟器。",
     shortLabel: "忍",
     iconSrc: "/launcher/icons/naruto-bp.png",
-    bootLogoSrc: null,
-    brandLogoSrc: null,
-    backgroundSrc: null,
+    // 品牌位显示宽度 148px、开机动画位 286px，所以 logo 按 2x 备到 572px 宽就够（原图 1072px / 744KB 太大）。
+    // 背景图本身是 1950×1080（1.806），比 16:9 略宽，cover 只会左右各裁 ~15px。
+    bootLogoSrc: "/launcher/naruto-bp-logo.png",
+    brandLogoSrc: "/launcher/naruto-bp-logo.png",
+    backgroundSrc: "/launcher/naruto-bp-bg.jpg",
+    // 取 logo 里 NARUTO 字样的那个红（色相约 4°）。要更"纯红"可以换成 logo 里的 #fc0000。
+    themeAccent: "#f83020",
     implemented: false,
     gamePackage: null,
   },
@@ -105,6 +121,7 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
     bootLogoSrc: null,
     brandLogoSrc: null,
     backgroundSrc: null,
+    themeAccent: null,
     implemented: false,
     gamePackage: null,
   },

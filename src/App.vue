@@ -257,6 +257,32 @@ const isCrossingVoidActive = computed(() => activeGameId.value === "crossing-voi
 const showPlatformGameRail = computed(
   () => !gameOverviewVisible.value && (leftCollapsed.value || !isCrossingVoidActive.value),
 );
+/**
+ * 本档主题色的优先级：**`themeAccent` > OnSet/Color.json > `:root` 的默认（金）**。
+ *
+ * 一定要写在 `document.documentElement` 上，**不能**挂在 `.launcher-shell` 那类后代元素上 ——
+ * `:root` 里那一批派生变量（`--cv-accent-title` / `--cv-panel-accent` / `--cv-bg-surface` …）
+ * 都是拿 `var(--cv-theme-accent)` 声明的，而 `var()` 在**声明它的那个元素**上就已经替换完了，
+ * 后代再改 `--cv-theme-accent` 也追不进去，结果会是一半红一半金的半成品。
+ * 既有的 `loadOnSetColors()` 走的也是 root，这里沿用同一条通道。
+ *
+ * 代价是画布外的开机动画（`index.html` 那一层）也会跟着变色 —— 但它同步的本来就是
+ * `activeGame.bootLogoSrc` / `shortLabel`，跟着当前档走才是对的。
+ */
+const onSetAccent = ref<string | null>(null);
+
+function applyThemeAccent() {
+  const rootStyle = document.documentElement.style;
+  const accent = activeGame.value.themeAccent ?? onSetAccent.value;
+  if (accent && isCssColor(accent)) {
+    rootStyle.setProperty("--cv-theme-accent", accent.trim());
+  } else {
+    rootStyle.removeProperty("--cv-theme-accent");
+  }
+}
+
+watch(() => activeGame.value.themeAccent, applyThemeAccent, { immediate: true });
+
 const savedDownloadedBytes = persistedNumber(savedDownloadState?.downloadedBytes);
 const savedTotalBytes = persistedNumber(savedDownloadState?.totalBytes);
 /**
@@ -917,15 +943,17 @@ async function loadOnSetColors() {
     const accent = colors.accent;
     const support = colors.support;
 
-    if (isCssColor(accent)) {
-      rootStyle.setProperty("--cv-theme-accent", accent.trim());
-    }
+    // 主题色不在这里直接写 root：这一档自己配了 `themeAccent` 时要压过 OnSet 配色，
+    // 优先级统一交给 applyThemeAccent() 决定。
+    onSetAccent.value = isCssColor(accent) ? accent.trim() : null;
+    applyThemeAccent();
 
     if (isCssColor(support)) {
       rootStyle.setProperty("--cv-theme-support", support.trim());
     }
   } catch {
-    document.documentElement.style.removeProperty("--cv-theme-accent");
+    onSetAccent.value = null;
+    applyThemeAccent();
     document.documentElement.style.removeProperty("--cv-theme-support");
   }
 }

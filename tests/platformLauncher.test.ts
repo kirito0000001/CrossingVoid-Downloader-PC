@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -25,6 +27,29 @@ describe("platform launcher", () => {
       "white-love",
     ]);
     expect(DEFAULT_PLATFORM_GAME_ID).toBe("crossing-void");
+  });
+
+  it("points every catalog art path at a file that exists", () => {
+    // 给某一档配图时最容易犯的错就是把路径写错（少个 s、目录记成 icons/…）：
+    // 构建照样过，界面上就是一块空白。这里把 catalog 里的非空资源路径钉到 public/ 上。
+    for (const game of PLATFORM_GAMES) {
+      const sources = [game.iconSrc, game.bootLogoSrc, game.brandLogoSrc, game.backgroundSrc];
+
+      for (const src of sources) {
+        if (!src) continue;
+        const file = resolve(process.cwd(), "public", src.replace(/^\//, ""));
+        expect(existsSync(file), `${game.id}: ${src}`).toBe(true);
+      }
+    }
+  });
+
+  it("writes theme accents as plain #rrggbb", () => {
+    // applyThemeAccent() 对不合法的值会静默退回全局配色（金色），
+    // 所以写错格式不会报错、只会"没生效"—— 这里提前拦住。
+    for (const game of PLATFORM_GAMES) {
+      if (!game.themeAccent) continue;
+      expect(game.themeAccent, game.id).toMatch(/^#[0-9a-f]{6}$/i);
+    }
   });
 
   it("restores the last selected page and persists later selections", () => {
