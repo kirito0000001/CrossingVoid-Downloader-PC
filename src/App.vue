@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, shallowRef, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -22,8 +22,9 @@ import { githubGameChunkAssetName } from "./githubRelease";
 import { canPromoteInstalledGame, shouldPreserveSavedOperation } from "./downloadStatePolicy";
 import {
   buildGameInstallPath,
-  DEFAULT_GAME_INSTALL_PATH,
   DEFAULT_GAME_STORAGE_ROOT,
+  defaultGameInstallPath,
+  GAME_DIRECTORY_NAME,
   inferGameStorageRoot,
   isSameWindowsVolume,
 } from "./gameInstallPath";
@@ -32,10 +33,14 @@ import {
   canUseLauncherNetwork,
   type LauncherUpdateGate,
 } from "./launcherNetworkPolicy";
-import { createPlatformLauncher } from "./platform/platformLauncher";
-import { getGamePackageConfig, type PlatformGameId } from "./platform/gameCatalog";
+import { ACTIVE_GAME_STORAGE_KEY, createPlatformLauncher } from "./platform/platformLauncher";
 import {
-  GAME_PACKAGE_GITHUB_REPOSITORY,
+  DEFAULT_PLATFORM_GAME_ID,
+  getGamePackageConfig,
+  isPlatformGameId,
+  type PlatformGameId,
+} from "./platform/gameCatalog";
+import {
   GamePackageError,
   assertNoGamePackageDowngrade,
   buildGamePackageUrlCandidates,
@@ -58,6 +63,8 @@ import {
 import {
   DOWNLOAD_CHANNELS_URL,
   LAUNCHER_NOTICE_URL,
+  downloadChannelsUrl,
+  launcherNoticeUrl,
   downloadChannelState,
   downloadChannelNotice,
   isDownloadChannelEnabled,
@@ -145,7 +152,7 @@ import {
   CLOSE_TO_TRAY_STORAGE_KEY,
   DOWNLOAD_LIMITED_STORAGE_KEY,
   DOWNLOAD_SOURCE_STORAGE_KEY,
-  DOWNLOAD_STATE_STORAGE_KEY,
+  downloadStateStorageKey,
   GITHUB_USE_SYSTEM_PROXY_STORAGE_KEY,
   HIDE_AFTER_GAME_LAUNCH_STORAGE_KEY,
   LANGUAGE_STORAGE_KEY,
@@ -197,10 +204,10 @@ function normalizeDownloadSourceKey(value: string | null | undefined): DownloadS
   return isDownloadSourceKey(value) ? value : "official";
 }
 
-function readPersistedDownloadState(): PersistedDownloadState | null {
+function readPersistedDownloadState(gameId: string): PersistedDownloadState | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = window.localStorage.getItem(DOWNLOAD_STATE_STORAGE_KEY);
+    const raw = window.localStorage.getItem(downloadStateStorageKey(gameId));
     return raw ? (JSON.parse(raw) as PersistedDownloadState) : null;
   } catch {
     return null;
@@ -242,7 +249,16 @@ async function restoreDownloadStateFromDisk() {
   }
 }
 
-const savedDownloadState = readPersistedDownloadState();
+/**
+ * 存档在 localStorage 里的"当前档位"：下载状态、安装目录都按它取。
+ * 这里先自己读一次（`createPlatformLauncher` 还要晚一步建），顺序不能反。
+ */
+const initialActiveGameId: PlatformGameId = (() => {
+  if (typeof window === "undefined") return DEFAULT_PLATFORM_GAME_ID;
+  const saved = window.localStorage.getItem(ACTIVE_GAME_STORAGE_KEY);
+  return isPlatformGameId(saved) ? saved : DEFAULT_PLATFORM_GAME_ID;
+})();
+let savedDownloadState = readPersistedDownloadState(initialActiveGameId);
 const platformLauncher = createPlatformLauncher(
   typeof window === "undefined" ? null : window.localStorage,
 );
@@ -253,9 +269,37 @@ const gameOverviewVisible = platformLauncher.gameOverviewVisible;
 const platformGames = platformLauncher.games;
 const overviewPreviewGameId = ref<PlatformGameId>(activeGameId.value);
 const overviewSelection = ref<GameOverviewSelection>(openGameOverview(activeGameId.value));
-const isCrossingVoidActive = computed(() => activeGameId.value === "crossing-void");
+/**
+ * 这一档游戏在本机的运行参数（安装目录名/主程序/进程名/备用源…），见 `platform/gameCatalog.ts`。
+ * `null` = 还没接入，页面只给占位。
+ */
+const activeGameRuntime = computed(() => activeGame.value.runtime);
+const isGamePageActive = computed(
+  () => activeGame.value.implemented && activeGameRuntime.value !== null,
+);
+/**
+ * 角色轮播 / 快讯 / 视频 / 快捷链接这一整块内容目前只有零境那套 OnSet 资源。
+ * 别的档位（火影、幻杀…）在有自己的内容之前，页面只渲染外壳与右侧下载区。
+ */
+const hasOnSetContent = computed(() => activeGameRuntime.value?.content === "onSet");
+/**
+ * 传给 Rust 侧的"这一档游戏是谁"（主程序名、进程名、版本标记、日志工程名…）。
+ * Rust 侧每个字段都可缺省，缺省即零境那一套 —— 所以这里给不出值也不影响老档位。
+ */
+function gameIdentityPayload() {
+  const runtime = activeGameRuntime.value;
+  if (!runtime) return undefined;
+  return {
+    displayName: activeGame.value.name,
+    executable: runtime.executable,
+    projectName: runtime.projectName,
+    versionMarker: activeGame.value.gamePackage?.versionMarker ?? "",
+    processNames: [...runtime.processNames],
+    installDirectoryName: runtime.installDirectoryName,
+  };
+}
 const showPlatformGameRail = computed(
-  () => !gameOverviewVisible.value && (leftCollapsed.value || !isCrossingVoidActive.value),
+  () => !gameOverviewVisible.value && (leftCollapsed.value || !hasOnSetContent.value),
 );
 /**
  * 本档主题色的优先级：**`themeAccent` > OnSet/Color.json > `:root` 的默认（金）**。
@@ -389,19 +433,27 @@ const launcherUpdateTotalBytes = ref(0);
 
 const remoteLauncherNotice = ref<RemoteLauncherNotice | null>(null);
 const showRemoteLauncherNotice = ref(false);
+/**
+ * 本进程里已经弹过的公告，键是 `<档位>:<公告 id>`。
+ *
+ * 需求（2026-09-22）：切到某一档时弹这一档的公告，同一份公告**只弹一次**，重启启动器后重置。
+ * 所以这份记忆只放内存，不落盘；换一份新公告（id 变了）会重新弹。
+ */
+const shownLauncherNoticeKeys = new Set<string>();
 /** 远程下载渠道开关：开发页发布，玩家侧据此禁用/自动切换下载源。 */
 const remoteDownloadChannels = ref<RemoteDownloadChannels | null>(null);
 /** 本次清单是从哪个 GitHub Release 拿到的（下载站挂了时也能拼出备用源的文件地址）。 */
 const activeGamePackageGithubTag = ref("");
 const developerConsole = useDeveloperConsole({
   launcherVersion,
+  activeGameId,
   language: currentLanguage,
   remoteLauncherNotice,
   notify: showCheckResult,
   formatError: formatUnknownError,
   compareVersions,
   fetchRemoteLauncherNotice,
-  fetchRemoteDownloadChannels: () => fetchRemoteJson<unknown>(`${DOWNLOAD_CHANNELS_URL}?t=${Date.now()}`),
+  fetchRemoteDownloadChannels: () => fetchPerGameRemoteDocument(downloadChannelsUrl, DOWNLOAD_CHANNELS_URL),
   onTaskStart: () => {
     showSettings.value = false;
     showDevPackageConfirm.value = false;
@@ -476,7 +528,11 @@ let downloadStateDiskWriteTimer: number | undefined;
 let pendingDownloadStatePayload: PersistedDownloadState | null = null;
 let restoredDiskDownloadState = false;
 const autoRepair = ref(typeof window === "undefined" || window.localStorage.getItem(AUTO_REPAIR_STORAGE_KEY) !== "0");
-const installPath = ref(savedDownloadState?.installPath || DEFAULT_GAME_INSTALL_PATH);
+const gameDirectoryName = computed(
+  () => activeGameRuntime.value?.installDirectoryName || GAME_DIRECTORY_NAME,
+);
+const gameDefaultInstallPath = computed(() => defaultGameInstallPath(gameDirectoryName.value));
+const installPath = ref(savedDownloadState?.installPath || gameDefaultInstallPath.value);
 const selectedInstallBasePath = ref(savedDownloadState?.selectedInstallBasePath || DEFAULT_GAME_STORAGE_ROOT);
 const createDesktopShortcut = ref(true);
 const fallbackRequiredInstallBytes = 5 * 1024 * 1024 * 1024;
@@ -492,10 +548,27 @@ const launcherLanguage = computed({
   },
 });
 const officialUpdateApiUrl = "https://www.crossingvoid.top/api/toolbox-updates";
-const gameMetadataManifestUrl = "https://www.crossingvoid.top/manifests/game/windows-latest.json";
-const officialProductKey = "crossingvoid-game";
-const officialRuntime = "Windows";
-const githubGameRepository = "kirito0000001/CrossingVoid";
+/**
+ * 零境那套旧的 v2 清单（www `manifests/game/*`）。
+ * 已经接下载站的档位走 `latest.json → manifest`，只有还没接入的档位才回退到这里。
+ */
+const legacyGameMetadataManifestUrl = "https://www.crossingvoid.top/manifests/game/windows-latest.json";
+/** 当前档位在下载站里的产品键（没接入就是空串）。 */
+function officialProductKey() {
+  return currentGamePackageConfig()?.productKey ?? "";
+}
+/** 当前档位的平台标记。 */
+function officialRuntime() {
+  return currentGamePackageConfig()?.runtime ?? "Windows";
+}
+/** 当前档位的 GitHub 备用源仓库；没有备用源就是空串。 */
+function githubGameRepository() {
+  return activeGameRuntime.value?.github?.repository ?? "";
+}
+/** 当前档位的 GitHub Release 标签前缀（`PC-V0.5.14` 里的 `PC-V`）。 */
+function githubGameTagPrefix() {
+  return activeGameRuntime.value?.github?.tagPrefix ?? "PC-V";
+}
 const savedPreferredDownloadSource =
   typeof window === "undefined"
     ? null
@@ -617,7 +690,7 @@ function stopCharacterBannerRotation() {
   characterBannerTimer = undefined;
 }
 
-if (isCrossingVoidActive.value) startCharacterBannerRotation();
+if (hasOnSetContent.value) startCharacterBannerRotation();
 
 onBeforeUnmount(() => {
   removeLauncherErrorLogging();
@@ -782,7 +855,7 @@ async function preloadBootImages() {
   const imageSources = new Set<string>();
   if (activeGame.value.backgroundSrc) imageSources.add(activeGame.value.backgroundSrc);
   if (activeGame.value.bootLogoSrc) imageSources.add(activeGame.value.bootLogoSrc);
-  if (!isCrossingVoidActive.value) {
+  if (!hasOnSetContent.value) {
     await Promise.all([...imageSources].map((src) => preloadImage(src)));
     return;
   }
@@ -798,7 +871,7 @@ async function preloadBootImages() {
 }
 
 async function loadBootResources() {
-  if (!isCrossingVoidActive.value) {
+  if (!hasOnSetContent.value) {
     updateBootSplash({ status: `正在进入 ${activeGame.value.name}` });
     await Promise.all([waitForBootFonts(1600), preloadBootImages()]);
     return;
@@ -837,7 +910,7 @@ async function initializePlatformPage() {
   await refreshRemoteLauncherNotice();
   // 渠道开关同样先拉：玩家可能正因为某个源被关而进不来。
   await refreshRemoteDownloadChannels();
-  if (hasLauncherUpdate || launcherUpdateGate.value !== "ready" || !isCrossingVoidActive.value) return;
+  if (hasLauncherUpdate || launcherUpdateGate.value !== "ready" || !isGamePageActive.value) return;
   await checkGameVersion({ manual: false });
   await Promise.all([
     refreshTrafficQuota(),
@@ -848,19 +921,275 @@ async function initializePlatformPage() {
   }
 }
 
+/**
+ * 一档游戏在本机的"运行时快照"：下载进度、阶段、清单、差异计划…
+ *
+ * 玩家切走时把当前这一档的快照留下；Rust 侧的下载任务照旧跑，进度事件按 `installPath`
+ * 写回对应档位的快照，切回来看到的就是实时进度（而不是"磁盘存档里那一刻"）。
+ */
+type GameRuntimeSnapshot = {
+  installPath: string;
+  selectedInstallBasePath: string;
+  launcherState: LauncherState;
+  downloadedBytes: number;
+  activeDownloadBytes: number | null;
+  activeGameDownloadSource: DownloadSourceKey | null;
+  installPathHasPartialWork: boolean;
+  pendingRepairSummary: ManifestVerifySummary | null;
+  updateDownloadPending: boolean;
+  installStage: InstallStage;
+  activeGamePackage: GamePackageManifest | null;
+  activeGamePackagePlan: GamePackagePlan | null;
+  gamePackageBaseline: { bytes: number; files: number };
+  gamePackageTotals: { bytes: number; files: number };
+  gamePackageFileProgress: { done: number; total: number };
+  gamePackagePrepareStage: string;
+  gamePackageScanProgress: { checked: number; total: number };
+  gamePackagePhase: string;
+  downloadEstimate: DownloadEstimate;
+};
+
+/** 用 reactive 包一层：侧栏/全部游戏页要按它显示"这一档正在下载 xx%"。 */
+const gameRuntimeSnapshots = reactive(new Map<PlatformGameId, GameRuntimeSnapshot>());
+
+/**
+ * 各档位的下载百分比（只有正在下载/修复的档位才有条目）。
+ *
+ * 当前档位用实时 ref，别的档位用它们的运行时快照 —— 这样"A 在下、玩家在 B 页面上"
+ * 时，侧栏那个 A 的图标也能显示 A 的进度。
+ */
+const gameDownloadPercents = computed<Record<string, number>>(() => {
+  const percentOf = (done: number, total: number | null | undefined) =>
+    total && total > 0 ? Math.min(100, Math.max(0, (done / total) * 100)) : 0;
+  const result: Record<string, number> = {};
+
+  for (const [gameId, snapshot] of gameRuntimeSnapshots) {
+    if (gameId === activeGameId.value) continue;
+    if (snapshot.launcherState !== "downloading" && snapshot.launcherState !== "repairing") continue;
+    result[gameId] = percentOf(
+      snapshot.downloadedBytes,
+      snapshot.activeDownloadBytes ?? snapshot.gamePackageTotals.bytes,
+    );
+  }
+
+  if (launcherState.value === "downloading" || launcherState.value === "repairing") {
+    result[activeGameId.value] = percentOf(
+      downloadedBytes.value,
+      activeDownloadBytes.value ?? remoteArchiveBytes.value,
+    );
+  }
+
+  return result;
+});
+
+function captureGameRuntime(gameId: PlatformGameId) {
+  gameRuntimeSnapshots.set(gameId, {
+    installPath: installPath.value,
+    selectedInstallBasePath: selectedInstallBasePath.value,
+    launcherState: launcherState.value,
+    downloadedBytes: downloadedBytes.value,
+    activeDownloadBytes: activeDownloadBytes.value,
+    activeGameDownloadSource: activeGameDownloadSource.value,
+    installPathHasPartialWork: installPathHasPartialWork.value,
+    pendingRepairSummary: pendingRepairSummary.value,
+    updateDownloadPending: updateDownloadPending.value,
+    installStage: installStage.value,
+    activeGamePackage: activeGamePackage.value,
+    activeGamePackagePlan: activeGamePackagePlan.value,
+    gamePackageBaseline: { ...gamePackageBaseline.value },
+    gamePackageTotals: { ...gamePackageTotals.value },
+    gamePackageFileProgress: { ...gamePackageFileProgress.value },
+    gamePackagePrepareStage: gamePackagePrepareStage.value,
+    gamePackageScanProgress: { ...gamePackageScanProgress.value },
+    gamePackagePhase: gamePackagePhase.value,
+    downloadEstimate: { ...downloadEstimate.value },
+  });
+}
+
+function restoreGameRuntimeSnapshot(snapshot: GameRuntimeSnapshot) {
+  installPath.value = snapshot.installPath;
+  selectedInstallBasePath.value = snapshot.selectedInstallBasePath;
+  launcherState.value = snapshot.launcherState;
+  downloadedBytes.value = snapshot.downloadedBytes;
+  downloadedMb.value = bytesToMb(snapshot.downloadedBytes);
+  activeDownloadBytes.value = snapshot.activeDownloadBytes;
+  activeGameDownloadSource.value = snapshot.activeGameDownloadSource;
+  installPathHasPartialWork.value = snapshot.installPathHasPartialWork;
+  pendingRepairSummary.value = snapshot.pendingRepairSummary;
+  updateDownloadPending.value = snapshot.updateDownloadPending;
+  installStage.value = snapshot.installStage;
+  activeGamePackage.value = snapshot.activeGamePackage;
+  activeGamePackagePlan.value = snapshot.activeGamePackagePlan;
+  gamePackageBaseline.value = { ...snapshot.gamePackageBaseline };
+  gamePackageTotals.value = { ...snapshot.gamePackageTotals };
+  gamePackageFileProgress.value = { ...snapshot.gamePackageFileProgress };
+  gamePackagePrepareStage.value = snapshot.gamePackagePrepareStage;
+  gamePackageScanProgress.value = { ...snapshot.gamePackageScanProgress };
+  gamePackagePhase.value = snapshot.gamePackagePhase;
+  downloadEstimate.value = { ...snapshot.downloadEstimate };
+}
+
+/** 把事件里的安装目录归到某一档；空值（旧的切片链路）算当前档位。 */
+function gameIdForInstallPath(path: string | undefined | null): PlatformGameId | null {
+  const normalized = (path ?? "").trim().replace(/\//g, "\\").toLowerCase();
+  if (!normalized) return null;
+  for (const game of platformGames) {
+    const directory = game.runtime?.installDirectoryName?.toLowerCase();
+    if (directory && normalized.endsWith(`\\${directory}`)) return game.id;
+  }
+  return null;
+}
+
+/**
+ * 别的档位正在下载时，把事件写进它的快照 —— 不碰当前档位的 ref。
+ *
+ * 这一条同时挡掉了"串档"：以前切走之后事件照旧写当前 ref 并落盘，
+ * 会把 A 的字节数写进 B 的存档里。
+ */
+function patchSnapshotProgress(gameId: PlatformGameId, payload: DownloadProgressEvent) {
+  const snapshot = gameRuntimeSnapshots.get(gameId);
+  if (!snapshot) return;
+  const baseline = snapshot.gamePackageBaseline;
+  snapshot.launcherState = "downloading";
+  snapshot.downloadedBytes = baseline.bytes + Math.max(0, payload.downloadedBytes || 0);
+  snapshot.activeDownloadBytes =
+    snapshot.gamePackageTotals.bytes || snapshot.activeDownloadBytes || payload.totalBytes || null;
+  if (typeof payload.doneFiles === "number" && typeof payload.totalFiles === "number") {
+    snapshot.gamePackageFileProgress = {
+      done: baseline.files + Math.max(0, payload.doneFiles),
+      total: baseline.files + Math.max(0, payload.totalFiles),
+    };
+  }
+}
+
+/**
+ * 把"这一档游戏在本机的状态"铺回界面：读它的下载存档，再复位所有跟档位绑定的 ref。
+ *
+ * 启动时和**在启动器里切换档位**时都走它。以前切档是整页重载（`location.reload`），
+ * 整个 WebView 重来一遍、连开机动画都再放一次 —— 但界面文案、公告、渠道开关、OnSet 内容
+ * 这些**和档位无关**的东西启动时就已经加载好了，重载纯属浪费。
+ *
+ * ⚠️ 以后新增"跟档位绑定"的状态（安装目录、进度、版本、运行中…），必须同时补进这个函数：
+ * 漏一个就会把上一档的数字带到下一档页面上。守卫见 `tests/gameRuntimeState.test.ts`。
+ */
+function applyGameScopedState(gameId: PlatformGameId) {
+  const state = readPersistedDownloadState(gameId);
+  savedDownloadState = state;
+
+  const savedBytes = persistedNumber(state?.downloadedBytes);
+  const savedTotal = persistedNumber(state?.totalBytes);
+
+  launcherState.value = state ? normalizePersistedState(state) : "paused";
+  pendingRepairSummary.value =
+    state?.mode === "repair" ? { checkedFiles: 1, invalidFiles: 1, missingFiles: 1 } : null;
+  updateDownloadPending.value = state?.mode === "update";
+  installPathHasPartialWork.value = Boolean(state && normalizePersistedState(state) !== "ready");
+  installStage.value =
+    state?.installStage === "merged" || state?.installStage === "extracting"
+      ? state.installStage
+      : "downloaded";
+
+  downloadedMb.value = bytesToMb(savedBytes);
+  downloadedBytes.value = savedBytes;
+  activeDownloadBytes.value = savedTotal || null;
+  activeGameDownloadSource.value =
+    savedBytes > 0
+      ? normalizeDownloadSourceKey(state?.activeDownloadSource ?? state?.downloadSource)
+      : null;
+  installPath.value = state?.installPath || gameDefaultInstallPath.value;
+  selectedInstallBasePath.value = state?.selectedInstallBasePath || DEFAULT_GAME_STORAGE_ROOT;
+  downloadSource.value = normalizeDownloadSourceKey(
+    state?.downloadSource ?? savedPreferredDownloadSource,
+  );
+
+  // 版本 / 更新 / 运行状态先清空，交给 refreshActiveGamePage() 重新查这一档的真实情况。
+  remoteGameVersion.value = "";
+  remoteArchiveBytes.value = null;
+  localGameVersion.value = "";
+  updateAvailable.value = false;
+  versionCheckPending.value = false;
+  lastVersionCheckAt.value = 0;
+  gameRunning.value = false;
+  gameRunningCheckFailures = 0;
+  gameLaunchPending.value = false;
+
+  // 逐文件下载链路的临时状态：上一档没跑完的进度条、阶段文案不能跟过来。
+  activeGamePackage.value = null;
+  activeGamePackagePlan.value = null;
+  activeGamePackageGithubTag.value = "";
+  gamePackageFileProgress.value = { done: 0, total: 0 };
+  gamePackageBaseline.value = { bytes: 0, files: 0 };
+  gamePackageTotals.value = { bytes: 0, files: 0 };
+  gamePackagePrepareStage.value = "";
+  gamePackageScanProgress.value = { checked: 0, total: 0 };
+  gamePackagePhase.value = "";
+  downloadEstimate.value = { status: "calculating" };
+  installProgressPercent.value = 0;
+  installProgressItems.value = null;
+  repairProgressPercent.value = 0;
+  repairProgressItems.value = null;
+  verificationCurrentFile.value = "";
+  verificationProcessedBytes.value = 0;
+  verificationTotalBytes.value = 0;
+  verificationCurrentFileBytes.value = 0;
+  verificationCurrentFileTotalBytes.value = 0;
+
+  // 磁盘存档是"每个安装路径一份"，换档要允许重新从磁盘读一次。
+  restoredDiskDownloadState = false;
+
+  // 这一档本次会话里跑过（切走过）就叠上它的运行时快照：Rust 侧的任务此刻可能还在跑，
+  // 快照里的进度比磁盘存档新。
+  const snapshot = gameRuntimeSnapshots.get(gameId);
+  if (snapshot) restoreGameRuntimeSnapshot(snapshot);
+}
+
+/**
+ * 切档后的轻量刷新：只重查**这一档**的本地安装 / 版本 / 运行状态，
+ * 共享的公告、渠道开关、流量额度、启动器更新都不再重复拉（启动时已经拿过了）。
+ */
+async function refreshActiveGamePage() {
+  const diskStateRestored = await restoreDownloadStateFromDisk();
+  if (!diskStateRestored) await validateCurrentPersistedState();
+  await restoreReadyInstallFromFiles();
+  await readLocalGameVersion();
+  await refreshGameRunningState();
+  // 公告是**按档位**的（`notices/<档位>.json`）：切过去要把这一档的公告取回来。
+  // 取回来只弹没弹过的那份，见 refreshRemoteLauncherNotice()。
+  await refreshRemoteLauncherNotice();
+  // 渠道开关同样是按档位的（`channels/<档位>.json`），切档必须重新拉，
+  // 否则火影页会沿用零境那边的开关状态。
+  await refreshRemoteDownloadChannels();
+  await loadBootResources();
+  if (launcherUpdateGate.value === "ready" && isGamePageActive.value) {
+    await checkGameVersion({ manual: false });
+  }
+}
+
 async function selectPlatformGame(id: PlatformGameId) {
   if (activeGameId.value === id && !gameOverviewVisible.value) return;
+  if (id === activeGameId.value) {
+    // 同一个档位，只是从"全部游戏"回到本档，不用重来一遍。
+    platformLauncher.setGameOverviewVisible(false);
+    return;
+  }
+  // 切换**不会**中断下载：先把这一档的运行时快照留下，Rust 侧的任务照旧跑，
+  // 进度事件按安装目录写回它的快照，切回来就是实时进度。
+  captureGameRuntime(activeGameId.value);
+  // 界面资源不动，只换"这一档在本机的状态"。
+  stopCharacterBannerRotation();
   platformLauncher.selectGame(id);
   showSettings.value = false;
   showMenu.value = false;
   showInstallConfirm.value = false;
   showGameChunkImportGuide.value = false;
-  if (id === "crossing-void") {
-    startCharacterBannerRotation();
-    await loadBootResources();
-    await initializePlatformPage();
-  } else {
-    stopCharacterBannerRotation();
+  applyGameScopedState(id);
+  if (hasOnSetContent.value) startCharacterBannerRotation();
+  if (isGamePageActive.value) {
+    updateBootSplash({
+      logoSrc: activeGame.value.bootLogoSrc,
+      shortLabel: activeGame.value.shortLabel,
+    });
+    await refreshActiveGamePage();
   }
 }
 
@@ -913,7 +1242,7 @@ onMounted(() => {
       await readLocalGameVersion();
       await refreshGameRunningState();
       windowFocusUnlisten = await appWindow.onFocusChanged((event) => {
-        if (event.payload && isCrossingVoidActive.value) void refreshExternalInstallState();
+        if (event.payload && isGamePageActive.value) void refreshExternalInstallState();
       });
       await nextTick();
 
@@ -1458,7 +1787,9 @@ const canVerifyGameIntegrity = computed(
     launcherState.value !== "checking" &&
     launcherState.value !== "repairing",
 );
-const finalInstallPath = computed(() => buildGameInstallPath(selectedInstallBasePath.value));
+const finalInstallPath = computed(() =>
+  buildGameInstallPath(selectedInstallBasePath.value, gameDirectoryName.value),
+);
 const migrationChangesVolume = computed(() =>
   !isSameWindowsVolume(installPath.value, finalInstallPath.value),
 );
@@ -1643,12 +1974,21 @@ const downloadChannelWarningText = computed(() =>
     ? ""
     : "当前渠道已关闭，请更换",
 );
-/** 还开着的下载源；全关时回落到完整列表，好让界面仍能显示"已关闭"。 */
+/**
+ * 这一档真正支持的下载源：没配 GitHub 备用源（`runtime.github === null`）的档位只留官方源，
+ * 免得玩家在火影页上能选一个永远 404 的源。
+ */
+const downloadSourcesForGame = computed(() =>
+  downloadSources.filter(
+    (source) => source.key === "official" || Boolean(activeGameRuntime.value?.github),
+  ),
+);
+/** 还开着的下载源；全关时回落到本档支持的列表，好让界面仍能显示"已关闭"。 */
 const availableDownloadSources = computed(() => {
-  const available = downloadSources.filter((source) =>
+  const available = downloadSourcesForGame.value.filter((source) =>
     isDownloadChannelEnabled(downloadChannelStates.value, source.key),
   );
-  return available.length > 0 ? available : downloadSources;
+  return available.length > 0 ? available : downloadSourcesForGame.value;
 });
 const activeGameDownloadSourceName = computed(() => {
   const source = activeGameDownloadSource.value;
@@ -1673,7 +2013,7 @@ const downloadSourceOptions = computed(() =>
 
 watch([showSettings, activeSettingsTab], () => {
   resetSettingsScrollbar();
-  if (isCrossingVoidActive.value && showSettings.value && activeSettingsTab.value === "download") {
+  if (isGamePageActive.value && showSettings.value && activeSettingsTab.value === "download") {
     if (downloadSource.value === "official") void refreshTrafficQuota();
     else void refreshGithubNetworkStatus();
   }
@@ -1693,9 +2033,20 @@ watch(currentLanguage, (language) => {
 
 watch(downloadSource, (source) => {
   window.localStorage.setItem(DOWNLOAD_SOURCE_STORAGE_KEY, source);
-  if (!isCrossingVoidActive.value) return;
+  if (!isGamePageActive.value) return;
   if (source === "github") void refreshGithubNetworkStatus();
 }, { flush: "sync" });
+
+// 上一档选了 GitHub、这一档没有备用源时，开局就把选择收回官方源（否则设置页会显示成空选项）。
+watch(
+  downloadSourcesForGame,
+  (sources) => {
+    if (!sources.some((source) => source.key === downloadSource.value)) {
+      downloadSource.value = sources[0]?.key ?? "official";
+    }
+  },
+  { immediate: true },
+);
 
 watch(downloadLimited, (limited) => {
   window.localStorage.setItem(DOWNLOAD_LIMITED_STORAGE_KEY, limited ? "1" : "0");
@@ -1819,12 +2170,13 @@ function applyPersistedDownloadState(state: PersistedDownloadState) {
 
 
 async function validatePersistedDownloadState(state: PersistedDownloadState) {
-  const targetPath = state.installPath || DEFAULT_GAME_INSTALL_PATH;
+  const targetPath = state.installPath || gameDefaultInstallPath.value;
   if (state.mode === "repair") {
     try {
       return await invoke<boolean>("validate_game_install_state", {
         installPath: targetPath,
         state: "repairable",
+        game: gameIdentityPayload(),
       });
     } catch (error) {
       console.warn("Unable to validate repair target", error);
@@ -1836,6 +2188,7 @@ async function validatePersistedDownloadState(state: PersistedDownloadState) {
       return await invoke<boolean>("validate_game_install_state", {
         installPath: targetPath,
         state: "ready",
+        game: gameIdentityPayload(),
       });
     } catch (error) {
       console.warn("Unable to validate update target", error);
@@ -1868,6 +2221,7 @@ async function restoreReadyInstallFromFiles() {
     const isReady = await invoke<boolean>("validate_game_install_state", {
       installPath: installPath.value,
       state: "ready",
+      game: gameIdentityPayload(),
     });
     if (
       !canPromoteInstalledGame({
@@ -1906,7 +2260,7 @@ async function restoreReadyInstallFromFiles() {
 }
 
 async function refreshExternalInstallState() {
-  if (!isCrossingVoidActive.value) return false;
+  if (!isGamePageActive.value) return false;
   if (launcherState.value === "ready") return true;
   const restored = await restoreReadyInstallFromFiles();
   if (!restored) return false;
@@ -1996,17 +2350,17 @@ function persistDownloadState(
   if (typeof window === "undefined") return;
   const payload = buildDownloadStatePayload(state);
   if (state !== "ready" && payload.mode !== "update" && (payload.downloadedBytes ?? 0) <= 0 && (payload.totalBytes ?? 0) <= 0) {
-    window.localStorage.removeItem(DOWNLOAD_STATE_STORAGE_KEY);
+    window.localStorage.removeItem(downloadStateStorageKey(activeGameId.value));
     return;
   }
 
-  window.localStorage.setItem(DOWNLOAD_STATE_STORAGE_KEY, JSON.stringify(payload));
+  window.localStorage.setItem(downloadStateStorageKey(activeGameId.value), JSON.stringify(payload));
   writeDownloadStateToDisk(payload, mode);
 }
 
 async function clearPersistedDownloadStateForPath(pathToClear: string) {
   if (typeof window !== "undefined") {
-    window.localStorage.removeItem(DOWNLOAD_STATE_STORAGE_KEY);
+    window.localStorage.removeItem(downloadStateStorageKey(activeGameId.value));
   }
   if (downloadStateDiskWriteTimer !== undefined) {
     window.clearTimeout(downloadStateDiskWriteTimer);
@@ -2033,7 +2387,7 @@ function clearPersistedDownloadState() {
 
 function getUpdateManifestAsset(info: UpdateManifestPayload) {
   const assets = info.latest?.assets ?? [];
-  return assets.find((item) => item.runtime === officialRuntime) ?? assets[0] ?? null;
+  return assets.find((item) => item.runtime === officialRuntime()) ?? assets[0] ?? null;
 }
 
 function getRemoteArchiveBytes(info: UpdateManifestPayload) {
@@ -2047,10 +2401,33 @@ async function fetchRemoteJson<T>(url: string) {
 }
 
 async function fetchRemoteLauncherNotice() {
-  const payload = await fetchRemoteJson<unknown>(`${LAUNCHER_NOTICE_URL}?t=${Date.now()}`);
+  const payload = await fetchPerGameRemoteDocument(launcherNoticeUrl, LAUNCHER_NOTICE_URL);
   const notice = parseRemoteLauncherNotice(payload);
   if (!notice) throw new Error("远程公告格式不正确");
   return notice;
+}
+
+/**
+ * 按档位读远程文档：先读 `<档位>.json`，读不到再退回老文件。
+ *
+ * 迁移期两边的状态都可能：某档还没发过公告（分档文件 404），或者玩家的启动器刚更新、
+ * 线上只有老文件。退回一次就够，不需要重试 —— 拿不到就是"没有公告"。
+ */
+async function fetchPerGameRemoteDocument(
+  urlForGame: (gameId: string) => string,
+  legacyUrl: string,
+) {
+  const gameId = activeGameId.value;
+  try {
+    return await fetchRemoteJson<unknown>(`${urlForGame(gameId)}?t=${Date.now()}`);
+  } catch (error) {
+    // 只有零境这一档存在"老文件"的概念（迁移前唯一的公告/开关就是它，而且发布时零境会双写）。
+    // 别的档位拉不到就是"这一档还没有这份文档" —— **绝不能回退成零境的**：
+    // 那会把零境的公告/渠道开关显示在火影页面上（2026-09-22 用户报的"新公告被重置成零境那份"）。
+    if (gameId !== DEFAULT_PLATFORM_GAME_ID) throw error;
+    console.warn(`零境的公告/开关读取失败，回退到老文件（${legacyUrl}）`, error);
+    return await fetchRemoteJson<unknown>(`${legacyUrl}?t=${Date.now()}`);
+  }
 }
 
 /**
@@ -2060,9 +2437,9 @@ async function fetchRemoteLauncherNotice() {
  * 全都关了则保留选择，但下载入口会被 `downloadGameArchive` 拦下并显示说明。
  */
 async function refreshRemoteDownloadChannels() {
-  if (!isCrossingVoidActive.value) return;
+  if (!isGamePageActive.value) return;
   try {
-    const payload = await fetchRemoteJson<unknown>(`${DOWNLOAD_CHANNELS_URL}?t=${Date.now()}`);
+    const payload = await fetchPerGameRemoteDocument(downloadChannelsUrl, DOWNLOAD_CHANNELS_URL);
     remoteDownloadChannels.value = parseRemoteDownloadChannels(payload);
   } catch (error) {
     console.warn("Unable to load remote download channels", error);
@@ -2082,11 +2459,15 @@ async function refreshRemoteDownloadChannels() {
 async function refreshRemoteLauncherNotice() {
   // 公告是运营的通知渠道，不跟着"必须先更新启动器"的网络锁一起禁掉：
   // 恰恰在有更新待装时，玩家更需要看到"维护公告/暂不开放下载"这类信息。
-  if (!isCrossingVoidActive.value) return;
+  if (!isGamePageActive.value) return;
   try {
     const notice = await fetchRemoteLauncherNotice();
     remoteLauncherNotice.value = notice;
-    showRemoteLauncherNotice.value = notice.enabled;
+    // 同一档的同一份公告只弹一次（重启启动器后重置），新公告（id 变了）照常弹。
+    const noticeKey = `${activeGameId.value}:${notice.id}`;
+    const shouldShow = notice.enabled && !shownLauncherNoticeKeys.has(noticeKey);
+    if (shouldShow) shownLauncherNoticeKeys.add(noticeKey);
+    showRemoteLauncherNotice.value = shouldShow;
   } catch (error) {
     console.warn("Unable to load remote launcher notice", error);
     remoteLauncherNotice.value = null;
@@ -2096,7 +2477,7 @@ async function refreshRemoteLauncherNotice() {
 
 
 async function refreshTrafficQuota() {
-  if (!isCrossingVoidActive.value || launcherNetworkLocked.value) return;
+  if (!isGamePageActive.value || launcherNetworkLocked.value) return;
   if (trafficQuotaPending.value) return;
   trafficQuotaPending.value = true;
   try {
@@ -2130,7 +2511,7 @@ async function refreshTrafficQuota() {
 }
 
 async function refreshGithubNetworkStatus() {
-  if (!isCrossingVoidActive.value || launcherNetworkLocked.value) return;
+  if (!isGamePageActive.value || launcherNetworkLocked.value) return;
   if (githubNetworkPending.value) return;
   githubNetworkPending.value = true;
   try {
@@ -2155,7 +2536,7 @@ async function resolveBackendDownloadUrl(version: string, runtime: string, objec
   const signPayload = await invoke<string>("post_remote_json", {
     url: `${officialUpdateApiUrl}/sign-download`,
     body: JSON.stringify({
-      productKey: officialProductKey,
+      productKey: officialProductKey(),
       version,
       runtime,
       objectKey,
@@ -2226,16 +2607,17 @@ async function fetchGamePackageManifest(): Promise<GamePackageManifest> {
   }
 
   // ② 备用源：GitHub Release 里同样放了一份 manifest.json —— 下载站挂了这个还能用。
-  if (githubEnabled) {
+  // 这一档没有配 GitHub 仓库时直接跳过，别拿零境的仓库去查别人的清单。
+  if (githubEnabled && githubGameRepository()) {
     try {
       const releases = await fetchRemoteJson<GitHubReleaseSummary[]>(
         withCacheBuster(githubGameReleasesUrl()),
       );
-      const picked = pickGitHubGameRelease(releases, { tagPrefix: "PC-V" });
+      const picked = pickGitHubGameRelease(releases, { tagPrefix: githubGameTagPrefix() });
       if (!picked) throw new GamePackageError("manifest-invalid", "GitHub 上没有找到本平台的游戏包。");
       const manifest = parseGamePackageManifest(
         await fetchRemoteJson<unknown>(
-          withCacheBuster(githubGameManifestUrl(GAME_PACKAGE_GITHUB_REPOSITORY, picked.tag)),
+          withCacheBuster(githubGameManifestUrl(githubGameRepository(), picked.tag)),
         ),
         expectation,
       );
@@ -2255,7 +2637,7 @@ async function fetchGamePackageManifest(): Promise<GamePackageManifest> {
 }
 
 function githubGameReleasesUrl() {
-  const repo = GAME_PACKAGE_GITHUB_REPOSITORY.trim().replace(/^\/+|\/+$/g, "");
+  const repo = githubGameRepository().trim().replace(/^\/+|\/+$/g, "");
   return `https://api.github.com/repos/${repo}/releases?per_page=10`;
 }
 
@@ -2342,7 +2724,7 @@ async function downloadGamePackageFiles() {
     // 注意 `gamePackage.ts` 是 PC/Android 逐字共用的内核，改不得：这里用
     // officialEnabled / githubEnabled 这两个入参把"另一个源"关掉。
     const githubReleaseBase = githubGameReleaseBaseUrl(
-      GAME_PACKAGE_GITHUB_REPOSITORY,
+      githubGameRepository(),
       activeGamePackageGithubTag.value || githubGameReleaseTag("PC", manifest.version),
     );
     const preferOfficial = downloadSource.value === "official";
@@ -2441,13 +2823,14 @@ async function finalizeGamePackageInstall() {
     const installReady = await invoke<boolean>("validate_game_install_state", {
       installPath: installPath.value,
       state: "ready",
+      game: gameIdentityPayload(),
     });
     if (!installReady) {
       throw new Error("游戏文件已就位，但安装校验没有通过。");
     }
 
     if (createDesktopShortcut.value) {
-      await invoke("create_game_desktop_shortcut_now", { installPath: installPath.value }).catch(
+      await invoke("create_game_desktop_shortcut_now", { installPath: installPath.value, game: gameIdentityPayload() }).catch(
         (error) => console.warn("Unable to create desktop shortcut", error),
       );
     }
@@ -2510,8 +2893,8 @@ async function fetchGameMetadataArchiveInfo(): Promise<DownloadArchiveInfo> {
 }
 
 async function fetchGameMetadataManifest(): Promise<UpdateManifestPayload> {
-  const separator = gameMetadataManifestUrl.includes("?") ? "&" : "?";
-  const payload = await fetchRemoteJson<unknown>(`${gameMetadataManifestUrl}${separator}t=${Date.now()}`);
+  const separator = legacyGameMetadataManifestUrl.includes("?") ? "&" : "?";
+  const payload = await fetchRemoteJson<unknown>(`${legacyGameMetadataManifestUrl}${separator}t=${Date.now()}`);
   return validateGameMetadataManifest(payload);
 }
 
@@ -2519,7 +2902,7 @@ function validateGameMetadataManifest(payload: unknown): UpdateManifestPayload {
   if (!payload || typeof payload !== "object") throw new Error("游戏更新清单格式无效。");
   const manifest = payload as Record<string, unknown>;
   if (manifest.schemaVersion !== 2) throw new Error("游戏更新清单版本不受支持，请更新启动器。");
-  if (manifest.productKey !== officialProductKey) throw new Error("游戏更新清单产品标识不正确。");
+  if (manifest.productKey !== officialProductKey()) throw new Error("游戏更新清单产品标识不正确。");
   if (typeof manifest.downloadReleaseTag !== "string" || !manifest.downloadReleaseTag.trim()) {
     throw new Error("游戏更新清单缺少 Github 下载标签。");
   }
@@ -2533,10 +2916,10 @@ async function resolveGameMetadataDownload(source: DownloadSourceKey): Promise<D
   const version = manifest.latest?.version || "";
   const rawChunks = asset.chunks ?? [];
   const chunks = source === "official"
-    ? await resolveBackendChunks(version, officialRuntime, rawChunks)
+    ? await resolveBackendChunks(version, officialRuntime(), rawChunks)
     : rawChunks.map((chunk) => ({
         ...chunk,
-        url: `https://github.com/${githubGameRepository}/releases/download/${encodeURIComponent(manifest.downloadReleaseTag)}/${encodeURIComponent(githubGameChunkAssetName({ ...chunk, fileName: chunk.githubFileName || chunk.fileName }))}`,
+        url: `https://github.com/${githubGameRepository()}/releases/download/${encodeURIComponent(manifest.downloadReleaseTag)}/${encodeURIComponent(githubGameChunkAssetName({ ...chunk, fileName: chunk.githubFileName || chunk.fileName }))}`,
       }));
   return {
     version,
@@ -2568,7 +2951,7 @@ async function updateAvailableInstallSpace() {
 async function readLocalGameVersion() {
   try {
     await invoke<boolean>("migrate_mislabeled_game_version", { installPath: installPath.value });
-    const payload = await invoke<string>("read_game_version_file", { installPath: installPath.value });
+    const payload = await invoke<string>("read_game_version_file", { installPath: installPath.value, game: gameIdentityPayload() });
     const info = JSON.parse(payload) as { version?: string };
     localGameVersion.value = info.version || "";
   } catch {
@@ -2634,7 +3017,7 @@ async function openLauncherLogFolder() {
 
 async function openGameLogFolder() {
   try {
-    await invoke("open_game_log_folder");
+    await invoke("open_game_log_folder", { game: gameIdentityPayload() });
   } catch (error) {
     console.warn("Unable to open game log folder", error);
     showCheckResult(`打开游戏日志失败：${formatUnknownError(error)}`);
@@ -2775,7 +3158,7 @@ function showCheckResult(message: string) {
 
 async function refreshGameRunningState() {
   try {
-    const running = await invoke<boolean>("is_game_running", { installPath: installPath.value });
+    const running = await invoke<boolean>("is_game_running", { installPath: installPath.value, game: gameIdentityPayload() });
     gameRunning.value = running;
     gameRunningCheckFailures = 0;
     return running;
@@ -2857,6 +3240,7 @@ async function hasRepairableGameManifest() {
     return await invoke<boolean>("validate_game_install_state", {
       installPath: installPath.value,
       state: "repairable",
+      game: gameIdentityPayload(),
     });
   } catch (error) {
     console.warn("Unable to check repairable game manifest", error);
@@ -2890,12 +3274,26 @@ async function markUnavailableInstalledGame() {
 }
 
 async function checkGameVersion(options: { manual?: boolean } = {}) {
-  if (!isCrossingVoidActive.value || offlineMode.value || launcherState.value !== "ready" || versionCheckPending.value) return;
+  if (!isGamePageActive.value || offlineMode.value || launcherState.value !== "ready" || versionCheckPending.value) return;
 
+  const gameIdAtStart = activeGameId.value;
   versionCheckPending.value = true;
   updateAvailable.value = false;
   try {
-    const [localVersion, archive] = await Promise.all([readLocalGameVersion(), fetchGameMetadataArchiveInfo()]);
+    // 接了下载站的档位就按它自己的清单算版本；只有还没接入的档位才回退到 www 那套旧 v2 清单
+    // （2026-09-20 的改造方案里写死了"不要再读 www 的 manifests/game/*"）。
+    const packageConfig = currentGamePackageConfig();
+    const [localVersion, archive] = await Promise.all([
+      readLocalGameVersion(),
+      packageConfig
+        ? fetchGamePackageManifest().then((manifest) => ({
+            version: manifest.version,
+            sizeBytes: manifest.files.reduce((sum, entry) => sum + entry.sizeBytes, 0),
+          }))
+        : fetchGameMetadataArchiveInfo(),
+    ]);
+    // 检测期间玩家切了档：这份结果是上一档的，直接丢掉，别写到当前档的界面上。
+    if (activeGameId.value !== gameIdAtStart) return;
     remoteGameVersion.value = archive.version || "";
     remoteArchiveBytes.value = archive.sizeBytes || remoteArchiveBytes.value;
     updateAvailable.value =
@@ -2939,7 +3337,7 @@ async function openLocalGameFiles() {
  * 返回 true = 可以继续启动；false = 玩家取消或没清干净。
  */
 async function resolveRunningGameBeforeLaunch() {
-  const processes = await invoke<GameProcessInfo[]>("list_game_processes", { installPath: installPath.value })
+  const processes = await invoke<GameProcessInfo[]>("list_game_processes", { installPath: installPath.value, game: gameIdentityPayload() })
     .catch((error) => {
       console.warn("Unable to list game processes", error);
       return [] as GameProcessInfo[];
@@ -2953,7 +3351,7 @@ async function resolveRunningGameBeforeLaunch() {
   if (!confirmed) return false;
 
   try {
-    const stopped = await invoke<number>("stop_game_processes", { installPath: installPath.value });
+    const stopped = await invoke<number>("stop_game_processes", { installPath: installPath.value, game: gameIdentityPayload() });
     showCheckResult(stopped > 0 ? `已强制结束 ${stopped} 个游戏进程。` : "没有找到可以结束的游戏进程。");
   } catch (error) {
     console.warn("Unable to stop game processes", error);
@@ -2988,6 +3386,7 @@ async function launchInstalledGame() {
       installPath: installPath.value,
       useDx11: useDx11.value,
       exitLauncher: hideAfterGameLaunch.value,
+      game: gameIdentityPayload(),
     });
     gameRunning.value = true;
     if (result.alreadyRunning) {
@@ -3014,6 +3413,7 @@ async function ensureInstalledGameExistsBeforeLaunch() {
     const installReady = await invoke<boolean>("validate_game_install_state", {
       installPath: installPath.value,
       state: "ready",
+      game: gameIdentityPayload(),
     });
     if (installReady) return true;
   } catch (error) {
@@ -3075,6 +3475,12 @@ async function ensureDownloadProgressListener() {
   if (downloadProgressUnlisten) return;
 
   downloadProgressUnlisten = await listen<DownloadProgressEvent>("game-download-progress", (event) => {
+    // 事件按安装目录归属：正在跑的是别的档位时，写进它的快照，当前页面一动不动。
+    const eventGameId = gameIdForInstallPath(event.payload.installPath);
+    if (eventGameId && eventGameId !== activeGameId.value) {
+      patchSnapshotProgress(eventGameId, event.payload);
+      return;
+    }
     const importingFragments = gameChunkImportPending.value;
     if (!importingFragments && launcherState.value !== "downloading" && launcherState.value !== "repairing") return;
     const payload = event.payload;
@@ -3122,6 +3528,12 @@ async function ensureDownloadProgressListener() {
       const payload = event.payload;
       const checked = Math.max(0, payload.checkedFiles || 0);
       const total = Math.max(0, payload.totalFiles || 0);
+      const eventGameId = gameIdForInstallPath(payload.installPath);
+      if (eventGameId && eventGameId !== activeGameId.value) {
+        const snapshot = gameRuntimeSnapshots.get(eventGameId);
+        if (snapshot) snapshot.gamePackageScanProgress = { checked, total };
+        return;
+      }
       gamePackageScanProgress.value = { checked, total };
       // 安装前那次全量校验也走这条心跳：把它当成安装进度条（90% 之后那一段）。
       if (launcherState.value === "installing") {
@@ -3144,6 +3556,12 @@ async function ensureDownloadProgressListener() {
 
   // 「现在在干什么」：下载中 / 校验文件。用来把收尾算 sha256 时那句"网络不佳"换掉。
   packagePhaseUnlisten = await listen<GamePackagePhaseEvent>("game-package-phase", (event) => {
+    const eventGameId = gameIdForInstallPath(event.payload.installPath);
+    if (eventGameId && eventGameId !== activeGameId.value) {
+      const snapshot = gameRuntimeSnapshots.get(eventGameId);
+      if (snapshot) snapshot.gamePackagePhase = event.payload.phase || "";
+      return;
+    }
     gamePackagePhase.value = event.payload.phase || "";
   });
 }
@@ -3352,6 +3770,7 @@ async function installDownloadedGameArchive() {
     const installReady = await invoke<boolean>("validate_game_install_state", {
       installPath: installPath.value,
       state: "ready",
+      game: gameIdentityPayload(),
     });
     if (!installReady) {
       throw new Error("Game install finished but ready marker was not found.");
@@ -3506,7 +3925,7 @@ async function waitForGameDownloadToStop() {
 async function stopActiveDownloadBeforeChunkImport() {
   if (!gameDownloadActive.value) return;
   downloadPauseRequested.value = true;
-  await invoke("pause_game_download");
+  await invoke("pause_game_download", { installPath: installPath.value });
   await waitForGameDownloadToStop();
 }
 
@@ -3516,7 +3935,7 @@ async function pauseGameDownload() {
   launcherState.value = "paused";
   persistDownloadState("paused", "immediate");
   try {
-    await invoke("pause_game_download");
+    await invoke("pause_game_download", { installPath: installPath.value });
   } catch (error) {
     downloadPauseRequested.value = false;
     launcherState.value = "downloading";
@@ -3538,7 +3957,7 @@ async function pauseRepairDownload() {
   if (!canPauseRepairDownload.value) return;
   repairDownloadPauseRequested.value = true;
   try {
-    await invoke("cancel_game_operation");
+    await invoke("cancel_game_operation", { installPath: installPath.value });
   } catch (error) {
     repairDownloadPauseRequested.value = false;
     console.warn("Unable to pause repair download", error);
@@ -3550,7 +3969,7 @@ async function cancelCurrentGameOperation() {
   if (!canCancelCurrentGameOperation.value) return;
   gameOperationCancelRequested.value = true;
   try {
-    await invoke("cancel_game_operation");
+    await invoke("cancel_game_operation", { installPath: installPath.value });
   } catch (error) {
     gameOperationCancelRequested.value = false;
     console.warn("Unable to cancel game operation", error);
@@ -3570,7 +3989,7 @@ async function cancelGameDownload() {
   downloadCancelPending.value = true;
   downloadPauseRequested.value = true;
   try {
-    await invoke("pause_game_download");
+    await invoke("pause_game_download", { installPath: installPath.value });
     await waitForGameDownloadToStop();
     await invoke("clear_game_download_artifacts", { installPath: installPath.value });
     await clearPersistedDownloadStateForPath(installPath.value);
@@ -3647,7 +4066,7 @@ async function chooseInstallPath() {
 
     selectedInstallBasePath.value = selected;
     if (installDialogMode.value === "install") {
-      installPath.value = buildGameInstallPath(selected);
+      installPath.value = buildGameInstallPath(selected, gameDirectoryName.value);
     }
     persistDownloadState(currentPersistableState(), "immediate");
     return true;
@@ -3671,7 +4090,7 @@ async function relocateInstalledGame() {
     if (typeof selected !== "string") return false;
 
     const selectedPath = selected.replace(/[\\/]$/, "");
-    const nextPath = await invoke<string | null>("find_game_installation", { rootPath: selectedPath });
+    const nextPath = await invoke<string | null>("find_game_installation", { rootPath: selectedPath, game: gameIdentityPayload() });
     if (!nextPath) {
       showCheckResult("重新定位失败：未在所选文件夹中找到完整游戏。");
       return false;
@@ -3679,7 +4098,7 @@ async function relocateInstalledGame() {
 
     const previousPath = installPath.value;
     installPath.value = nextPath;
-    selectedInstallBasePath.value = inferGameStorageRoot(nextPath);
+    selectedInstallBasePath.value = inferGameStorageRoot(nextPath, gameDirectoryName.value);
     downloadedBytes.value = 0;
     downloadedMb.value = 0;
     activeDownloadBytes.value = null;
@@ -3708,7 +4127,7 @@ async function migrateInstalledGame() {
   if (gameMigrationPending.value || gameRunning.value || gameSettingsDisabled.value) return;
 
   installDialogMode.value = "migration";
-  selectedInstallBasePath.value = inferGameStorageRoot(installPath.value);
+  selectedInstallBasePath.value = inferGameStorageRoot(installPath.value, gameDirectoryName.value);
   showInstallConfirm.value = true;
 }
 
@@ -3729,7 +4148,7 @@ async function confirmGameMigration() {
       destinationBasePath: selectedInstallBasePath.value.replace(/[\\/]$/, ""),
     });
     installPath.value = nextPath;
-    selectedInstallBasePath.value = inferGameStorageRoot(nextPath);
+    selectedInstallBasePath.value = inferGameStorageRoot(nextPath, gameDirectoryName.value);
     await clearPersistedDownloadStateForPath(previousPath);
     persistDownloadState("ready", "immediate");
     await readLocalGameVersion();
@@ -4013,6 +4432,7 @@ async function verifyGameIntegrity() {
       const installReady = await invoke<boolean>("validate_game_install_state", {
         installPath: installPath.value,
         state: "ready",
+        game: gameIdentityPayload(),
       });
       if (!installReady) {
         await markInstalledGameRepairRequired("检测到部分游戏文件缺失，请使用修复文件补齐。");
@@ -4049,6 +4469,7 @@ async function verifyGameIntegrity() {
     const installReady = await invoke<boolean>("validate_game_install_state", {
       installPath: installPath.value,
       state: "ready",
+      game: gameIdentityPayload(),
     }).catch(() => false);
     if (!installReady) {
       await markFullGameDownloadRequired("无法读取游戏清单，已切换为重新下载游戏。");
@@ -4436,7 +4857,7 @@ provide(settingsContextKey, settingsContext);
         <strong v-else class="brand-placeholder">{{ activeGame.name }}</strong>
       </section>
 
-      <nav v-if="isCrossingVoidActive && !gameOverviewVisible" class="quick-links" :aria-label="t('nav.quickLinks')">
+      <nav v-if="hasOnSetContent && !gameOverviewVisible" class="quick-links" :aria-label="t('nav.quickLinks')">
         <button
           v-for="item in quickLinks"
           :key="item.key"
@@ -4461,7 +4882,7 @@ provide(settingsContextKey, settingsContext);
       </nav>
 
       <Transition name="traffic-warning">
-        <div v-if="isCrossingVoidActive && !gameOverviewVisible && showDownloadWarning" class="traffic-warning" role="status">
+        <div v-if="isGamePageActive && !gameOverviewVisible && showDownloadWarning" class="traffic-warning" role="status">
           <CircleAlert :size="18" stroke-width="2.8" />
           <span>{{ downloadChannelWarningText || (showOfficialTrafficWarning ? t("traffic.low") : githubNetworkWarningText) }}</span>
         </div>
@@ -4469,7 +4890,7 @@ provide(settingsContextKey, settingsContext);
 
       <section class="window-actions">
         <button
-          v-if="isCrossingVoidActive && !gameOverviewVisible"
+          v-if="isGamePageActive && !gameOverviewVisible"
           class="source-pill"
           type="button"
           @click="showSettings = true; activeSettingsTab = 'download'"
@@ -4498,6 +4919,7 @@ provide(settingsContextKey, settingsContext);
       :games="platformGames"
       :active-id="activeGameId"
       :overview-active="gameOverviewVisible"
+      :download-percents="gameDownloadPercents"
       @select="selectPlatformGame"
       @overview="openPlatformGameOverview"
     />
@@ -4510,12 +4932,12 @@ provide(settingsContextKey, settingsContext);
     />
 
     <PlatformPlaceholderPage
-      v-else-if="!isCrossingVoidActive"
+      v-else-if="!isGamePageActive"
       :name="activeGame.name"
       :label="activeGame.shortLabel"
     />
 
-    <section v-if="isCrossingVoidActive && !gameOverviewVisible" class="left-stack" :class="{ collapsed: leftCollapsed }">
+    <section v-if="hasOnSetContent && !gameOverviewVisible" class="left-stack" :class="{ collapsed: leftCollapsed }">
       <article class="promo-panel" :class="{ video: activeNewsTab === 'video' }">
         <div class="tab-row">
           <button
@@ -4637,13 +5059,13 @@ provide(settingsContextKey, settingsContext);
       </article>
     </section>
 
-    <section v-if="isCrossingVoidActive && !gameOverviewVisible" class="right-launcher">
+    <section v-if="isGamePageActive && !gameOverviewVisible" class="right-launcher">
       <section class="hero-copy" :class="{ raised: showDownloadProgress }">
-        <h2>{{ t("brand.title") }}</h2>
+        <h2>{{ hasOnSetContent ? t("brand.title") : activeGame.name }}</h2>
         <div class="collab-line">
-          <span>Crossing Void</span>
+          <span>{{ hasOnSetContent ? "Crossing Void" : activeGame.englishName }}</span>
           <i></i>
-          <span>illusion Dreamland</span>
+          <span>{{ hasOnSetContent ? "illusion Dreamland" : activeGame.name }}</span>
         </div>
       </section>
 
@@ -4777,7 +5199,7 @@ provide(settingsContextKey, settingsContext);
     </section>
 
     <button
-      v-if="isCrossingVoidActive && !gameOverviewVisible"
+      v-if="hasOnSetContent && !gameOverviewVisible"
       class="side-handle"
       :class="{ collapsed: leftCollapsed }"
       type="button"
@@ -4787,7 +5209,7 @@ provide(settingsContextKey, settingsContext);
       <ChevronLeft :size="30" stroke-width="3.2" />
     </button>
 
-    <section v-if="isCrossingVoidActive && !gameOverviewVisible" class="version-corner" aria-label="version info">
+    <section v-if="isGamePageActive && !gameOverviewVisible" class="version-corner" aria-label="version info">
       <span>{{ t("settings.gameVersion") }}：{{ displayedGameVersion }}</span>
       <span>{{ t("settings.launcherVersion") }}：{{ launcherVersion }}</span>
     </section>

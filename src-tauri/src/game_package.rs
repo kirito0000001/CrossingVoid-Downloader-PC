@@ -25,7 +25,12 @@ use crate::{
 
 const DEFAULT_CONCURRENCY: usize = 4;
 const MAX_CONCURRENCY: usize = 6;
-const STATE_FILE_NAME: &str = "CrossingVoid.manifest.json";
+/// 本地游戏包状态文件名（内容与清单 `files[]` 同形）。
+///
+/// 零境老安装用的是 `CrossingVoid.manifest.json`；新档位（火影等）统一用下面这个中性名字。
+/// 读取时**优先认老名字**，所以已经装好的机器不会因为改名而"变成没装过"。
+const STATE_FILE_NAME: &str = "launcher.game.json";
+const LEGACY_STATE_FILE_NAME: &str = "CrossingVoid.manifest.json";
 const PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(150);
 const READ_BUFFER_BYTES: usize = 1024 * 256;
 
@@ -145,7 +150,7 @@ fn is_protected_path(relative: &Path) -> bool {
     if PROTECTED_TOP_LEVEL.iter().any(|item| name == *item) {
         return true;
     }
-    name == STATE_FILE_NAME.to_ascii_lowercase()
+    name == STATE_FILE_NAME.to_ascii_lowercase() || name == LEGACY_STATE_FILE_NAME.to_ascii_lowercase()
 }
 
 // ---------------------------------------------------------------------------
@@ -229,8 +234,18 @@ where
     Ok(found)
 }
 
-fn state_path(install_dir: &Path) -> PathBuf {
+/// 状态文件路径：老名字存在就继续用老名字，否则用新名字。
+pub fn state_path(install_dir: &Path) -> PathBuf {
+    let legacy = install_dir.join(LEGACY_STATE_FILE_NAME);
+    if legacy.is_file() {
+        return legacy;
+    }
     install_dir.join(STATE_FILE_NAME)
+}
+
+/// 两个名字里任意一个在，就算"有状态文件"。
+pub fn state_file_exists(install_dir: &Path) -> bool {
+    install_dir.join(STATE_FILE_NAME).is_file() || install_dir.join(LEGACY_STATE_FILE_NAME).is_file()
 }
 
 /// 读本地状态文件；不存在返回 `None`。
@@ -269,7 +284,7 @@ pub fn write_state(
     let text = serde_json::to_string_pretty(&state)
         .map_err(|error| format!("Unable to serialize game package state: {}", error))?;
     let target = state_path(install_dir);
-    let temporary = install_dir.join(format!("{STATE_FILE_NAME}.tmp"));
+    let temporary = target.with_extension("json.tmp");
     fs::write(&temporary, format!("{text}\n"))
         .map_err(|error| format!("Unable to write {}: {}", temporary.display(), error))?;
     replace_file_atomic(&temporary, &target)
@@ -731,7 +746,11 @@ where
         on_phase: Arc::clone(&on_phase),
     });
 
+    // 并发 worker 是各自的线程：每个 worker 进来时把自己标成"在为这个安装目录干活"，
+    // 里面的取消检查才会查这一档的标志（见 download_task 模块）。
+    let task_path = install_dir.to_string_lossy().to_string();
     run_parallel(validated, concurrency, move |entry| {
+        crate::download_task::begin(&task_path);
         download_one_file(&context, entry)
     })?;
 
@@ -753,15 +772,17 @@ pub async fn scan_local_game_package(
 ) -> Result<Vec<GamePackageFile>, String> {
     // 取消标志是进程级的：上一轮"暂停"留下的 true 必须先清掉，
     // 否则这次核对会在第一条就中止（见 lib.rs 的 reset_download_cancelled）。
-    crate::reset_download_cancelled();
+    crate::download_task::begin(&install_path);
     tauri::async_runtime::spawn_blocking(move || {
         let progress_app = app.clone();
+        let progress_install_path = install_path.clone();
         scan_local_files(
             Path::new(&install_path),
             &files,
             move |checked, total, matched_files, matched_bytes| {
                 crate::emit_game_package_scan_progress(
                     &progress_app,
+                    &progress_install_path,
                     checked,
                     total,
                     matched_files,
@@ -786,10 +807,12 @@ pub async fn download_game_package(
     // 上一轮暂停留下的 true 会让本次下载在第一个 check_download_cancelled 上立刻退出，
     // 而前端把 DOWNLOAD_CANCELLED 当"用户主动暂停"，于是静默回到已暂停 ——
     // 现场就是"点继续下载没反应"。v1 的四条命令入口都有这一句，逐文件链路以前漏了。
-    crate::reset_download_cancelled();
+    crate::download_task::begin(&install_path);
     tauri::async_runtime::spawn_blocking(move || {
         let progress_app = app.clone();
         let phase_app = app.clone();
+        let progress_install_path = install_path.clone();
+        let phase_install_path = install_path.clone();
         download_files(
             Path::new(&install_path),
             &base_url,
@@ -798,13 +821,14 @@ pub async fn download_game_package(
             move |downloaded, total, done_files, total_files| {
                 emit_game_package_progress(
                     &progress_app,
+                    &progress_install_path,
                     downloaded,
                     total,
                     done_files,
                     total_files,
                 )
             },
-            move |phase| crate::emit_game_package_phase(&phase_app, phase),
+            move |phase| crate::emit_game_package_phase(&phase_app, &phase_install_path, phase),
         )
     })
     .await
@@ -1250,9 +1274,10 @@ pub async fn import_game_package_files(
 ) -> Result<GamePackageImportSummary, String> {
     // 和下载一样：取消标志是进程级的，上一轮"暂停"留下的 true 会让这次导入
     // 在第一条上立刻退出（前端还会把它当"用户主动取消"，静默无反应）。
-    crate::reset_download_cancelled();
+    crate::download_task::begin(&install_path);
     tauri::async_runtime::spawn_blocking(move || {
         let progress_app = app.clone();
+        let progress_install_path = install_path.clone();
         import_package_files(
             Path::new(&install_path),
             &files,
@@ -1260,6 +1285,7 @@ pub async fn import_game_package_files(
             move |copied, total, done_files, total_files| {
                 crate::emit_game_package_progress(
                     &progress_app,
+                    &progress_install_path,
                     copied,
                     total,
                     done_files,

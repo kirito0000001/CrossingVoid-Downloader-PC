@@ -1,4 +1,13 @@
 export const LANGUAGE_STORAGE_KEY = "crossing-void.launcher.language";
+
+/**
+ * 下载/安装状态按**游戏**分开存：一档游戏一份，切档时互不覆盖。
+ * 零境这一档的 id 就是 `crossing-void`，所以老键名原样命中，老玩家无感迁移。
+ */
+export function downloadStateStorageKey(gameId: string) {
+  return `${gameId}.launcher.download-state`;
+}
+
 export const DOWNLOAD_STATE_STORAGE_KEY = "crossing-void.launcher.download-state";
 export const DOWNLOAD_SOURCE_STORAGE_KEY = "crossing-void.launcher.download-source";
 export const OFFLINE_MODE_STORAGE_KEY = "crossing-void.launcher.offline-mode";

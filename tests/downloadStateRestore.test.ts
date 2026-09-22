@@ -53,7 +53,7 @@ describe("launcher download state restoration", () => {
 
     const native = readFileSync(resolve(process.cwd(), "src-tauri/src/lib.rs"), "utf8");
     const nativeValidation = native.match(
-      /fn validate_install_state\(install_path: &str, state: &str\)[\s\S]*?\n\}/,
+      /fn validate_install_state_with\(\n?\s*install_path: &str,\n?\s*state: &str,[\s\S]*?\n\}/,
     )?.[0];
 
     expect(nativeValidation).toBeTruthy();

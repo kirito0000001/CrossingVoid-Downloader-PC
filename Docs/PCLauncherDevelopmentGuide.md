@@ -1006,3 +1006,163 @@ cargo test --manifest-path src-tauri\Cargo.toml
 - PC/Android 的 Gitee 发布仓库已经拆分，禁止重新合并。
 
 这些值会随发布变化。接手时应以本机开发版本、Gitee 最新清单、服务器产品清单和实际 Release 为准，不要仅凭本文中的快照决定发布版本。
+
+## 29. 多档游戏接入（已接第二档：火影忍者手游 BP 模拟器）
+
+启动器从"只有零境"改成了**按档位配置驱动**：一档游戏 = `src/platform/gameCatalog.ts` 里的一个条目，
+条目里分成三块，缺一块就接不完整。
+
+### 29.1 条目里的三块
+
+| 块 | 管什么 | 典型字段 |
+| --- | --- | --- |
+| 品牌位 | 侧栏图标、品牌 logo、开机动画 logo、背景图、主题色 | `iconSrc` / `brandLogoSrc` / `bootLogoSrc` / `backgroundSrc` / `themeAccent` / `shortLabel` |
+| `gamePackage` | **下载站契约**：产品段、产品键、平台、版本标记文件 | `productSegment` / `productKey` / `runtime` / `versionMarker` |
+| `runtime` | **本机运行参数**：装哪儿、启动谁、怎么认它在跑 | `installDirectoryName` / `executable` / `projectName` / `processNames` / `github` / `content` |
+
+`implemented: true` + `runtime != null` 才会渲染完整页面；只填品牌位的话仍然是「页面资源尚未接入」占位页。
+
+### 29.2 前端 → Rust 怎么传
+
+Rust 侧新增了 `GameIdentity`（`src-tauri/src/lib.rs`），字段**全部可选**，缺省即零境那一套
+（`CrossingVoid.exe` / `CrossingVoid` / `CrossingVoid.version.json` / 两个进程名）。
+`App.vue` 的 `gameIdentityPayload()` 把当前档位的 `runtime` 打包成它，挂在
+`validate_game_install_state` / `read_game_version_file` / `is_game_running` / `list_game_processes` /
+`stop_game_processes` / `launch_game` / `create_game_desktop_shortcut_now` / `find_game_installation` /
+`open_game_log_folder` 这些命令的 `game` 参数上。
+
+所以**加一档游戏不用再改 Rust 签名**：填 `gameCatalog` 的 `runtime` 就够了。开发页脚本、旧调用方
+不传 `game` 时行为与以前完全一致。
+
+### 29.3 切档 = 原地换状态（不重载窗口）
+
+安装目录、下载状态、存档都按档位分开：
+
+- 下载状态 localStorage 键：`downloadStateStorageKey(gameId)` = `<gameId>.launcher.download-state`。
+  零境的 gameId 就是 `crossing-void`，**老键名原样命中**，老玩家无感。
+- `selectPlatformGame()` → `applyGameScopedState(gameId)`：读这一档的存档，把安装目录、下载进度、
+  阶段、版本、运行状态这些**跟档位绑定**的 ref 全铺一遍；随后 `refreshActiveGamePage()` 只重查
+  这一档的本地安装 / 版本 / 运行状态。下载或修复中切换会先弹确认。
+
+**为什么不重载窗口**：界面文案、公告、渠道开关、流量额度、OnSet 内容这些和档位无关的东西
+启动时就加载好了，重载等于把 WebView 整个重来一遍（连开机动画都再放一次）——用户 2026-09-22
+报的就是这个（「最初加载的时候资源就都加载好了，怎么切换游戏还要加载一遍」）。
+代价是**这个函数必须保持完整**：以后新增任何跟档位绑定的状态都要补进去，漏一个就会串档，
+守卫是 `tests/gameRuntimeState.test.ts`。
+
+### 29.4 切档不打断下载：每档自己记进度
+
+玩家切到别的档位去逛时，**下载任务不停**（Rust 侧的任务本来就与界面无关），前端这边：
+
+- 切走前 `captureGameRuntime(activeGameId)` 把当前档位的运行时快照（进度、阶段、清单、差异计划、
+  预计剩余…）存进 `gameRuntimeSnapshots`；切回来 `applyGameScopedState()` 叠回界面。
+- 三条进度事件（`game-download-progress` / `game-package-scan-progress` / `game-package-phase`）
+  **都带 `installPath`**，前端用 `gameIdForInstallPath()` 归位：属于当前档位的写 ref，
+  属于别的档位的写进那份快照。
+
+第二点是硬要求，不是优化：没有归属判断时，切走之后事件照旧写"当前 ref"并 `persistDownloadState`，
+会把 A 的字节数写进 B 的 localStorage 存档里（串档）。
+
+**暂停是按任务的**（2026-09-22 完成）：取消标志从"进程级一个"改成
+`src-tauri/src/download_task.rs` 里的 `安装目录 → 独立标志` 注册表，
+`pause_game_download(install_path)` / `cancel_game_operation(install_path)` 只停对应那一档。
+
+取消检查散在下载 / 校验 / 解压 / 导入十几个函数里，逐层传 token 要改十几处签名，
+所以用**线程局部**记录"本线程在给哪个安装目录干活"：任务入口（`spawn_blocking` 闭包、
+`run_parallel` 的每个 worker 闭包）调 `download_task::begin(path)` 进作用域，
+`check_download_cancelled()` 照着查表。**没进过作用域的线程退回原来的进程级标志**，
+所以旧链路（没有 v1 清单的档位）行为不变，属于渐进迁移。
+`begin()` 同时承担原来 `reset_download_cancelled()` 的职责（清掉上一轮暂停留下的标志）。
+
+侧面进度：`gameDownloadPercents` 把"正在下载的档位 → 百分比"算出来交给侧栏，
+在图标底部压一条进度条 —— 切到别的游戏去逛时也能看出哪一档在下、到哪了。
+
+### 29.5 本地游戏包状态文件改名
+
+`src-tauri/src/game_package.rs`：
+
+- 老名字 `CrossingVoid.manifest.json`（零境已装机器）**继续沿用**；
+- 新档位写中性的 `launcher.game.json`；
+- 读取路径 `state_path()` 优先认老名字，裁剪保护 `is_protected_path()` 两个名字都保护。
+
+### 29.6 页面内容（角色/快讯/视频/快捷链接）
+
+这一整块目前只有零境那套 OnSet 资源，靠 `runtime.content === "onSet"` 单独控制，
+**不再和"这一档接没接入"共用同一个判断**（以前是一个 `isCrossingVoidActive` 管两件事，
+接第二档就会串）。火影现在是 `content: null`：只渲染背景 + 标题栏 + 右侧下载/启动区 + 版本角标，
+等它有自己的人物/公告/视频资源再切到 `"onSet"` 并给它一份对应清单。
+
+### 29.7 火影这一档现在的取值（**待用户确认**）
+
+| 项 | 当前值 |
+| --- | --- |
+| 下载站产品段 / 产品键 | `naruto-bp` / `naruto-bp-game`（→ `dl.crossingvoid.top/games/naruto-bp/latest.json`） |
+| 安装目录 | `D:\TFAC-hz64\NarutoBP` |
+| 主程序 | `NarutoBP.exe` |
+| 虚幻工程名（日志） | `NarutoBP` |
+| 版本标记文件 | `NarutoBP.version.json` |
+| 进程名 | `NarutoBP.exe`、`NarutoBP-Win64-Shipping.exe` |
+| GitHub 备用源 | 无（`github: null`，所以只走下载站） |
+
+打包好的游戏还没上传，所以这几项是按零境那套**形状**先填的默认值：
+上传时按这个结构出包（文件相对安装目录、`files[].path` 直接拼、带 `NarutoBP.version.json`）就能直接用；
+真实的主程序名/目录名不一致，改 `gameCatalog.ts` 里那一个条目即可。
+
+### 29.8 还没做的部分
+
+- **开发页的「发布游戏包」**默认仍是零境：路径 `D:\TFAC-hz64\CrossingVoid`、标题「零境交错：空界幻境更新包」，
+  Rust 侧调的还是零境那套打包脚本。要发布火影包，这一块得按档位传参（或先手动发布）。
+- **安卓端**：火影只在 PC 启动器里接了；安卓那边仍是零境单档。
+- **全部游戏页的下载角标**：侧栏已经有了（图标底部进度条 + 悬浮提示），
+  全部游戏页的大卡片上还没有。
+
+### 29.9 开发页按档位分开（2026-09-22）
+
+开发页整页跟着当前档位走：**公告、下载渠道开关、以及页面上那些填写项**都各存一份、各发一份。
+
+| 环节 | 按档位之后 |
+| --- | --- |
+| 远端文件 | 公告 `https://www.crossingvoid.top/notices/<档位>.json`；渠道开关 `.../channels/<档位>.json` |
+| 发布命令 | `dev_publish_remote_notice(gameId, …)` / `dev_publish_download_channels(gameId, …)`（Rust 按 `dev_publish_remote_paths()` 决定写哪几个远端路径） |
+| 启动器读取 | `launcherNoticeUrl()` / `downloadChannelsUrl()`（在 `src/remoteLauncherInfo.ts`，契约版本抬到 2）；读不到分档文件时**回退老文件**，迁移期两边的状态都能用 |
+| 开发页填写项 | `devGameKey(base)` 给 localStorage 键加档位后缀：公告草稿、游戏包标题/版本、PC/Android 打包目录、启动器包路径各存各的 |
+
+**零境额外写一份老路径**（`launcher-notice.json` / `launcher-download-channels.json`）：
+安卓启动器只认老文件，而安卓已经定了不做成平台，所以由 PC 这边兼容着；PC 自己读分档文件、
+读不到再回退。发布脚本不用改 —— 两个脚本本来就接受 `-RemoteNoticePath` / `-RemoteChannelsPath`。
+
+注意 `src/remoteLauncherInfo.ts` 原来是 PC / Android **逐字共用**的（两边各有一条 sha256 守卫）。
+这次只改了 PC 这一份、并把 PC 的哈希常量更新成了新值；Android 那份保持 v1 的老地址
+（正好被上面的"零境双写"照顾到）。
+
+### 29.10 切档弹公告：同一份只弹一次，重启重置
+
+公告既然按档位了，切档就要把这一档的公告取回来 —— `refreshActiveGamePage()` 里会调
+`refreshRemoteLauncherNotice()`，而 `refreshRemoteLauncherNotice()` 用
+`shownLauncherNoticeKeys`（**只在内存里的 Set**，键是 `<档位>:<公告 id>`）决定弹不弹：
+
+- 同一档的同一份公告只弹一次；关掉之后再切回来不弹。
+- 换了一份新公告（`id` 变了）会重新弹 —— 不然运营发的第二条公告玩家永远看不到。
+- 重启启动器就重置（Set 是内存态，**不落盘**；落盘就变成"永远不再弹"）。
+
+渠道开关同样按档位，所以切档时 `refreshRemoteDownloadChannels()` 也要重拉；
+启动器级的流量额度、启动器更新则仍然只在启动时拉一次。
+
+### 29.11 分档公告踩过的坑（2026-09-22）
+
+**现象**：在火影页写公告、点发布，开发页刷新后又显示成零境那份。
+
+**根因是两条叠在一起**：
+
+1. **发布脚本没给新子目录设权限**。两个 `Scripts/Publish-Launcher*.ps1` 只从
+   `$targetDir\index.html` 抄 ACL，而 `notices\` / `channels\` 里没有 `index.html`
+   → 目录只有 Administrator 的私有 ACL → IIS 匿名读返回 **401**。
+   文件其实**上传成功了**（服务器上确实有 `notices\naruto-bp.json`）。
+   修法：ACL 模板退到上级目录去找，并且无论如何都补一次
+   `icacls $targetDir /grant IIS_IUSRS:(OI)(CI)(RX) IUSR:(OI)(CI)(RX)`。
+2. **前端的回退太宽**。`fetchPerGameRemoteDocument()` 原来对**任何**错误都回退到老文件，
+   于是 401 被当成"这一档没有公告"，直接把零境那份拿回来显示、还覆盖了开发页的输入框。
+   修法：**只有零境**（有老文件这回事）才回退，别的档位原样抛错。
+
+**排查口诀**：公告/开关"发出去没生效"时，先 `curl` 那份分档文件看状态码 ——
+`401` 是权限（本坑）、`404` 是没传上去、`200` 但内容是别人的就是回退逻辑出错。

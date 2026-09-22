@@ -10,10 +10,21 @@
  * 两个仓库各有一条哈希守卫测试；改这里时两边一起改、一起更新哈希。
  */
 
-export const REMOTE_LAUNCHER_INFO_CORE_VERSION = "1";
+export const REMOTE_LAUNCHER_INFO_CORE_VERSION = "2";
 
 /** 远程公告：开发页发布 → 玩家侧弹窗 + 公告板。 */
 export const LAUNCHER_NOTICE_URL = "https://www.crossingvoid.top/launcher-notice.json";
+
+/**
+ * 分档位的公告地址：`https://www.crossingvoid.top/notices/<档位 id>.json`。
+ *
+ * 传空档位时退回上面的老地址（零境与安卓的迁移期都靠它）。
+ * 开发页按档位发布，启动器按当前档位读，两边靠这个函数对齐。
+ */
+export function launcherNoticeUrl(gameId?: string | null) {
+  const id = (gameId ?? "").trim();
+  return id ? `https://www.crossingvoid.top/notices/${id}.json` : LAUNCHER_NOTICE_URL;
+}
 
 /**
  * 远程下载渠道开关。
@@ -23,6 +34,12 @@ export const LAUNCHER_NOTICE_URL = "https://www.crossingvoid.top/launcher-notice
  * 保证旧文档与旧启动器都能正常跑。
  */
 export const DOWNLOAD_CHANNELS_URL = "https://www.crossingvoid.top/launcher-download-channels.json";
+
+/** 分档位的下载渠道开关地址；空档位退回老地址。 */
+export function downloadChannelsUrl(gameId?: string | null) {
+  const id = (gameId ?? "").trim();
+  return id ? `https://www.crossingvoid.top/channels/${id}.json` : DOWNLOAD_CHANNELS_URL;
+}
 
 export type RemoteNoticeLevel = "info" | "warning" | "error";
 

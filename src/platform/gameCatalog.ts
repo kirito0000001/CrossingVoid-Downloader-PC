@@ -30,6 +30,8 @@ export type PlatformGameDefinition = {
   implemented: boolean;
   /** 下载站（dl.crossingvoid.top）配置；没接入的游戏为 null。 */
   gamePackage: GamePackageConfig | null;
+  /** 本机运行参数；没接入的游戏为 null。 */
+  runtime: GameRuntimeProfile | null;
 };
 
 export type GamePackageConfig = {
@@ -40,6 +42,33 @@ export type GamePackageConfig = {
   runtime: "Windows" | "Android";
   /** 版本标记文件，落位后由启动器读取（诊断用）。 */
   versionMarker: string;
+};
+
+/**
+ * 这一档游戏在**本机**长什么样：装到哪个目录、主程序叫什么、怎么判断它在跑。
+ *
+ * 与 `gamePackage` 分开：那份是下载站的契约（产品段/产品键/平台），
+ * 这份是本地运行参数。两边都要按游戏改，所以放在同一个条目里一眼能看全。
+ */
+export type GameRuntimeProfile = {
+  /** 安装目录名：`<存储根>\TFAC-hz64\<installDirectoryName>`。 */
+  installDirectoryName: string;
+  /** 主程序文件名（相对安装目录），启动与桌面快捷方式都用它。 */
+  executable: string;
+  /**
+   * 虚幻工程名。打包后的游戏把 `Saved` 放在 `%LOCALAPPDATA%\<工程名>` 下，
+   * 日志目录因此在安装目录之外，拼路径要用这个名字。
+   */
+  projectName: string;
+  /** "游戏运行中"按这些进程名枚举，再用安装目录过滤，避免同名进程误判。 */
+  processNames: readonly string[];
+  /** GitHub 备用源；这一档没有备用源就填 null。 */
+  github: { repository: string; tagPrefix: string } | null;
+  /**
+   * 页面内容（角色轮播/快讯/视频/快捷链接）来自哪套资源；
+   * `null` = 这一档还没有自己的内容，页面只渲染外壳与下载区。
+   */
+  content: "onSet" | null;
 };
 
 export const DEFAULT_PLATFORM_GAME_ID: PlatformGameId = "crossing-void";
@@ -58,6 +87,7 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
     themeAccent: null,
     implemented: false,
     gamePackage: null,
+    runtime: null,
   },
   {
     id: "crossing-void",
@@ -79,6 +109,14 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
       runtime: "Windows",
       versionMarker: "CrossingVoid.version.json",
     },
+    runtime: {
+      installDirectoryName: "CrossingVoid",
+      executable: "CrossingVoid.exe",
+      projectName: "CrossingVoid",
+      processNames: ["CrossingVoid.exe", "CrossingVoid-Win64-Shipping.exe"],
+      github: { repository: "kirito0000001/CrossingVoid", tagPrefix: "PC-V" },
+      content: "onSet",
+    },
   },
   {
     id: "fantasy-kill",
@@ -93,6 +131,7 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
     themeAccent: null,
     implemented: false,
     gamePackage: null,
+    runtime: null,
   },
   {
     id: "naruto-bp",
@@ -108,8 +147,21 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
     backgroundSrc: "/launcher/naruto-bp-bg.jpg",
     // 取 logo 里 NARUTO 字样的那个红（色相约 4°）。要更"纯红"可以换成 logo 里的 #fc0000。
     themeAccent: "#f83020",
-    implemented: false,
-    gamePackage: null,
+    implemented: true,
+    gamePackage: {
+      productSegment: "naruto-bp",
+      productKey: "naruto-bp-game",
+      runtime: "Windows",
+      versionMarker: "NarutoBP.version.json",
+    },
+    runtime: {
+      installDirectoryName: "NarutoBP",
+      executable: "NarutoBP.exe",
+      projectName: "NarutoBP",
+      processNames: ["NarutoBP.exe", "NarutoBP-Win64-Shipping.exe"],
+      github: null,
+      content: null,
+    },
   },
   {
     id: "white-love",
@@ -124,6 +176,7 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
     themeAccent: null,
     implemented: false,
     gamePackage: null,
+    runtime: null,
   },
 ] as const;
 

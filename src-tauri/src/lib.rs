@@ -31,7 +31,7 @@ use windows_sys::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
-static DOWNLOAD_CANCELLED: AtomicBool = AtomicBool::new(false);
+mod download_task;
 mod game_package;
 mod single_instance;
 mod webview_cleanup;
@@ -57,6 +57,82 @@ const MAX_ERROR_LOG_DETAIL_BYTES: usize = 256 * 1024;
 /// 游戏（虚幻打包版）的工程名。打包后的游戏把 `Saved` 放在 `%LOCALAPPDATA%\<工程名>` 下，
 /// 日志目录因此不在安装目录里，拼路径时用这个名字而不是 `install_path`。
 const GAME_PROJECT_NAME: &str = "CrossingVoid";
+
+/// 每档游戏的本机运行参数，由前端按 `src/platform/gameCatalog.ts` 传进来。
+///
+/// **字段全部可缺省**：缺省时退回零境那一套（下面的 `DEFAULT_*`），
+/// 所以开发页脚本、旧版前端、以及零境已有的安装目录都不受影响。
+#[derive(Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GameIdentity {
+    /// 桌面快捷方式/界面用的显示名。
+    pub display_name: Option<String>,
+    /// 主程序文件名（相对安装目录），启动与桌面快捷方式用它。
+    pub executable: Option<String>,
+    /// 虚幻工程名：`%LOCALAPPDATA%\<工程名>\Saved\Logs`。
+    pub project_name: Option<String>,
+    /// 版本标记文件（相对安装目录）。
+    pub version_marker: Option<String>,
+    /// "游戏运行中"的进程名清单。
+    pub process_names: Option<Vec<String>>,
+    /// 安装目录名（扫描/重新定位游戏时用）。
+    pub install_directory_name: Option<String>,
+}
+
+const DEFAULT_GAME_EXECUTABLE: &str = "CrossingVoid.exe";
+const DEFAULT_GAME_DISPLAY_NAME: &str = "零境交错：空界幻境";
+const DEFAULT_GAME_VERSION_MARKER: &str = "CrossingVoid.version.json";
+const DEFAULT_GAME_PROCESS_NAMES: [&str; 2] =
+    ["CrossingVoid.exe", "CrossingVoid-Win64-Shipping.exe"];
+
+fn non_empty(value: Option<&str>) -> Option<String> {
+    value
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty())
+        .map(|item| item.to_string())
+}
+
+impl GameIdentity {
+    fn display_name(&self) -> String {
+        non_empty(self.display_name.as_deref())
+            .unwrap_or_else(|| DEFAULT_GAME_DISPLAY_NAME.to_string())
+    }
+
+    fn executable(&self) -> String {
+        non_empty(self.executable.as_deref()).unwrap_or_else(|| DEFAULT_GAME_EXECUTABLE.to_string())
+    }
+
+    fn project_name(&self) -> String {
+        non_empty(self.project_name.as_deref()).unwrap_or_else(|| GAME_PROJECT_NAME.to_string())
+    }
+
+    fn version_marker(&self) -> String {
+        non_empty(self.version_marker.as_deref())
+            .unwrap_or_else(|| DEFAULT_GAME_VERSION_MARKER.to_string())
+    }
+
+    fn process_names(&self) -> Vec<String> {
+        self.process_names
+            .as_ref()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| non_empty(Some(item.as_str())))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|items| !items.is_empty())
+            .unwrap_or_else(|| {
+                DEFAULT_GAME_PROCESS_NAMES
+                    .iter()
+                    .map(|item| item.to_string())
+                    .collect()
+            })
+    }
+
+    fn install_directory_name(&self) -> Option<String> {
+        non_empty(self.install_directory_name.as_deref())
+    }
+}
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -75,6 +151,9 @@ struct DownloadProgress {
     downloaded_bytes: u64,
     total_bytes: u64,
     percent: f64,
+    /// 这条进度属于哪个安装目录 —— 一次只跑一个下载时看不出差别，
+    /// 但玩家可以切到别的档位去逛，进度事件必须能归到各自的游戏上。
+    install_path: String,
     /// 文件级下载（v1）才有的计数；旧的切片下载不带这两个字段。
     #[serde(skip_serializing_if = "Option::is_none")]
     done_files: Option<u64>,
@@ -274,24 +353,24 @@ async fn get_game_migration_size(install_path: String) -> Result<u64, String> {
     .map_err(|error| format!("游戏迁移空间统计失败: {}", error))?
 }
 
-#[tauri::command]
-fn pause_game_download() {
-    DOWNLOAD_CANCELLED.store(true, Ordering::SeqCst);
-}
-
-/// 每个"会跑下载 / 修复 / 扫描"的命令都必须在入口清一次取消标志。
+/// 暂停某一档的下载。
 ///
-/// 这个标志是**进程级**的，`pause_game_download` / `cancel_game_operation` 会把它置 true；
-/// 下一次任务要是不清，就会在第一个 `check_download_cancelled()` 上立刻退出 ——
-/// 前端把 `DOWNLOAD_CANCELLED` 当作"用户主动暂停"，于是**不打日志、不弹提示**，
-/// 表现就是"暂停过一次之后，这一整个进程里再也继续不了"（用户 2026-09-21 报的现场）。
-pub(crate) fn reset_download_cancelled() {
-    DOWNLOAD_CANCELLED.store(false, Ordering::SeqCst);
+/// 带 `install_path` 时只停这一档（每档一个标志，见 `download_task`）；
+/// 不带的调用方（开发页脚本、旧前端）退回进程级标志，行为和以前一样。
+#[tauri::command]
+fn pause_game_download(install_path: Option<String>) {
+    match install_path.as_deref().map(str::trim) {
+        Some(path) if !path.is_empty() => download_task::cancel(path),
+        _ => download_task::cancel_global(),
+    }
 }
 
 #[tauri::command]
-fn cancel_game_operation() {
-    DOWNLOAD_CANCELLED.store(true, Ordering::SeqCst);
+fn cancel_game_operation(install_path: Option<String>) {
+    match install_path.as_deref().map(str::trim) {
+        Some(path) if !path.is_empty() => download_task::cancel(path),
+        _ => download_task::cancel_global(),
+    }
 }
 
 #[tauri::command]
@@ -434,10 +513,12 @@ fn dev_set_launcher_version(version: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn dev_publish_download_channels(
+    game_id: Option<String>,
     channels: Vec<DownloadChannelState>,
 ) -> Result<String, String> {
     #[cfg(not(debug_assertions))]
     {
+        let _ = game_id;
         let _ = channels;
         return Err("开发工具仅在调试模式可用。".into());
     }
@@ -450,8 +531,10 @@ async fn dev_publish_download_channels(
             .as_millis() as u64;
         let payload = build_download_channels_payload(&channels, published_at)?;
         let project_root = dev_project_root()?;
+        let game_id = normalize_dev_game_id(game_id);
+        let target = game_id.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            publish_download_channels_blocking(&project_root, &payload)
+            publish_download_channels_blocking(&project_root, target.as_deref(), &payload)
         })
         .await
         .map_err(|error| format!("Download channel task failed: {}", error))??;
@@ -471,6 +554,7 @@ async fn dev_publish_download_channels(
 
 #[tauri::command]
 async fn dev_publish_remote_notice(
+    game_id: Option<String>,
     title: String,
     content: String,
     level: String,
@@ -478,6 +562,7 @@ async fn dev_publish_remote_notice(
 ) -> Result<String, String> {
     #[cfg(not(debug_assertions))]
     {
+        let _ = game_id;
         let _ = title;
         let _ = content;
         let _ = level;
@@ -493,8 +578,10 @@ async fn dev_publish_remote_notice(
             .as_millis() as u64;
         let payload = build_remote_notice_payload(&title, &content, &level, enabled, published_at)?;
         let project_root = dev_project_root()?;
+        let game_id = normalize_dev_game_id(game_id);
+        let target = game_id.clone();
         tauri::async_runtime::spawn_blocking(move || {
-            publish_remote_notice_blocking(&project_root, &payload)
+            publish_remote_notice_blocking(&project_root, target.as_deref(), &payload)
         })
         .await
         .map_err(|error| format!("Remote notice task failed: {}", error))??;
@@ -642,13 +729,14 @@ fn open_launcher_log_folder(app: AppHandle) -> Result<(), String> {
 /// 日志就是里面的 `Logs`（本机实测：`C:\Users\<用户>\AppData\Local\CrossingVoid\Saved\Logs\CrossingVoid.log`）。
 /// 所以这个目录和安装位置无关，不能用 `install_path` 拼，也不该由前端猜路径。
 #[tauri::command]
-fn open_game_log_folder() -> Result<(), String> {
+fn open_game_log_folder(game: Option<GameIdentity>) -> Result<(), String> {
+    let identity = game.unwrap_or_default();
     let local_app_data = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .filter(|path| path.is_dir())
         .ok_or_else(|| "无法确定本机的 LOCALAPPDATA 目录。".to_string())?;
     let log_dir = local_app_data
-        .join(GAME_PROJECT_NAME)
+        .join(identity.project_name())
         .join("Saved")
         .join("Logs");
     if !log_dir.is_dir() {
@@ -699,14 +787,22 @@ fn dev_open_project_folder() -> Result<(), String> {
 }
 
 #[tauri::command]
-fn validate_game_install_state(install_path: String, state: String) -> Result<bool, String> {
-    validate_install_state(&install_path, &state)
+fn validate_game_install_state(
+    install_path: String,
+    state: String,
+    game: Option<GameIdentity>,
+) -> Result<bool, String> {
+    validate_install_state_with(&install_path, &state, &game.unwrap_or_default())
 }
 
 #[tauri::command]
-async fn find_game_installation(root_path: String) -> Result<Option<String>, String> {
+async fn find_game_installation(
+    root_path: String,
+    game: Option<GameIdentity>,
+) -> Result<Option<String>, String> {
+    let install_directory_name = game.unwrap_or_default().install_directory_name();
     tauri::async_runtime::spawn_blocking(move || {
-        find_game_installation_internal(Path::new(&root_path))
+        find_game_installation_internal(Path::new(&root_path), install_directory_name.as_deref())
             .map(|path| path.map(|value| value.to_string_lossy().to_string()))
     })
     .await
@@ -912,7 +1008,10 @@ fn copy_game_directory(source: &Path, destination: &Path) -> Result<(), String> 
     copy_result
 }
 
-fn find_game_installation_internal(root: &Path) -> Result<Option<PathBuf>, String> {
+fn find_game_installation_internal(
+    root: &Path,
+    install_directory_name: Option<&str>,
+) -> Result<Option<PathBuf>, String> {
     if !root.is_dir() {
         return Err(format!("Selected game location is not a directory: {}", root.display()));
     }
@@ -925,7 +1024,15 @@ fn find_game_installation_internal(root: &Path) -> Result<Option<PathBuf>, Strin
         if scanned > MAX_SCANNED_DIRECTORIES {
             return Err("重新定位搜索范围过大，请选择更接近游戏目录的文件夹。".to_string());
         }
-        if validate_install_state(directory.to_string_lossy().as_ref(), "ready")? {
+        // 指定了目录名就只认同名的那个目录，避免在别人的游戏目录里找到自己的标记文件。
+        let name_matches = match install_directory_name {
+            Some(expected) => directory
+                .file_name()
+                .map(|value| value.to_string_lossy().eq_ignore_ascii_case(expected))
+                .unwrap_or(false),
+            None => true,
+        };
+        if name_matches && validate_install_state(directory.to_string_lossy().as_ref(), "ready")? {
             return Ok(Some(directory));
         }
 
@@ -946,8 +1053,8 @@ fn find_game_installation_internal(root: &Path) -> Result<Option<PathBuf>, Strin
 }
 
 #[tauri::command]
-fn read_game_version_file(install_path: String) -> Result<String, String> {
-    let path = PathBuf::from(&install_path).join("CrossingVoid.version.json");
+fn read_game_version_file(install_path: String, game: Option<GameIdentity>) -> Result<String, String> {
+    let path = PathBuf::from(&install_path).join(game.unwrap_or_default().version_marker());
     fs::read_to_string(&path)
         .map_err(|error| format!("Unable to read game version {}: {}", path.display(), error))
 }
@@ -1037,22 +1144,22 @@ fn uninstall_launcher() -> Result<(), String> {
 }
 
 #[tauri::command]
-fn is_game_running(install_path: String) -> bool {
-    !game_processes_for_install(&install_path).is_empty()
+fn is_game_running(install_path: String, game: Option<GameIdentity>) -> bool {
+    !game_processes_for_install_with(&install_path, &game.unwrap_or_default()).is_empty()
 }
 
 /// 当前被判成"游戏在跑"的进程清单（pid / 进程名 / 可执行文件路径）。
 /// 界面用它来告诉玩家到底是哪个进程被认成了游戏，而不是只给一个没有出路的"游戏运行中"。
 #[tauri::command]
-fn list_game_processes(install_path: String) -> Vec<GameProcessInfo> {
-    game_processes_for_install(&install_path)
+fn list_game_processes(install_path: String, game: Option<GameIdentity>) -> Vec<GameProcessInfo> {
+    game_processes_for_install_with(&install_path, &game.unwrap_or_default())
 }
 
 /// 强制结束被认成"游戏"的进程树（taskkill /T /F）。
 /// 用在"启动器卡在游戏运行中、但玩家其实没在玩"这种局面：先征得玩家同意，再清掉这个卡住的进程。
 #[tauri::command]
-fn stop_game_processes(install_path: String) -> Result<usize, String> {
-    stop_game_processes_internal(&install_path)
+fn stop_game_processes(install_path: String, game: Option<GameIdentity>) -> Result<usize, String> {
+    stop_game_processes_internal(&install_path, &game.unwrap_or_default())
 }
 
 #[tauri::command]
@@ -1066,13 +1173,24 @@ fn launch_game(
     install_path: String,
     use_dx11: bool,
     exit_launcher: bool,
+    game: Option<GameIdentity>,
 ) -> Result<LaunchGameResult, String> {
-    launch_game_internal(app, &PathBuf::from(install_path), use_dx11, exit_launcher)
+    let identity = game.unwrap_or_default();
+    launch_game_internal(
+        app,
+        &PathBuf::from(install_path),
+        &identity,
+        use_dx11,
+        exit_launcher,
+    )
 }
 
 #[tauri::command]
-fn create_game_desktop_shortcut_now(install_path: String) -> Result<(), String> {
-    create_game_desktop_shortcut(&PathBuf::from(install_path))
+fn create_game_desktop_shortcut_now(
+    install_path: String,
+    game: Option<GameIdentity>,
+) -> Result<(), String> {
+    create_game_desktop_shortcut_with(&PathBuf::from(install_path), &game.unwrap_or_default())
 }
 
 #[tauri::command]
@@ -1088,8 +1206,11 @@ async fn repair_game_from_archive(
     file_name: String,
     chunks: Vec<ArchiveChunk>,
 ) -> Result<RepairSummary, String> {
-    reset_download_cancelled();
+    download_task::begin(&install_path);
+    download_task::reset_global();
     tauri::async_runtime::spawn_blocking(move || {
+        // 真正干活的是这个阻塞线程：取消检查都在它上面，作用域必须在这里进。
+        download_task::begin(&install_path);
         repair_game_from_staged_archive(app, install_path, expected_size, file_name, chunks)
     })
     .await
@@ -1101,8 +1222,12 @@ async fn verify_game_manifest(
     app: AppHandle,
     install_path: String,
 ) -> Result<ManifestVerifySummary, String> {
-    reset_download_cancelled();
-    tauri::async_runtime::spawn_blocking(move || verify_game_manifest_internal(app, install_path))
+    download_task::begin(&install_path);
+    download_task::reset_global();
+    tauri::async_runtime::spawn_blocking(move || {
+        download_task::begin(&install_path);
+        verify_game_manifest_internal(app, install_path)
+    })
         .await
         .map_err(|error| format!("Manifest verify task failed: {}", error))?
 }
@@ -1350,10 +1475,13 @@ async fn download_game_archive(
     chunks: Vec<ArchiveChunk>,
     speed_limit_bytes_per_second: Option<u64>,
 ) -> Result<(), String> {
-    reset_download_cancelled();
+    download_task::begin(&install_path);
+    download_task::reset_global();
+    let task_path = install_path.clone();
     DOWNLOAD_SPEED_LIMIT_BYTES_PER_SECOND
         .store(speed_limit_bytes_per_second.unwrap_or(0), Ordering::SeqCst);
     tauri::async_runtime::spawn_blocking(move || {
+        download_task::begin(&task_path);
         download_archive_to_staging(app, url, install_path, expected_size, file_name, chunks)
     })
     .await
@@ -1371,8 +1499,10 @@ async fn install_downloaded_game_archive(
     chunks: Vec<ArchiveChunk>,
     install_stage: Option<String>,
 ) -> Result<(), String> {
-    reset_download_cancelled();
+    download_task::begin(&install_path);
+    download_task::reset_global();
     tauri::async_runtime::spawn_blocking(move || {
+        download_task::begin(&install_path);
         install_staged_archive(
             app,
             install_path,
@@ -1389,12 +1519,14 @@ async fn install_downloaded_game_archive(
 }
 
 fn emit_download_progress(app: &AppHandle, downloaded_bytes: u64, total_bytes: u64) {
-    emit_progress_event(app, downloaded_bytes, total_bytes, None, None);
+    // 旧的切片下载链路（没有 v1 清单的档位）不带安装目录：前端遇到空值就按"当前档位"处理。
+    emit_progress_event(app, "", downloaded_bytes, total_bytes, None, None);
 }
 
 /// 文件级下载（v1）的进度：多带"已完成/总数（按文件）"。
 fn emit_game_package_progress(
     app: &AppHandle,
+    install_path: &str,
     downloaded_bytes: u64,
     total_bytes: u64,
     done_files: u64,
@@ -1402,6 +1534,7 @@ fn emit_game_package_progress(
 ) {
     emit_progress_event(
         app,
+        install_path,
         downloaded_bytes,
         total_bytes,
         Some(done_files),
@@ -1411,6 +1544,7 @@ fn emit_game_package_progress(
 
 fn emit_progress_event(
     app: &AppHandle,
+    install_path: &str,
     downloaded_bytes: u64,
     total_bytes: u64,
     done_files: Option<u64>,
@@ -1427,6 +1561,7 @@ fn emit_progress_event(
             downloaded_bytes,
             total_bytes,
             percent,
+            install_path: install_path.to_string(),
             done_files,
             total_files,
         },
@@ -1436,6 +1571,8 @@ fn emit_progress_event(
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GamePackageScanProgress {
+    /// 这条心跳属于哪个安装目录（切档后前端要能把进度归回各自的游戏）。
+    install_path: String,
     checked_files: u64,
     total_files: u64,
     /// 已经对得上清单的条数与字节数：前端拿它驱动进度条（和后面的下载同一把尺子）。
@@ -1450,6 +1587,7 @@ struct GamePackageScanProgress {
 /// 要是把它当下载进度报，数字会先掉到 0 再爬回来 —— 看起来就是进度又被弄坏了。
 fn emit_game_package_scan_progress(
     app: &AppHandle,
+    install_path: &str,
     checked_files: u64,
     total_files: u64,
     matched_files: u64,
@@ -1458,6 +1596,7 @@ fn emit_game_package_scan_progress(
     let _ = app.emit(
         "game-package-scan-progress",
         GamePackageScanProgress {
+            install_path: install_path.to_string(),
             checked_files,
             total_files,
             matched_files,
@@ -1469,6 +1608,7 @@ fn emit_game_package_scan_progress(
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct GamePackagePhase {
+    install_path: String,
     phase: String,
 }
 
@@ -1476,10 +1616,11 @@ struct GamePackagePhase {
 ///
 /// 为什么要单开一条：给一个 900MB 的文件算 sha256 要好几秒，这期间**一个字节事件都没有**，
 /// 前端会据此判成"停滞"并显示"网络不佳" —— 那是冤枉网络（用户 2026-09-21 报的现场）。
-fn emit_game_package_phase(app: &AppHandle, phase: &str) {
+fn emit_game_package_phase(app: &AppHandle, install_path: &str, phase: &str) {
     let _ = app.emit(
         "game-package-phase",
         GamePackagePhase {
+            install_path: install_path.to_string(),
             phase: phase.to_string(),
         },
     );
@@ -1710,7 +1851,9 @@ fn download_archive_once(
 }
 
 fn check_download_cancelled() -> Result<(), String> {
-    if DOWNLOAD_CANCELLED.load(Ordering::SeqCst) {
+    // 按任务查标志：本线程在哪个任务的下载/校验/解压链路里，就查哪个任务的标志。
+    // 没进过作用域的线程退回进程级标志（旧链路），所以这条改动不会让暂停失灵。
+    if download_task::is_cancelled() {
         Err(DOWNLOAD_CANCELLED_ERROR.to_string())
     } else {
         Ok(())
@@ -2561,7 +2704,7 @@ fn normalize_manifest_path(path: &str) -> String {
 }
 
 fn load_manifest_entry_map(install_dir: &Path) -> Result<HashMap<String, (u64, String)>, String> {
-    let manifest_path = install_dir.join("CrossingVoid.manifest.json");
+    let manifest_path = game_package::state_path(install_dir);
     let manifest_text = fs::read_to_string(&manifest_path).map_err(|error| {
         format!(
             "Unable to read game manifest {}: {}",
@@ -3651,11 +3794,46 @@ fn build_download_channels_payload(
 }
 
 #[cfg(debug_assertions)]
-fn publish_download_channels_blocking(project_root: &Path, payload: &str) -> Result<(), String> {
+fn normalize_dev_game_id(game_id: Option<String>) -> Option<String> {
+    game_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// 一次发布要写哪几个远端文件。
+///
+/// 按档位发布时只写 `notices/<档位>.json`；**零境额外写一份老路径** ——
+/// 安卓启动器只认老文件，那边已经定了不做平台，所以由 PC 这边兼容着。
+fn dev_publish_remote_paths(game_id: Option<&str>, segment: &str, legacy_path: &str) -> Vec<String> {
+    match game_id {
+        Some(id) => {
+            let mut paths = vec![format!("C:\\inetpub\\wwwroot\\{segment}\\{id}.json")];
+            if id.eq_ignore_ascii_case("crossing-void") {
+                paths.push(legacy_path.to_string());
+            }
+            paths
+        }
+        None => vec![legacy_path.to_string()],
+    }
+}
+
+#[cfg(debug_assertions)]
+fn publish_download_channels_blocking(
+    project_root: &Path,
+    game_id: Option<&str>,
+    payload: &str,
+) -> Result<(), String> {
     let saved_dir = project_root.join("Saved").join("Launcher");
     fs::create_dir_all(&saved_dir)
         .map_err(|error| format!("Unable to create {}: {}", saved_dir.display(), error))?;
-    let channels_path = saved_dir.join("download-channels.json");
+    let channels_path = match game_id {
+        Some(id) => saved_dir.join("channels").join(format!("{id}.json")),
+        None => saved_dir.join("download-channels.json"),
+    };
+    if let Some(parent) = channels_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Unable to create {}: {}", parent.display(), error))?;
+    }
     let temporary_path = channels_path.with_extension("json.tmp");
     fs::write(&temporary_path, payload)
         .map_err(|error| format!("Unable to write {}: {}", temporary_path.display(), error))?;
@@ -3674,43 +3852,66 @@ fn publish_download_channels_blocking(project_root: &Path, payload: &str) -> Res
         return Err(format!("渠道发布脚本不存在：{}", script_path.display()));
     }
     let shell = dev_powershell_command();
-    let mut command = Command::new(&shell);
-    command.arg("-NoProfile");
-    if shell.eq_ignore_ascii_case("powershell")
-        || shell.to_ascii_lowercase().ends_with("powershell.exe")
-    {
-        command.arg("-ExecutionPolicy").arg("Bypass");
-    }
-    let output = command
-        .arg("-File")
-        .arg(&script_path)
-        .arg("-InputFile")
-        .arg(&channels_path)
-        .output()
-        .map_err(|error| format!("Unable to run {}: {}", script_path.display(), error))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Err(format!(
-        "渠道开关发布失败，exit code {:?}: {}{}",
-        output.status.code(),
-        stderr,
-        if stdout.is_empty() {
-            String::new()
-        } else {
-            format!(" | {}", stdout)
+    // 一次发布可能要写多个远端文件（零境要同时写分档路径和老路径），
+    // 每次都要新建 Command —— Command 的 arg 是累加的，复用会把参数重复追加。
+    for remote_path in dev_publish_remote_paths(
+        game_id,
+        "channels",
+        "C:\\inetpub\\wwwroot\\launcher-download-channels.json",
+    ) {
+        let mut command = Command::new(&shell);
+        command.arg("-NoProfile");
+        if shell.eq_ignore_ascii_case("powershell")
+            || shell.to_ascii_lowercase().ends_with("powershell.exe")
+        {
+            command.arg("-ExecutionPolicy").arg("Bypass");
         }
-    ))
+        let output = command
+            .arg("-File")
+            .arg(&script_path)
+            .arg("-InputFile")
+            .arg(&channels_path)
+            .arg("-RemoteChannelsPath")
+            .arg(&remote_path)
+            .output()
+            .map_err(|error| format!("Unable to run {}: {}", script_path.display(), error))?;
+        if output.status.success() {
+            continue;
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Err(format!(
+            "渠道开关发布失败（{}），exit code {:?}: {}{}",
+            remote_path,
+            output.status.code(),
+            stderr,
+            if stdout.is_empty() {
+                String::new()
+            } else {
+                format!(" | {}", stdout)
+            }
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(debug_assertions)]
-fn publish_remote_notice_blocking(project_root: &Path, payload: &str) -> Result<(), String> {
+fn publish_remote_notice_blocking(
+    project_root: &Path,
+    game_id: Option<&str>,
+    payload: &str,
+) -> Result<(), String> {
     let saved_dir = project_root.join("Saved").join("Launcher");
     fs::create_dir_all(&saved_dir)
         .map_err(|error| format!("Unable to create {}: {}", saved_dir.display(), error))?;
-    let notice_path = saved_dir.join("remote-notice.json");
+    let notice_path = match game_id {
+        Some(id) => saved_dir.join("notices").join(format!("{id}.json")),
+        None => saved_dir.join("remote-notice.json"),
+    };
+    if let Some(parent) = notice_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Unable to create {}: {}", parent.display(), error))?;
+    }
     let temporary_path = notice_path.with_extension("json.tmp");
     fs::write(&temporary_path, payload)
         .map_err(|error| format!("Unable to write {}: {}", temporary_path.display(), error))?;
@@ -3724,35 +3925,45 @@ fn publish_remote_notice_blocking(project_root: &Path, payload: &str) -> Result<
         return Err(format!("公告发布脚本不存在：{}", script_path.display()));
     }
     let shell = dev_powershell_command();
-    let mut command = Command::new(&shell);
-    command.arg("-NoProfile");
-    if shell.eq_ignore_ascii_case("powershell")
-        || shell.to_ascii_lowercase().ends_with("powershell.exe")
-    {
-        command.arg("-ExecutionPolicy").arg("Bypass");
-    }
-    let output = command
-        .arg("-File")
-        .arg(&script_path)
-        .arg("-InputFile")
-        .arg(&notice_path)
-        .output()
-        .map_err(|error| format!("Unable to run {}: {}", script_path.display(), error))?;
-    if output.status.success() {
-        return Ok(());
-    }
-    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Err(format!(
-        "公告发布失败，exit code {:?}: {}{}",
-        output.status.code(),
-        stderr,
-        if stdout.is_empty() {
-            String::new()
-        } else {
-            format!(" | {}", stdout)
+    for remote_path in dev_publish_remote_paths(
+        game_id,
+        "notices",
+        "C:\\inetpub\\wwwroot\\launcher-notice.json",
+    ) {
+        let mut command = Command::new(&shell);
+        command.arg("-NoProfile");
+        if shell.eq_ignore_ascii_case("powershell")
+            || shell.to_ascii_lowercase().ends_with("powershell.exe")
+        {
+            command.arg("-ExecutionPolicy").arg("Bypass");
         }
-    ))
+        let output = command
+            .arg("-File")
+            .arg(&script_path)
+            .arg("-InputFile")
+            .arg(&notice_path)
+            .arg("-RemoteNoticePath")
+            .arg(&remote_path)
+            .output()
+            .map_err(|error| format!("Unable to run {}: {}", script_path.display(), error))?;
+        if output.status.success() {
+            continue;
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return Err(format!(
+            "公告发布失败（{}），exit code {:?}: {}{}",
+            remote_path,
+            output.status.code(),
+            stderr,
+            if stdout.is_empty() {
+                String::new()
+            } else {
+                format!(" | {}", stdout)
+            }
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(debug_assertions)]
@@ -3904,14 +4115,22 @@ fn parse_cargo_build_progress(line: &str) -> Option<(u64, u64, String)> {
 }
 
 fn validate_install_state(install_path: &str, state: &str) -> Result<bool, String> {
+    validate_install_state_with(install_path, state, &GameIdentity::default())
+}
+
+fn validate_install_state_with(
+    install_path: &str,
+    state: &str,
+    game: &GameIdentity,
+) -> Result<bool, String> {
     let install_dir = PathBuf::from(install_path);
     if state.eq_ignore_ascii_case("repairable") {
         return Ok(load_manifest_entry_map(&install_dir).is_ok());
     }
     if state.eq_ignore_ascii_case("ready") {
-        return Ok(install_dir.join("CrossingVoid.version.json").is_file()
-            && install_dir.join("CrossingVoid.manifest.json").is_file()
-            && install_dir.join("CrossingVoid.exe").is_file());
+        return Ok(install_dir.join(game.version_marker()).is_file()
+            && game_package::state_file_exists(&install_dir)
+            && install_dir.join(game.executable()).is_file());
     }
 
     let state_path = download_state_file_path(install_path);
@@ -4061,15 +4280,24 @@ fn delete_installed_game_internal(app: &AppHandle, install_dir: &Path) -> Result
 
 #[cfg(windows)]
 fn create_game_desktop_shortcut(install_dir: &Path) -> Result<(), String> {
-    let exe_path = install_dir.join("CrossingVoid.exe");
+    create_game_desktop_shortcut_with(install_dir, &GameIdentity::default())
+}
+
+#[cfg(windows)]
+fn create_game_desktop_shortcut_with(
+    install_dir: &Path,
+    game: &GameIdentity,
+) -> Result<(), String> {
+    let exe_path = install_dir.join(game.executable());
     if !exe_path.is_file() {
         return Err(format!("Game executable not found: {}", exe_path.display()));
     }
     let script_path = std::env::temp_dir().join("crossingvoid_create_game_shortcut.ps1");
+    let shortcut_name = format!("{}.lnk", game.display_name().replace('\'', ""));
     let script = format!(
         r#"$WshShell = New-Object -ComObject WScript.Shell
 $Desktop = [Environment]::GetFolderPath('DesktopDirectory')
-$Shortcut = $WshShell.CreateShortcut((Join-Path $Desktop '零境交错：空界幻境.lnk'))
+$Shortcut = $WshShell.CreateShortcut((Join-Path $Desktop '{}'))
 $Shortcut.TargetPath = @'
 {}
 '@
@@ -4081,6 +4309,7 @@ $Shortcut.IconLocation = @'
 '@
 $Shortcut.Save()
 "#,
+        shortcut_name,
         exe_path.display(),
         install_dir.display(),
         exe_path.display()
@@ -4123,17 +4352,26 @@ fn create_game_desktop_shortcut(_install_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(not(windows))]
+fn create_game_desktop_shortcut_with(
+    _install_dir: &Path,
+    _game: &GameIdentity,
+) -> Result<(), String> {
+    Ok(())
+}
+
 fn launch_game_internal(
     app: AppHandle,
     install_dir: &Path,
+    game: &GameIdentity,
     use_dx11: bool,
     exit_launcher: bool,
 ) -> Result<LaunchGameResult, String> {
-    let exe_path = install_dir.join("CrossingVoid.exe");
+    let exe_path = install_dir.join(game.executable());
     if !exe_path.is_file() {
         return Err(format!("Game executable not found: {}", exe_path.display()));
     }
-    if !game_processes_for_install(&install_dir.to_string_lossy()).is_empty() {
+    if !game_processes_for_install_with(&install_dir.to_string_lossy(), game).is_empty() {
         if exit_launcher {
             app.exit(0);
         }
@@ -4197,16 +4435,13 @@ struct GameProcessInfo {
     path: String,
 }
 
-/// 游戏进程的两个名字：安装根目录那个是 UE 的引导壳（BootstrapPackagedGame，它会等真正的游戏），
-/// 里面 `Binaries\Win64` 那个才是游戏本体。两个都算"游戏在跑"。
-#[cfg(windows)]
-const GAME_PROCESS_NAMES: [&str; 2] = ["CrossingVoid.exe", "CrossingVoid-Win64-Shipping.exe"];
-
 /// 按进程名枚举候选进程，并尽量取到可执行文件路径。
 /// 2026-09-21 的 bug 就是只看名字不看路径：机器上任何位置有个叫 `CrossingVoid.exe` 的进程，
 /// 启动器就会永远停在"游戏运行中"，玩家点不动开始游戏。
+///
+/// 名字清单由前端按档位传进来（零境是引导壳 + 本体两个名字，见 `GameIdentity::process_names`）。
 #[cfg(windows)]
-fn list_game_process_candidates() -> Vec<GameProcessInfo> {
+fn list_game_process_candidates(process_names: &[String]) -> Vec<GameProcessInfo> {
     let mut result = Vec::new();
     unsafe {
         let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -4224,7 +4459,7 @@ fn list_game_process_candidates() -> Vec<GameProcessInfo> {
                 .position(|&unit| unit == 0)
                 .unwrap_or(entry.szExeFile.len());
             let exe_name = String::from_utf16_lossy(&entry.szExeFile[..name_end]);
-            if GAME_PROCESS_NAMES
+            if process_names
                 .iter()
                 .any(|candidate| exe_name.eq_ignore_ascii_case(candidate))
             {
@@ -4282,10 +4517,10 @@ fn path_is_under(process_path: &str, install_root: &str) -> bool {
     path == install_root || path.starts_with(&format!("{}\\", install_root))
 }
 
-/// 真正的判定：只认**安装目录里**的那两个 exe。
+/// 真正的判定：只认**安装目录里**的那几个 exe。
 /// 传空安装目录时退回老行为（按名字全机器匹配），保证调用方没传路径时也不会误报"没在跑"。
-fn game_processes_for_install(install_path: &str) -> Vec<GameProcessInfo> {
-    let candidates = list_game_process_candidates();
+fn game_processes_for_install_with(install_path: &str, game: &GameIdentity) -> Vec<GameProcessInfo> {
+    let candidates = list_game_process_candidates(&game.process_names());
     let install_root = normalize_path_for_compare(install_path);
     if install_root.is_empty() {
         return candidates;
@@ -4296,8 +4531,8 @@ fn game_processes_for_install(install_path: &str) -> Vec<GameProcessInfo> {
         .collect()
 }
 
-fn stop_game_processes_internal(install_path: &str) -> Result<usize, String> {
-    let processes = game_processes_for_install(install_path);
+fn stop_game_processes_internal(install_path: &str, game: &GameIdentity) -> Result<usize, String> {
+    let processes = game_processes_for_install_with(install_path, game);
     let mut stopped = 0usize;
     for process in processes {
         let output = Command::new("taskkill")
@@ -4324,17 +4559,20 @@ struct GameProcessInfo {
 }
 
 #[cfg(not(windows))]
-fn list_game_process_candidates() -> Vec<GameProcessInfo> {
+fn list_game_process_candidates(_process_names: &[String]) -> Vec<GameProcessInfo> {
     Vec::new()
 }
 
 #[cfg(not(windows))]
-fn game_processes_for_install(_install_path: &str) -> Vec<GameProcessInfo> {
+fn game_processes_for_install_with(
+    _install_path: &str,
+    _game: &GameIdentity,
+) -> Vec<GameProcessInfo> {
     Vec::new()
 }
 
 #[cfg(not(windows))]
-fn stop_game_processes_internal(_install_path: &str) -> Result<usize, String> {
+fn stop_game_processes_internal(_install_path: &str, _game: &GameIdentity) -> Result<usize, String> {
     Ok(0)
 }
 
@@ -5206,7 +5444,7 @@ mod tests {
         fs::write(game.join("CrossingVoid.exe"), []).expect("write executable");
 
         assert_eq!(
-            find_game_installation_internal(&root).expect("scan selected directory"),
+            find_game_installation_internal(&root, None).expect("scan selected directory"),
             Some(game)
         );
         fs::remove_dir_all(root).expect("remove relocate test directory");

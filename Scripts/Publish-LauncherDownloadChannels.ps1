@@ -64,9 +64,22 @@ try {
         Copy-Item -LiteralPath `$target -Destination "`$target.bak" -Force
     }
     Move-Item -LiteralPath `$temp -Destination `$target -Force
-    `$aclSource = Join-Path `$targetDir 'index.html'
-    if (Test-Path -LiteralPath `$aclSource -PathType Leaf) {
-        Set-Acl -LiteralPath `$target -AclObject (Get-Acl -LiteralPath `$aclSource)
+    # 权限：优先照抄 index.html 的 ACL；子目录（notices / channels）里没有 index.html 时退到站点根目录的。
+    # 以前只有 `$targetDir\index.html 一种来源，新目录一条都命中不了，于是目录只有 Administrator 的私有 ACL，
+    # IIS 匿名读会 401 —— 2026-09-22 火影公告就是这样"看着发布成功、其实读不到"，启动器只能当"没有这一档公告"。
+    `$aclFilled = `$false
+    foreach (`$aclDir in @(`$targetDir, (Split-Path -Parent `$targetDir))) {
+        `$aclSource = Join-Path `$aclDir 'index.html'
+        if (Test-Path -LiteralPath `$aclSource -PathType Leaf) {
+            Set-Acl -LiteralPath `$target -AclObject (Get-Acl -LiteralPath `$aclSource)
+            `$aclFilled = `$true
+            break
+        }
+    }
+    # 兜底：不论有没有模板，都把匿名读权限补上（目录可继承，文件显式给一份）。
+    & icacls `$targetDir /grant 'IIS_IUSRS:(OI)(CI)(RX)' 'IUSR:(OI)(CI)(RX)' | Out-Null
+    if (-not `$aclFilled) {
+        & icacls `$target /grant 'IIS_IUSRS:(RX)' 'IUSR:(RX)' | Out-Null
     }
 } catch {
     Remove-Item -LiteralPath `$temp -Force -ErrorAction SilentlyContinue

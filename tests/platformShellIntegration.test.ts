@@ -23,7 +23,10 @@ describe("platform shell integration", () => {
     expect(appSource).toContain("logoSrc: activeGame.value.bootLogoSrc");
     expect(bootSplashSource).toContain("logoSrc");
     expect(appSource).toContain(":src=\"activeGame.brandLogoSrc");
-    expect(appSource).toContain("isCrossingVoidActive");
+    // 页面按"这一档接入了没有"渲染，内容面板再按"有没有 OnSet 资源"单独判 ——
+    // 以前是一个 isCrossingVoidActive 同时管两件事，接第二档游戏时就会串。
+    expect(appSource).toContain("isGamePageActive");
+    expect(appSource).toContain("hasOnSetContent");
     expect(appSource).toContain("<PlatformPlaceholderPage");
     expect(placeholderSource).toContain("platform-placeholder-page");
     expect(placeholderSource).toContain("页面资源尚未接入");
@@ -70,9 +73,9 @@ describe("platform shell integration", () => {
     expect(appSource).toContain("gameOverviewVisible");
   });
 
-  it("does not run Crossing Void network work while another page is active", () => {
-    expect(appSource).toContain("if (!isCrossingVoidActive.value || launcherNetworkLocked.value) return;");
-    expect(appSource).toContain("if (!isCrossingVoidActive.value) return false;");
-    expect(appSource).toContain("if (event.payload && isCrossingVoidActive.value)");
+  it("does not run game network work while another page is active", () => {
+    expect(appSource).toContain("if (!isGamePageActive.value || launcherNetworkLocked.value) return;");
+    expect(appSource).toContain("if (!isGamePageActive.value) return false;");
+    expect(appSource).toContain("if (event.payload && isGamePageActive.value)");
   });
 });

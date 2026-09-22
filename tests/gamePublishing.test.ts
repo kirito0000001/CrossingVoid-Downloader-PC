@@ -20,7 +20,9 @@ describe("developer game publishing", () => {
     expect(launcherSource).toContain("上传 Android 测试服游戏包");
     expect(launcherSource).toContain('v-model="developerGameVersion"');
     expect(launcherSource).toContain('v-model="developerGameTitle"');
-    expect(launcherSource).toContain('DEV_GAME_VERSION_STORAGE_KEY) || "V0.5.12"');
+    // 开发页的填写项按档位各存一份（`devGameKey()` 给键名加上档位后缀）。
+    expect(launcherSource).toContain("function devGameKey(base: string)");
+    expect(launcherSource).toContain('devGameKey(DEV_GAME_VERSION_STORAGE_KEY)) || "V0.5.12"');
   });
 
   it("keeps the game publishing implementation inside the PC launcher project", () => {

@@ -171,11 +171,14 @@ describe("launcher behavior settings", () => {
     // 日志落在 %LOCALAPPDATA%\<工程名>\Saved\Logs，和安装目录无关，
     // 所以路径由 Rust 解析，前端只负责点击。
     expect(readSource("src/components/SettingsPanel.vue")).toContain('@click="openGameLogFolder"');
-    expect(appSource).toContain('invoke("open_game_log_folder")');
-    expect(nativeSource).toContain("fn open_game_log_folder()");
+    expect(appSource).toContain(
+      'invoke("open_game_log_folder", { game: gameIdentityPayload() })',
+    );
+    expect(nativeSource).toContain("fn open_game_log_folder(game: Option<GameIdentity>)");
     expect(nativeSource).toContain("            open_game_log_folder,");
     expect(nativeSource).toContain('const GAME_PROJECT_NAME: &str = "CrossingVoid";');
-    expect(nativeSource).toContain(".join(GAME_PROJECT_NAME)");
+    // 工程名按档位传（火影的日志在 %LOCALAPPDATA%\NarutoBP\...），缺省仍是零境。
+    expect(nativeSource).toContain(".join(identity.project_name())");
   });
 
   it("does not treat Explorer's non-zero exit code as a folder-open failure", () => {

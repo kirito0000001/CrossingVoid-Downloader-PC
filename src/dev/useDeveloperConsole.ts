@@ -37,6 +37,8 @@ export type DeveloperConsoleHost = {
   launcherVersion: Ref<string>;
   language: Ref<LauncherLanguage>;
   remoteLauncherNotice: Ref<RemoteLauncherNotice | null>;
+  /** 当前档位：开发页的填写项与发布都按它分开。 */
+  activeGameId: Ref<string>;
   notify: (message: string) => void;
   formatError: (error: unknown) => string;
   compareVersions: (left: string, right: string) => number;
@@ -48,6 +50,7 @@ export type DeveloperConsoleHost = {
 export function useDeveloperConsole(host: DeveloperConsoleHost) {
   const {
     launcherVersion,
+    activeGameId,
     language,
     remoteLauncherNotice,
     notify,
@@ -56,6 +59,27 @@ export function useDeveloperConsole(host: DeveloperConsoleHost) {
     fetchRemoteLauncherNotice,
     onTaskStart,
   } = host;
+
+  /**
+   * 开发页的填写项按档位各存一份：切成火影就是火影的草稿，切回零境还是零境那套。
+   * 发布时也带上档位 —— 公告与渠道开关各写 notices/<档位>.json、channels/<档位>.json。
+   */
+  function devGameKey(base: string) {
+    return `${base}.${activeGameId.value || "crossing-void"}`;
+  }
+
+  function reloadDevGameDraft() {
+    if (typeof window === "undefined") return;
+    developerGameVersion.value =
+      window.localStorage.getItem(devGameKey(DEV_GAME_VERSION_STORAGE_KEY)) || "V0.5.12";
+    developerGameTitle.value =
+      window.localStorage.getItem(devGameKey(DEV_GAME_TITLE_STORAGE_KEY)) || "零境交错：空界幻境更新包";
+    developerPackagePath.value = normalizeDeveloperPackagePath(
+      window.localStorage.getItem(devGameKey(DEV_PACKAGE_PATH_STORAGE_KEY)) || "D:\\启动器新包",
+    );
+  }
+
+  watch(activeGameId, reloadDevGameDraft);
 
   const developerVersionInput = ref(launcherVersion.value);
   function normalizeDeveloperPackagePath(path: string) {
@@ -67,12 +91,12 @@ export function useDeveloperConsole(host: DeveloperConsoleHost) {
   const developerPackagePath = ref(
     normalizeDeveloperPackagePath(
       typeof window !== "undefined"
-        ? window.localStorage.getItem(DEV_PACKAGE_PATH_STORAGE_KEY) || "D:\\启动器新包"
+        ? window.localStorage.getItem(devGameKey(DEV_PACKAGE_PATH_STORAGE_KEY)) || "D:\\启动器新包"
         : "D:\\启动器新包",
     ),
   );
-  const developerGameVersion = ref(window.localStorage.getItem(DEV_GAME_VERSION_STORAGE_KEY) || "V0.5.12");
-  const developerGameTitle = ref(window.localStorage.getItem(DEV_GAME_TITLE_STORAGE_KEY) || "零境交错：空界幻境更新包");
+  const developerGameVersion = ref(window.localStorage.getItem(devGameKey(DEV_GAME_VERSION_STORAGE_KEY)) || "V0.5.12");
+  const developerGameTitle = ref(window.localStorage.getItem(devGameKey(DEV_GAME_TITLE_STORAGE_KEY)) || "零境交错：空界幻境更新包");
   /**
    * 加载界面常驻（开发/测试）：勾上后启动加载界面不再消失，方便调它的尺寸位置。
    * 写进 localStorage，勾一次就记住；取消勾选时如果它还停在那儿，立刻收掉。
@@ -124,15 +148,15 @@ export function useDeveloperConsole(host: DeveloperConsoleHost) {
   const developerTaskProgressDetail = computed(() => developerTaskMessage.value);
   watch(developerPackagePath, (path) => {
     if (!path.trim()) return;
-    window.localStorage.setItem(DEV_PACKAGE_PATH_STORAGE_KEY, path);
+    window.localStorage.setItem(devGameKey(DEV_PACKAGE_PATH_STORAGE_KEY), path);
   });
   
   watch(developerGameVersion, (version) => {
-    window.localStorage.setItem(DEV_GAME_VERSION_STORAGE_KEY, version);
+    window.localStorage.setItem(devGameKey(DEV_GAME_VERSION_STORAGE_KEY), version);
   });
   
   watch(developerGameTitle, (title) => {
-    window.localStorage.setItem(DEV_GAME_TITLE_STORAGE_KEY, title);
+    window.localStorage.setItem(devGameKey(DEV_GAME_TITLE_STORAGE_KEY), title);
   });
   async function refreshDeveloperRemoteNotice() {
     if (!isDevToolsAvailable() || developerNoticePending.value) return;
@@ -375,8 +399,8 @@ export function useDeveloperConsole(host: DeveloperConsoleHost) {
     }
   
     const pathStorageKey = platform === "Windows"
-      ? DEV_GAME_WINDOWS_PATH_STORAGE_KEY
-      : DEV_GAME_ANDROID_PATH_STORAGE_KEY;
+      ? devGameKey(DEV_GAME_WINDOWS_PATH_STORAGE_KEY)
+      : devGameKey(DEV_GAME_ANDROID_PATH_STORAGE_KEY);
     const defaultPath = window.localStorage.getItem(pathStorageKey)
       || (platform === "Windows" ? "D:\\TFAC-hz64\\CrossingVoid" : "D:\\TFAC-hz64");
     const selected = await open({
@@ -464,7 +488,8 @@ export function useDeveloperConsole(host: DeveloperConsoleHost) {
   
     developerNoticePending.value = true;
     try {
-      const result = await invoke<string>("dev_publish_remote_notice", {
+      const result = await invoke<string>("dev_publish_remote_notice", {
+      gameId: activeGameId.value,
         title: developerNoticeTitle.value,
         content: developerNoticeContent.value,
         level: developerNoticeLevel.value,
@@ -574,6 +599,7 @@ export function useDeveloperConsole(host: DeveloperConsoleHost) {
 
     try {
       const result = await invoke<string>("dev_publish_download_channels", {
+      gameId: activeGameId.value,
         channels: developerChannels.value.map((channel) => ({
           key: channel.key,
           enabled: channel.enabled,

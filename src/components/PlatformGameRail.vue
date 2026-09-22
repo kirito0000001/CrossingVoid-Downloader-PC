@@ -6,6 +6,8 @@ defineProps<{
   games: readonly PlatformGameDefinition[];
   activeId: PlatformGameId;
   overviewActive: boolean;
+  /** 每一档的下载百分比（正在下载/修复才有）；键是游戏 id。 */
+  downloadPercents?: Record<string, number>;
 }>();
 
 const emit = defineEmits<{
@@ -30,6 +32,16 @@ const emit = defineEmits<{
         <House v-if="game.id === 'tfac-home'" :size="24" stroke-width="2.2" aria-hidden="true" />
         <img v-else-if="game.iconSrc" :src="game.iconSrc" alt="" aria-hidden="true" />
         <span v-else aria-hidden="true">{{ game.shortLabel }}</span>
+        <!--
+          正在下载的档位在图标底部压一条进度条：玩家切到别的游戏去逛时，
+          侧栏还能看出"哪一档在下、到哪了"。下载百分比来自 App.vue 的运行时快照。
+        -->
+        <b
+          v-if="downloadPercents?.[game.id] !== undefined"
+          class="platform-game-button__progress"
+          :style="{ width: `${downloadPercents[game.id]}%` }"
+          aria-hidden="true"
+        ></b>
         <i></i>
       </button>
     </div>
@@ -129,6 +141,22 @@ const emit = defineEmits<{
 
 .platform-game-button.active i {
   opacity: 1;
+}
+
+/*
+ * 下载进度条压在格子底部：格子自己 overflow: visible（选中指示条要露到外面），
+ * 所以这里自己裁圆角，别指望父级裁。
+ */
+.platform-game-button__progress {
+  position: absolute;
+  left: 0;
+  right: auto;
+  bottom: 0;
+  height: 3px;
+  max-width: 100%;
+  border-radius: 0 0 5px 5px;
+  background: var(--cv-download-progress-end);
+  pointer-events: none;
 }
 
 .platform-overview-button {

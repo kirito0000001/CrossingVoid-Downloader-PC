@@ -126,6 +126,13 @@ export type DownloadProgressEvent = {
   downloadedBytes: number;
   totalBytes: number;
   percent: number;
+  /**
+   * 这条进度属于哪个安装目录。
+   *
+   * 玩家可以切到别的档位去逛，下载任务照跑 —— 前端按它把进度归回各自的游戏。
+   * 旧的切片下载链路不带这个字段（空串），按"当前档位"处理。
+   */
+  installPath?: string;
   /** 文件级下载（清单 v1）才有的计数；切片下载不带这两个字段。 */
   doneFiles?: number;
   totalFiles?: number;
@@ -137,6 +144,8 @@ export type DownloadProgressEvent = {
  * 不能碰字节进度 —— 否则进度条会先掉到 0 再爬回来。
  */
 export type GamePackageScanProgressEvent = {
+  /** 见 `DownloadProgressEvent.installPath`。 */
+  installPath?: string;
   checkedFiles: number;
   totalFiles: number;
   /** 已经对得上清单的条数与字节数：前端拿它驱动进度条（和后面的下载是同一把尺子）。 */
@@ -150,6 +159,8 @@ export type GamePackageScanProgressEvent = {
  * 有了它才能把"网络不佳"换成"校验文件"。
  */
 export type GamePackagePhaseEvent = {
+  /** 见 `DownloadProgressEvent.installPath`。 */
+  installPath?: string;
   phase: string;
 };
 export type RepairSummary = {

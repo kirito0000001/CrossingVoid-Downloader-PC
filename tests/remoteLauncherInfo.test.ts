@@ -29,9 +29,11 @@ describe("shared remote launcher info core", () => {
     const source = readFileSync(resolve(process.cwd(), "src/remoteLauncherInfo.ts"), "utf8")
       .split("\r\n")
       .join("\n");
-    expect(REMOTE_LAUNCHER_INFO_CORE_VERSION).toBe("1");
+    // 2026-09-22：公告与渠道开关改成按档位（`notices/<id>.json` / `channels/<id>.json`），
+    // 契约版本抬到 2。这一版只改了 PC；安卓端不做平台，保持读老文件。
+    expect(REMOTE_LAUNCHER_INFO_CORE_VERSION).toBe("2");
     expect(createHash("sha256").update(source, "utf8").digest("hex")).toBe(
-      "f617fd8ca540cd2c9ae5759e30abd2d6b9df73de4e1d70e4e37d720522fb8de7",
+      "b0fae3fb4d76c0af485ae9013d2bbf1eca0e5a80feeefbff5f9decd626eb74c9",
     );
   });
 

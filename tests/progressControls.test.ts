@@ -37,7 +37,10 @@ describe("long-running progress controls", () => {
     );
 
     expect(appSource).toContain("canCancelGameDownload");
-    expect(cancelFunction).toContain('invoke("pause_game_download")');
+    // 暂停要带上是哪一档：取消标志按任务（安装目录）存，见下载任务模块。
+    expect(cancelFunction).toContain(
+      'invoke("pause_game_download", { installPath: installPath.value })',
+    );
     expect(cancelFunction).toContain("waitForGameDownloadToStop");
     expect(cancelFunction).toContain('invoke("clear_game_download_artifacts"');
     expect(cancelFunction).toContain("downloadedBytes.value = 0");
@@ -50,8 +53,10 @@ describe("long-running progress controls", () => {
     expect(appSource).toContain("repairOperationStage");
     expect(appSource).toContain("pauseRepairDownload");
     expect(appSource).toContain("cancelCurrentGameOperation");
-    expect(appSource).toContain('invoke("cancel_game_operation")');
-    expect(rustSource).toContain("fn cancel_game_operation()");
+    expect(appSource).toContain(
+      'invoke("cancel_game_operation", { installPath: installPath.value })',
+    );
+    expect(rustSource).toContain("fn cancel_game_operation(install_path: Option<String>)");
   });
 
   it("pauses and resumes developer game uploads with their original context", () => {
@@ -104,9 +109,11 @@ describe("long-running progress controls", () => {
           gamePackageRustSource.indexOf(entryPoint),
           gamePackageRustSource.indexOf(entryPoint) + 900,
         );
-      expect(body, entryPoint).toContain("reset_download_cancelled()");
+      // 进任务作用域时清标志：以前是进程级 clear，现在是"这一档的任务标志"。
+      expect(body, entryPoint).toContain("download_task::begin(");
     }
-    expect(rustSource).toContain("pub(crate) fn reset_download_cancelled()");
+    expect(rustSource).toContain("mod download_task;");
+    expect(rustSource).toContain("download_task::is_cancelled()");
     // 核对本地文件也要能被暂停打断，否则任务会一直挂在"下载中"，前端那个闸门不放开。
     expect(gamePackageRustSource).toContain("check_download_cancelled()?");
   });

@@ -9,7 +9,7 @@ const appSource = readFileSync(resolve(process.cwd(), "src/App.vue"), "utf8");
 describe("game update metadata source", () => {
   it("reads version metadata from the stable website before a download is requested", () => {
     expect(appSource).toContain(
-      'const gameMetadataManifestUrl = "https://www.crossingvoid.top/manifests/game/windows-latest.json";',
+      'const legacyGameMetadataManifestUrl = "https://www.crossingvoid.top/manifests/game/windows-latest.json";',
     );
     expect(appSource).toContain("fetchGameMetadataArchiveInfo");
 
