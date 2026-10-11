@@ -186,4 +186,27 @@ describe("feedback quick-link tooltip", () => {
     expect(titlebar).toContain(".button-tooltip.tip-visible");
     expect(titlebar).not.toContain("feedback-tooltip:not(.tip-visible)");
   });
+
+  it("waits for the counts before showing the auto tip", () => {
+    // 两次真实的时序事故（2026-10-11）：
+    //  1. 只安排一次、且要求 isGamePageActive 当场成立 —— 不成立就再也不弹；
+    //  2. 先加 tip-visible 再拉计数 —— 首次运行没有缓存，加类时模板里那个框还没渲染，等于白弹。
+    // 硬约束：模板只在 feedbackCounts 有值时才画那个框，所以加类前必须先有计数。
+    const appSource = readSource("src/App.vue");
+
+    // 模板里那个框的渲染条件包含 feedbackCounts。
+    expect(appSource).toContain("item.key === QUICK_LINK_FEEDBACK_KEY && feedbackCounts");
+
+    // 加类之前必须检查计数（顺序：先判 feedbackCounts，再判页面）。
+    const guardIndex = appSource.indexOf("if (!feedbackCounts.value) {");
+    const tipIndex = appSource.indexOf("feedbackAutoTip.value = true;");
+    expect(guardIndex).toBeGreaterThan(0);
+    expect(tipIndex).toBeGreaterThan(guardIndex);
+
+    // 计数到位时必须有人来叫它（否则首次运行永远不会弹）。
+    expect(appSource).toContain("watch([feedbackCounts, isGamePageActive], () => {");
+
+    // 计数一直不来（首次运行 + 没网）时要有截止时间，不能无限等。
+    expect(appSource).toContain("feedbackAutoTipDeadline");
+  });
 });

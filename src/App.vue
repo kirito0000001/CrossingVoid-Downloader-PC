@@ -4766,19 +4766,28 @@ const FEEDBACK_AUTO_TIP_DURATION_MS = 8000;
 const FEEDBACK_AUTO_TIP_DELAY_MS = 900;
 let feedbackAutoTipRetryTimer: number | undefined;
 let feedbackAutoTipRetryCount = 0;
+/** 等待计数的截止时刻：首次运行且没网时不能无限等下去。 */
+let feedbackAutoTipDeadline = 0;
 
 /**
- * 自动弹出反馈提示。
+ * 自动弹出反馈提示。停 8 秒，每次启动只弹一次。
  *
- * 两条触发路径，合起来保证"该看到的时候一定看得到"：
- * 1. 启动流程结束时（`armFeedbackAutoTip`）；
- * 2. 玩家从平台总览切回零境页面时（`watch(isGamePageActive)`）。
+ * ⚠️ 这里的**唯一硬条件**是"那一刻提示真的画出来了"：
+ * 模板只在 `feedbackCounts` 有值时才渲染这个框（没有数字的提示不如不显示），
+ * 所以 `tip-visible` 这个类**必须等计数到位再加**。
  *
- * 条件不成立时**会重试**：首版写成"判定失败就 return"，而那一刻
- * `isGamePageActive` 还没成立的话就再也没人叫它了（2026-10-11 用户报"8 秒弹出没做"）。
+ * 走过的弯路（2026-10-11，两次都是时序）：
+ * 1. 先只安排一次、且要求 isGamePageActive 当场成立 —— 不成立就再也不弹；
+ * 2. 改成"先加类、再拉计数" —— 首次运行没有缓存，加类时框还没渲染，等于白弹。
+ * 现在的顺序是：**等计数（或超时）→ 确认站在零境页面（不成立就重试）→ 加类 → 开始 8 秒计时**。
  */
 function showFeedbackAutoTipOnce() {
   if (feedbackAutoTipConsumed) return;
+  if (!feedbackCounts.value) {
+    // 计数还没到位：等 watch(feedbackCounts) 来叫，最多等 6 秒。
+    if (feedbackAutoTipDeadline && Date.now() > feedbackAutoTipDeadline) return;
+    return;
+  }
   if (!isGamePageActive.value || gameOverviewVisible.value) {
     // 还没站在零境页面上：等它成立，最多重试 20 次（约 6 秒）。
     if (feedbackAutoTipRetryCount >= 20) return;
@@ -4793,29 +4802,27 @@ function showFeedbackAutoTipOnce() {
   feedbackAutoTipTimer = window.setTimeout(() => {
     feedbackAutoTip.value = false;
   }, FEEDBACK_AUTO_TIP_DURATION_MS);
-  if (import.meta.env.DEV) {
-    console.info("[feedback] 自动弹出提示，8 秒后收起");
-  }
 }
 
-/** 启动流程结束时调用：先用缓存把提示安排上，再用网络结果刷新数字。 */
+/** 启动流程结束时调用：拉计数，并在计数到位/超时后尝试弹出。 */
 async function armFeedbackAutoTip() {
   feedbackAutoTipRetryCount = 0;
-  // 先安排弹出（缓存命中时立刻就有数字），网络请求在后台刷新。
-  window.clearTimeout(feedbackAutoTipRetryTimer);
-  feedbackAutoTipRetryTimer = window.setTimeout(showFeedbackAutoTipOnce, FEEDBACK_AUTO_TIP_DELAY_MS);
+  feedbackAutoTipDeadline = Date.now() + 6000;
   try {
     await Promise.race([
       refreshFeedbackCounts(),
       new Promise((resolve) => window.setTimeout(resolve, 4000)),
     ]);
   } catch {
-    // 网络失败不影响弹出：数字用缓存里的旧值。
+    // 网络失败不影响弹出：用缓存里的旧值（首次运行且没网时，走下面 watch 的超时分支）。
   }
-  if (import.meta.env.DEV) {
-    console.info("[feedback] 自动提示已安排", { counts: feedbackCounts.value });
-  }
+  window.setTimeout(showFeedbackAutoTipOnce, FEEDBACK_AUTO_TIP_DELAY_MS);
 }
+
+// 计数一到就尝试弹（首次运行时它是唯一的触发点）；顺带覆盖"从总览切回零境页面"的场景。
+watch([feedbackCounts, isGamePageActive], () => {
+  if (!feedbackAutoTipConsumed) showFeedbackAutoTipOnce();
+});
 
 function openFeedbackPanel() {
   showFeedback.value = true;
@@ -4823,13 +4830,6 @@ function openFeedbackPanel() {
   window.clearTimeout(feedbackAutoTipTimer);
   window.clearTimeout(feedbackAutoTipRetryTimer);
 }
-
-// 从平台总览切回零境页面时也要能弹出：启动那一刻可能还没站在零境页面上。
-watch(isGamePageActive, (active) => {
-  if (active && !feedbackAutoTipConsumed) {
-    window.setTimeout(showFeedbackAutoTipOnce, 300);
-  }
-});
 
 async function startWindowDrag(event: MouseEvent) {
   if (event.button !== 0) return;
