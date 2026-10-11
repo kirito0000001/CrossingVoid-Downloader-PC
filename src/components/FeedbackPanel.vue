@@ -221,7 +221,6 @@ onBeforeUnmount(() => {
             </button>
           </li>
         </ul>
-        <p v-if="list && list.fromCache && issues.length" class="feedback-hint">{{ t("feedback.cached") }}</p>
       </div>
 
       <!-- 详情：正文 + 评论（可发表评论，但不能改 issue） -->

@@ -40,13 +40,13 @@ describe("launcher text module", () => {
 describe("launcher text placeholders", () => {
   it("replaces {count} with the given value", () => {
     expect(translate("zh-Hans", "status.verificationIssues", { count: 3 })).toBe("发现异常 3 项");
-    expect(translate("en", "feedback.count.bug", { count: 0 })).toBe("Bugs 0");
+    expect(translate("zh-Hans", "feedback.count.bug", { count: 0 })).toBe("当前BUG数目：0。");
   });
 
   it("keeps unknown placeholders untouched and works without replacements", () => {
     // 没有传 replacements 时，占位符原样保留（调用方漏传时能从文案看出来）。
     expect(translate("zh-Hans", "status.verificationIssues")).toBe("发现异常 {count} 项");
-    expect(translate("zh-Hans", "feedback.count.bug", { other: 1 })).toBe("BUG {count}");
+    expect(translate("zh-Hans", "feedback.count.bug", { other: 1 })).toBe("当前BUG数目：{count}。");
   });
 
   it("falls back to simplified Chinese for a missing key in another language", () => {

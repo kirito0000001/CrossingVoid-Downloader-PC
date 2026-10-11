@@ -8,8 +8,16 @@
  * 画布按 1200×675 设计坐标排版（指南 §10.3）：面板固定 900×540，不做跟随缩放。
  */
 
+/*
+ * 遮罩锚在**视口**上，不是 1200×675 的设计画布上。
+ *
+ * 为什么：窗口的 CSS 视口可能比设计尺寸小（本机实测约 1012×571，见指南 §10.3 与
+ * §25「背景图被裁得比设计多」）。用 `position: absolute` 时包含块是 1200 宽的画布，
+ * `place-items: center` 会把面板居中到画布中心 → 面板右边缘落到视口外被裁掉
+ * （2026-10-11 用户报「页面比例也不对」）。`fixed` 让包含块变成用户真正看得见的窗口。
+ */
 .feedback-mask {
-  position: absolute;
+  position: fixed;
   inset: 0;
   z-index: 240;
   display: grid;
@@ -31,8 +39,9 @@
   position: relative;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  width: 900px;
-  height: 540px;
+  /* 设计尺寸 900×540；窗口比设计坐标小的时候按视口收敛，别让边缘跑到屏幕外。 */
+  width: min(900px, calc(100vw - 96px));
+  height: min(540px, calc(100vh - 72px));
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--cv-accent-soft) 22%, transparent);
   border-radius: 3px;
@@ -151,13 +160,6 @@
   text-align: left;
   line-height: 1.6;
   word-break: break-word;
-}
-
-.feedback-hint {
-  margin: 12px 0 0;
-  color: rgba(255, 255, 255, 0.42);
-  font-size: 12px;
-  text-align: center;
 }
 
 /* ── 列表 ───────────────────────────────────────────── */

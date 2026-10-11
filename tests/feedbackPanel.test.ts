@@ -209,4 +209,19 @@ describe("feedback quick-link tooltip", () => {
     // 计数一直不来（首次运行 + 没网）时要有截止时间，不能无限等。
     expect(appSource).toContain("feedbackAutoTipDeadline");
   });
+
+  it("anchors the feedback mask to the viewport, not the design canvas", () => {
+    // 与「背景图被裁得比设计多」（指南 §25）同一个坑：窗口的 CSS 视口可能小于
+    // 1200×675 的设计坐标（本机实测约 1012×571）。遮罩若用 absolute，包含块是 1200 宽的画布，
+    // 居中会把面板右缘推到视口外裁掉（2026-10-11 用户报「页面比例也不对」）。
+    const css = readSource("src/styles/feedback-panel.css");
+    const maskBlock = css.slice(css.indexOf(".feedback-mask {"), css.indexOf(".feedback-panel {"));
+    expect(maskBlock).toContain("position: fixed");
+    expect(maskBlock).not.toContain("position: absolute");
+
+    // 面板尺寸要能随视口收敛，避免小窗口下面板边缘跑出屏幕。
+    const panelBlock = css.slice(css.indexOf(".feedback-panel {"));
+    expect(panelBlock).toContain("min(900px, calc(100vw - 96px))");
+    expect(panelBlock).toContain("min(540px, calc(100vh - 72px))");
+  });
 });
