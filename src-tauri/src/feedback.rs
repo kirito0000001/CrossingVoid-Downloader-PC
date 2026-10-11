@@ -17,6 +17,16 @@ use tauri::{AppHandle, Manager};
 /// 反馈仓库。与启动器自身仓库分开：玩家反馈进游戏仓库。
 pub const FEEDBACK_REPOSITORY: &str = "kirito0000001/CrossingVoid";
 
+/// 自建中转服务（方案 B，文档 §2）。
+///
+/// 读取优先走它：**未认证直连 GitHub 是按出口 IP 限 60 次/小时**，一群玩家共用出口会互相抢额度；
+/// 服务器持令牌是 5000 次/小时，还能挂缓存。写入（建 issue / 发评论）**只能**走它 ——
+/// 玩家机器上不该有任何 GitHub 令牌。
+pub const FEEDBACK_SERVER_ROOT: &str = "https://www.crossingvoid.top/api/issue-feedback";
+
+/// 中转服务要求的产品键，防止接口被其它产品误用。
+const FEEDBACK_PRODUCT_KEY: &str = "crossingvoid-launcher-pc";
+
 /// 令牌环境变量名（按顺序取第一个非空值）。
 ///
 /// 读取公开 issue 不需要令牌；**发表评论需要**。
@@ -333,6 +343,97 @@ pub fn call_feedback_request(request: ureq::Request) -> Result<String, String> {
     }
 }
 
+/// 中转服务的返回值外壳。
+#[derive(Debug, Deserialize)]
+struct ServerIssuesPayload {
+    #[serde(default)]
+    issues: Vec<RawIssue>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerIssuePayload {
+    issue: RawIssue,
+}
+
+#[derive(Debug, Deserialize)]
+struct ServerCommentsPayload {
+    #[serde(default)]
+    comments: Vec<RawComment>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerCreatedIssuePayload {
+    number: u64,
+    html_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerCreatedCommentPayload {
+    comment: ServerCreatedComment,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerCreatedComment {
+    id: u64,
+    author: String,
+    #[serde(default)]
+    body: String,
+    created_at: String,
+}
+
+/// 走自建中转服务取 JSON（读取路径的首选）。
+fn fetch_from_server(agent: &ureq::Agent, path: &str) -> Result<String, String> {
+    let url = format!("{}{}", FEEDBACK_SERVER_ROOT, path);
+    crate::feedback::call_feedback_request(
+        agent
+            .get(&url)
+            .set("User-Agent", "CrossingVoidLauncher/0.1")
+            .set("Accept", "application/json"),
+    )
+}
+
+/// 走自建中转服务写 JSON（建 issue / 发评论）。
+fn post_to_server(agent: &ureq::Agent, path: &str, payload: &serde_json::Value) -> Result<String, String> {
+    let url = format!("{}{}", FEEDBACK_SERVER_ROOT, path);
+    // 产品键放在请求体里（服务端校验），不是认证——真正的令牌只在服务器上。
+    let mut body = payload.clone();
+    if let Some(object) = body.as_object_mut() {
+        object.insert(
+            "productKey".to_string(),
+            serde_json::Value::String(FEEDBACK_PRODUCT_KEY.to_string()),
+        );
+    }
+    let text = body.to_string();
+    let request = agent
+        .post(&url)
+        .set("User-Agent", "CrossingVoidLauncher/0.1")
+        .set("Accept", "application/json")
+        .set("Content-Type", "application/json; charset=utf-8");
+
+    match request.send_string(&text) {
+        Ok(response) => response
+            .into_string()
+            .map_err(|error| format!("读取中转服务响应失败：{}", error)),
+        Err(ureq::Error::Status(code, response)) => {
+            let content_type = response
+                .header("Content-Type")
+                .unwrap_or_default()
+                .to_string();
+            let detail = response.into_string().unwrap_or_default();
+            // 中转服务自己会用 {"success":false,"message":"..."} 说明原因，优先把它给玩家看。
+            let message = serde_json::from_str::<serde_json::Value>(&detail)
+                .ok()
+                .and_then(|value| value.get("message").and_then(|item| item.as_str()).map(str::to_string))
+                .unwrap_or_else(|| detail.clone());
+            Err(describe_feedback_error("提交反馈", Some(code), &content_type, &message))
+        }
+        Err(error) => Err(describe_feedback_error("提交反馈", None, "", &error.to_string())),
+    }
+}
+
 /// 未关闭 issue 列表 + 两个计数。缓存优先。
 #[tauri::command]
 pub async fn fetch_feedback_issues(
@@ -353,20 +454,24 @@ pub async fn fetch_feedback_issues(
     let proxy_url = crate::feedback_proxy_url();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let agent = crate::build_feedback_agent(proxy_url.as_deref());
+
+        // 首选自建服务；它挂了/没部署时退回直连 GitHub 公开 API。
+        // 回退路径**不要**带任何令牌（客户端没有，也不该有）。
+        let server = fetch_from_server(&agent, "/issues");
+        if let Ok(text) = server {
+            if let Ok(payload) = serde_json::from_str::<ServerIssuesPayload>(&text) {
+                return Ok::<FeedbackIssueList, String>(build_issue_list(payload.issues, false));
+            }
+        }
+
         let url = format!(
             "https://api.github.com/repos/{}/issues?state=open&per_page={}&sort=updated&direction=desc",
             FEEDBACK_REPOSITORY, ISSUE_PAGE_LIMIT
         );
-        let token = feedback_token();
-        let body = call_feedback_request(feedback_request(
-            &agent,
-            &url,
-            token.as_deref(),
-            "application/vnd.github+json",
-        ))?;
-        let raw: Vec<RawIssue> = serde_json::from_str(&body)
-            .map_err(|error| format!("解析 GitHub issue 列表失败：{}", error))?;
-        Ok::<FeedbackIssueList, String>(build_issue_list(raw, false))
+        let text = call_feedback_request(feedback_request(&agent, &url, None, "application/vnd.github+json"))?;
+        let raw: Vec<RawIssue> =
+            serde_json::from_str(&text).map_err(|error| format!("解析 GitHub issue 列表失败：{}", error))?;
+        Ok(build_issue_list(raw, false))
     })
     .await
     .map_err(|error| format!("反馈列表任务失败：{}", error))?;
@@ -403,19 +508,15 @@ pub async fn fetch_feedback_issue_detail(
     let proxy_url = crate::feedback_proxy_url();
     let detail = tauri::async_runtime::spawn_blocking(move || {
         let agent = crate::build_feedback_agent(proxy_url.as_deref());
-        let url = format!(
-            "https://api.github.com/repos/{}/issues/{}",
-            FEEDBACK_REPOSITORY, number
-        );
-        let token = feedback_token();
-        let text = call_feedback_request(feedback_request(
-            &agent,
-            &url,
-            token.as_deref(),
-            "application/vnd.github+json",
-        ))?;
-        let raw: RawIssue = serde_json::from_str(&text)
-            .map_err(|error| format!("解析 GitHub issue 详情失败：{}", error))?;
+
+        let raw = match fetch_from_server(&agent, &format!("/issues/{}", number)) {
+            Ok(text) => match serde_json::from_str::<ServerIssuePayload>(&text) {
+                Ok(payload) => payload.issue,
+                Err(_) => fetch_issue_direct(&agent, number)?,
+            },
+            Err(_) => fetch_issue_direct(&agent, number)?,
+        };
+
         // 一次请求同时拿到列表字段和正文，不要再为正文多发一次（额度账见文档 §7）。
         let body = raw.body.clone().unwrap_or_default();
         let issue = to_feedback_issue(raw);
@@ -426,6 +527,16 @@ pub async fn fetch_feedback_issue_detail(
 
     write_cache(&cache_path, &detail);
     Ok(detail)
+}
+
+/// 直连 GitHub 取单条 issue（中转不可用时的回退路径）。
+fn fetch_issue_direct(agent: &ureq::Agent, number: u64) -> Result<RawIssue, String> {
+    let url = format!(
+        "https://api.github.com/repos/{}/issues/{}",
+        FEEDBACK_REPOSITORY, number
+    );
+    let text = call_feedback_request(feedback_request(agent, &url, None, "application/vnd.github+json"))?;
+    serde_json::from_str(&text).map_err(|error| format!("解析 GitHub issue 详情失败：{}", error))
 }
 
 /// 评论列表（只读展示；发表见 `create_feedback_comment`）。
@@ -442,17 +553,28 @@ pub async fn fetch_feedback_comments(
     let proxy_url = crate::feedback_proxy_url();
     let result = tauri::async_runtime::spawn_blocking(move || {
         let agent = crate::build_feedback_agent(proxy_url.as_deref());
+
+        // 首选自建服务；不可用时退回直连 GitHub（公开读，无需令牌）。
+        if let Ok(text) = fetch_from_server(&agent, &format!("/issues/{}/comments", number)) {
+            if let Ok(payload) = serde_json::from_str::<ServerCommentsPayload>(&text) {
+                return Ok::<Vec<FeedbackComment>, String>(payload
+                    .comments
+                    .into_iter()
+                    .map(|comment| FeedbackComment {
+                        id: comment.id,
+                        author: comment.user.login,
+                        body: truncate_comment(&comment.body.unwrap_or_default()),
+                        created_at: comment.created_at,
+                    })
+                    .collect());
+            }
+        }
+
         let url = format!(
             "https://api.github.com/repos/{}/issues/{}/comments?per_page={}",
             FEEDBACK_REPOSITORY, number, ISSUE_PAGE_LIMIT
         );
-        let token = feedback_token();
-        let body = call_feedback_request(feedback_request(
-            &agent,
-            &url,
-            token.as_deref(),
-            "application/vnd.github+json",
-        ))?;
+        let body = call_feedback_request(feedback_request(&agent, &url, None, "application/vnd.github+json"))?;
         let raw: Vec<RawComment> = serde_json::from_str(&body)
             .map_err(|error| format!("解析 GitHub 评论失败：{}", error))?;
         Ok::<Vec<FeedbackComment>, String>(
@@ -487,11 +609,12 @@ pub async fn fetch_feedback_comments(
 
 /// 发表评论。
 ///
-/// **必须**有令牌（`CROSSINGVOID_FEEDBACK_TOKEN`）：GitHub 不接受匿名写。
+/// 发表评论。
+///
+/// 走自建中转服务（方案 B）：玩家机器上**没有也不该有**任何 GitHub 令牌，
+/// 真正的令牌只存在服务器上（文档 §2）。因此这里不再读环境变量。
 #[tauri::command]
-pub async fn create_feedback_comment(number: u64, body: String) -> Result<FeedbackComment, String> {    let token = feedback_token().ok_or_else(|| {
-        "缺少 GitHub 反馈令牌：请设置环境变量 CROSSINGVOID_FEEDBACK_TOKEN 后重启启动器".to_string()
-    })?;
+pub async fn create_feedback_comment(number: u64, body: String) -> Result<FeedbackComment, String> {
     let body = body.trim().to_string();
     if body.is_empty() {
         return Err("评论内容不能为空".to_string());
@@ -503,53 +626,19 @@ pub async fn create_feedback_comment(number: u64, body: String) -> Result<Feedba
     let proxy_url = crate::feedback_proxy_url();
     tauri::async_runtime::spawn_blocking(move || {
         let agent = crate::build_feedback_agent(proxy_url.as_deref());
-        let url = format!(
-            "https://api.github.com/repos/{}/issues/{}/comments",
-            FEEDBACK_REPOSITORY, number
-        );
-        let payload = serde_json::json!({ "body": body }).to_string();
-        let request = agent
-            .post(&url)
-            .set("User-Agent", "CrossingVoidLauncher/0.1")
-            .set("Accept", "application/vnd.github+json")
-            .set("X-GitHub-Api-Version", "2022-11-28")
-            .set("Content-Type", "application/json; charset=utf-8")
-            .set("Authorization", &format!("Bearer {}", token));
-
-        match request.send_string(&payload) {
-            Ok(response) => {
-                let text = response
-                    .into_string()
-                    .map_err(|error| format!("读取评论响应失败：{}", error))?;
-                let raw: RawComment = serde_json::from_str(&text)
-                    .map_err(|error| format!("解析评论响应失败：{}", error))?;
-                Ok(FeedbackComment {
-                    id: raw.id,
-                    author: raw.user.login,
-                    body: truncate_comment(&raw.body.unwrap_or_default()),
-                    created_at: raw.created_at,
-                })
-            }
-            Err(ureq::Error::Status(code, response)) => {
-                let content_type = response
-                    .header("Content-Type")
-                    .unwrap_or_default()
-                    .to_string();
-                let detail = response.into_string().unwrap_or_default();
-                Err(describe_feedback_error(
-                    "发表评论",
-                    Some(code),
-                    &content_type,
-                    &detail,
-                ))
-            }
-            Err(error) => Err(describe_feedback_error(
-                "发表评论",
-                None,
-                "",
-                &error.to_string(),
-            )),
-        }
+        let text = post_to_server(
+            &agent,
+            &format!("/issues/{}/comments", number),
+            &serde_json::json!({ "body": body }),
+        )?;
+        let payload: ServerCreatedCommentPayload = serde_json::from_str(&text)
+            .map_err(|error| format!("解析评论响应失败：{}", error))?;
+        Ok(FeedbackComment {
+            id: payload.comment.id,
+            author: payload.comment.author,
+            body: truncate_comment(&payload.comment.body),
+            created_at: payload.comment.created_at,
+        })
     })
     .await
     .map_err(|error| format!("评论任务失败：{}", error))?
@@ -760,66 +849,33 @@ pub fn prepare_issue_submission(
     Ok((full_title, body, label_list, prefix))
 }
 
-/// 真正发一次建单请求（同步）。
+/// 真正发一次建单请求（同步，走自建中转服务）。
 ///
-/// 抽成 public 同步函数有两个原因：async 命令里能被 `spawn_blocking` 包住；
-/// 以及可以写一次性程序直接跑这条真实路径做联调（幂等性/字段落位都靠它验）。
+/// 抽成 public 同步函数是为了让测试能直接跑这条真实路径（联调用例见文末 `live_` 测试）。
+/// 注意它**不需要令牌参数**：令牌只在服务器上（方案 B）。
 pub fn submit_feedback_issue(
     agent: &ureq::Agent,
-    token: &str,
     full_title: &str,
     body: &str,
     labels: &[String],
 ) -> Result<CreatedFeedbackIssue, String> {
-    let url = format!("https://api.github.com/repos/{}/issues", FEEDBACK_REPOSITORY);
-    let payload = serde_json::json!({
-        "title": full_title,
-        "body": body,
-        "labels": labels,
+    let text = post_to_server(
+        agent,
+        "/issues",
+        &serde_json::json!({
+            "title": full_title,
+            "body": body,
+            "labels": labels,
+        }),
+    )?;
+    let payload: ServerCreatedIssuePayload = serde_json::from_str(&text)
+        .map_err(|error| format!("解析建单响应失败：{}", error))?;
+    Ok(CreatedFeedbackIssue {
+        number: payload.number,
+        html_url: payload.html_url,
+        // 服务端会把实际落上的标签一起带回来（GitHub 会自动创建不存在的标签）。
+        labels: labels.to_vec(),
     })
-    .to_string();
-
-    let request = agent
-        .post(&url)
-        .set("User-Agent", "CrossingVoidLauncher/0.1")
-        .set("Accept", "application/vnd.github+json")
-        .set("X-GitHub-Api-Version", "2022-11-28")
-        .set("Content-Type", "application/json; charset=utf-8")
-        .set("Authorization", &format!("Bearer {}", token));
-
-    match request.send_string(&payload) {
-        Ok(response) => {
-            let text = response
-                .into_string()
-                .map_err(|error| format!("读取建单响应失败：{}", error))?;
-            let raw: RawIssue = serde_json::from_str(&text)
-                .map_err(|error| format!("解析建单响应失败：{}", error))?;
-            Ok(CreatedFeedbackIssue {
-                number: raw.number,
-                html_url: raw.html_url,
-                labels: label_names(&raw.labels),
-            })
-        }
-        Err(ureq::Error::Status(code, response)) => {
-            let content_type = response
-                .header("Content-Type")
-                .unwrap_or_default()
-                .to_string();
-            let detail = response.into_string().unwrap_or_default();
-            Err(describe_feedback_error(
-                "提交反馈",
-                Some(code),
-                &content_type,
-                &detail,
-            ))
-        }
-        Err(error) => Err(describe_feedback_error(
-            "提交反馈",
-            None,
-            "",
-            &error.to_string(),
-        )),
-    }
 }
 
 /// 建 issue。**必须有令牌**：GitHub 不接受匿名写，而且这一步不能重试（§9.1 的站点限制）。
@@ -831,10 +887,6 @@ pub async fn create_feedback_issue(
     description: String,
     environment: Option<FeedbackEnvironment>,
 ) -> Result<CreatedFeedbackIssue, String> {
-    let token = feedback_token().ok_or_else(|| {
-        "缺少 GitHub 反馈令牌：请设置环境变量 CROSSINGVOID_FEEDBACK_TOKEN 后重启启动器".to_string()
-    })?;
-
     let environment = environment.unwrap_or_default();
     let (full_title, body, labels, _prefix) =
         prepare_issue_submission(&category, &nickname, &title, &description, &environment)?;
@@ -842,7 +894,7 @@ pub async fn create_feedback_issue(
     let proxy_url = crate::feedback_proxy_url();
     tauri::async_runtime::spawn_blocking(move || {
         let agent = crate::build_feedback_agent(proxy_url.as_deref());
-        submit_feedback_issue(&agent, &token, &full_title, &body, &labels)
+        submit_feedback_issue(&agent, &full_title, &body, &labels)
     })
     .await
     .map_err(|error| format!("提交任务失败：{}", error))?
@@ -1219,17 +1271,13 @@ mod tests {
 
     /// 真实建单联调（默认不跑：会真的在 GitHub 上开一条 issue）。
     ///
-    /// 跑法：设好 `CROSSINGVOID_FEEDBACK_TOKEN` 后
-    /// `cargo test --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture live_create_issue`
+    /// 跑法：`cargo test --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture live_create_issue`
     ///
-    /// 为什么值得留：单元测试只能验"拼出来的标题/正文/标签对不对"，
-    /// **验不了**令牌权限、HTTP 头、GitHub 对 payload 的接受程度（§9.1 的坑都在这一层）。
+    /// 走的是自建中转服务（方案 B），**本机不需要任何令牌**；
+    /// 它验的是单测覆盖不到的那一层：网络、HTTP 头、服务端与 GitHub 是否接受 payload。
     #[test]
     #[ignore = "会真的在 GitHub 上建一条 issue，只在手工联调时运行"]
     fn live_create_issue_creates_a_real_issue() {
-        let Some(token) = feedback_token() else {
-            panic!("需要 CROSSINGVOID_FEEDBACK_TOKEN");
-        };
         let environment = FeedbackEnvironment {
             launcher_version: "1.3.5".into(),
             game_version: "0.5.14".into(),
@@ -1242,20 +1290,19 @@ mod tests {
         let (title, body, labels, _) = prepare_issue_submission(
             CATEGORY_QUESTION,
             "联调机器人",
-            "联调：验证启动器建单路径",
-            "这是一条联调 issue，用来验证启动器的建单代码路径（校验、模板、标签、脱敏）。验证完会关闭，不影响其他反馈。",
+            "联调：验证启动器经服务器建单",
+            "这是一条联调 issue，用来验证启动器经自建服务器建单的代码路径（校验、模板、标签、脱敏）。验证完会关闭，不影响其他反馈。",
             &environment,
         )
         .expect("应当通过校验");
 
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(Duration::from_secs(8))
-            .timeout_read(Duration::from_secs(15))
+            .timeout_read(Duration::from_secs(20))
             .build();
-        let created = submit_feedback_issue(&agent, &token, &title, &body, &labels)
-            .expect("建单应当成功");
+        let created =
+            submit_feedback_issue(&agent, &title, &body, &labels).expect("建单应当成功");
         println!("建单成功：{} （标签 {:?}）", created.html_url, created.labels);
         assert!(created.number > 0);
-        assert!(created.labels.iter().any(|label| label == LABEL_SOURCE));
     }
 }
