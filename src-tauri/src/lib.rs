@@ -4947,6 +4947,7 @@ pub fn run() {
             feedback::fetch_feedback_issue_detail,
             feedback::fetch_feedback_comments,
             feedback::create_feedback_comment,
+            feedback::create_feedback_issue,
             pause_game_download,
             cancel_game_operation,
             set_download_speed_limit,

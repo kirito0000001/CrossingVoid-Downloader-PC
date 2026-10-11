@@ -40,6 +40,10 @@ const ISSUE_PAGE_LIMIT: u32 = 100;
 /// 评论正文长度上限，防止异常数据把界面撑坏。
 const COMMENT_BODY_LIMIT: usize = 8 * 1024;
 
+/// 启动器提交的 issue 会带上的两个标签（文档 §3.2）。
+pub const LABEL_SOURCE: &str = "来源:启动器";
+pub const LABEL_PENDING: &str = "待确认";
+
 /// 一个类别的判定结果。
 pub const CATEGORY_BUG: &str = "bug";
 pub const CATEGORY_ENHANCEMENT: &str = "enhancement";
@@ -485,8 +489,7 @@ pub async fn fetch_feedback_comments(
 ///
 /// **必须**有令牌（`CROSSINGVOID_FEEDBACK_TOKEN`）：GitHub 不接受匿名写。
 #[tauri::command]
-pub async fn create_feedback_comment(number: u64, body: String) -> Result<FeedbackComment, String> {
-    let token = feedback_token().ok_or_else(|| {
+pub async fn create_feedback_comment(number: u64, body: String) -> Result<FeedbackComment, String> {    let token = feedback_token().ok_or_else(|| {
         "缺少 GitHub 反馈令牌：请设置环境变量 CROSSINGVOID_FEEDBACK_TOKEN 后重启启动器".to_string()
     })?;
     let body = body.trim().to_string();
@@ -550,6 +553,288 @@ pub async fn create_feedback_comment(number: u64, body: String) -> Result<Feedba
     })
     .await
     .map_err(|error| format!("评论任务失败：{}", error))?
+}
+
+// ── 写入侧：建 issue（文档 §4、§5） ─────────────────────────────
+
+/// 建 issue 时允许的四个类别。与启动器表单的选项一一对应。
+pub const SUBMIT_CATEGORIES: [&str; 4] = [
+    CATEGORY_BUG,
+    CATEGORY_ENHANCEMENT,
+    CATEGORY_IMPROVEMENT,
+    CATEGORY_QUESTION,
+];
+
+const TITLE_MIN_CHARS: usize = 4;
+const TITLE_MAX_CHARS: usize = 80;
+const DESCRIPTION_MIN_CHARS: usize = 20;
+const DESCRIPTION_MAX_CHARS: usize = 4000;
+const NICKNAME_MAX_CHARS: usize = 16;
+const ENVIRONMENT_VALUE_MAX_CHARS: usize = 300;
+
+/// 提交表单里的运行环境（全部可选：任何一项拿不到就整行不写）。
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackEnvironment {
+    #[serde(default)]
+    pub launcher_version: String,
+    #[serde(default)]
+    pub game_version: String,
+    #[serde(default)]
+    pub launcher_state: String,
+    #[serde(default)]
+    pub download_source: String,
+    /// 形如 `C:\Users\liuyu\...`；**写入正文前必须脱敏**。
+    #[serde(default)]
+    pub install_path: String,
+    #[serde(default)]
+    pub user_agent: String,
+    /// 玩家勾选"附带错误日志"时的摘要（本次由前端拼接；未勾选就是空串）。
+    #[serde(default)]
+    pub recent_logs: String,
+}
+
+/// 建 issue 的结果：前端拿它显示链接并刷新列表。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatedFeedbackIssue {
+    pub number: u64,
+    pub html_url: String,
+    pub labels: Vec<String>,
+}
+
+/// 单行输入的安全化：去掉控制字符与换行，trim。
+///
+/// 为什么必须做：这些值会进 issue 标题/正文，换行与省略号之类会破坏 Markdown 结构；
+/// 昵称还可能被塞进 `## 提交者` 那一节，必须挡掉换行与 `#` 开头这类注入面。
+pub fn sanitize_line(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn char_count(value: &str) -> usize {
+    value.chars().count()
+}
+
+/// 按类别给出标题前缀与标签（文档 §3.1）。
+///
+/// 注意：**标签必须和建 issue 放在同一个请求里**——实测 `PATCH /issues/{n}` 系统性失效（§9.1）。
+pub fn category_metadata(category: &str) -> Option<(&'static str, Vec<&'static str>)> {
+    match category {
+        CATEGORY_BUG => Some(("[BUG]", vec![CATEGORY_BUG])),
+        CATEGORY_ENHANCEMENT => Some(("[建议]", vec![CATEGORY_ENHANCEMENT])),
+        CATEGORY_IMPROVEMENT => Some(("[优化]", vec![CATEGORY_IMPROVEMENT])),
+        CATEGORY_QUESTION => Some(("[提问]", vec![CATEGORY_QUESTION])),
+        _ => None,
+    }
+}
+
+/// 安装目录脱敏：把 `C:\Users\<某个用户名>\...` 里的用户名换成 `<用户>`。
+///
+/// 不脱敏会把玩家的 Windows 用户名带进公开 issue（文档 §4 明确要求）。
+/// 只认 `Users\` / `Users/` 这一段，其余原样保留；识别不了就原样返回（宁可少脱一层，
+/// 也不要因为解析出错把整条路径改写坏）。
+pub fn redact_install_path(path: &str) -> String {
+    let trimmed = sanitize_line(path);
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let lower = trimmed.to_lowercase();
+    let Some(position) = lower.find("users\\").or_else(|| lower.find("users/")) else {
+        return trimmed;
+    };
+    let name_start = position + 6;
+    if name_start >= trimmed.len() {
+        return trimmed;
+    }
+    let name_end = trimmed[name_start..]
+        .find(['\\', '/'])
+        .map(|offset| name_start + offset)
+        .unwrap_or(trimmed.len());
+    if name_end <= name_start {
+        return trimmed;
+    }
+    // `trimmed[..name_start]` 已经包含 `Users` 与那个分隔符（如 `C:\Users\`）。
+    format!("{}<用户>{}", &trimmed[..name_start], &trimmed[name_end..])
+}
+
+/// 拼 issue 正文（文档 §5 的模板）。
+pub fn build_issue_body(
+    description: &str,
+    nickname: &str,
+    environment: &FeedbackEnvironment,
+) -> String {
+    let mut body = String::new();
+    body.push_str("## 问题描述\n");
+    body.push_str(description.trim());
+    body.push('\n');
+
+    if !nickname.is_empty() {
+        body.push_str("\n## 提交者\n");
+        body.push_str(nickname);
+        body.push('\n');
+    }
+
+    let mut environment_lines: Vec<String> = Vec::new();
+    let mut push_env = |label: &str, value: &str| {
+        let value = sanitize_line(value);
+        if value.is_empty() || value.chars().count() > ENVIRONMENT_VALUE_MAX_CHARS {
+            return;
+        }
+        environment_lines.push(format!("- {}：{}", label, value));
+    };
+    push_env("启动器版本", &environment.launcher_version);
+    push_env("游戏版本", &environment.game_version);
+    push_env("游戏状态", &environment.launcher_state);
+    push_env("下载源", &environment.download_source);
+    push_env("安装目录", &redact_install_path(&environment.install_path));
+    push_env("系统信息", &environment.user_agent);
+
+    if !environment_lines.is_empty() {
+        body.push_str("\n## 运行环境\n");
+        body.push_str(&environment_lines.join("\n"));
+        body.push('\n');
+    }
+
+    let logs = environment.recent_logs.trim();
+    if !logs.is_empty() {
+        // 日志可能很长；截断到 4000 字符（文档 §8.2 的正文上限）。
+        let truncated: String = logs.chars().take(DESCRIPTION_MAX_CHARS).collect();
+        body.push_str("\n## 最近错误日志\n\n```text\n");
+        body.push_str(&truncated);
+        body.push_str("\n```\n");
+    }
+
+    body
+}
+
+/// 校验并规范化玩家提交。返回（标题、正文、标签、前缀），或一句人话错误。
+pub fn prepare_issue_submission(
+    category: &str,
+    nickname: &str,
+    title: &str,
+    description: &str,
+    environment: &FeedbackEnvironment,
+) -> Result<(String, String, Vec<String>, &'static str), String> {
+    let (prefix, labels) = category_metadata(category.trim())
+        .ok_or_else(|| "请先选择反馈类别（BUG / 建议 / 优化 / 提问）".to_string())?;
+
+    let title = sanitize_line(title);
+    let title_chars = char_count(&title);
+    if title_chars < TITLE_MIN_CHARS {
+        return Err(format!("标题太短了，至少 {} 个字", TITLE_MIN_CHARS));
+    }
+    if title_chars > TITLE_MAX_CHARS {
+        return Err(format!("标题太长了，最多 {} 个字", TITLE_MAX_CHARS));
+    }
+
+    let description = description.trim();
+    let description_chars = char_count(description);
+    if description_chars < DESCRIPTION_MIN_CHARS {
+        return Err(format!(
+            "描述太短了，至少 {} 个字（写清：你做了什么、期望什么、实际发生了什么）",
+            DESCRIPTION_MIN_CHARS
+        ));
+    }
+    if description_chars > DESCRIPTION_MAX_CHARS {
+        return Err(format!("描述太长了，最多 {} 个字", DESCRIPTION_MAX_CHARS));
+    }
+
+    let nickname = sanitize_line(nickname);
+    if char_count(&nickname) > NICKNAME_MAX_CHARS {
+        return Err(format!("昵称最多 {} 个字", NICKNAME_MAX_CHARS));
+    }
+
+    let body = build_issue_body(description, &nickname, environment);
+    let full_title = format!("{} {}", prefix, title);
+
+    // 标签顺序固定：类别在前，来源与待确认在后（便于人工扫列表）。
+    let mut label_list: Vec<String> = labels.iter().map(|label| label.to_string()).collect();
+    label_list.push(LABEL_SOURCE.to_string());
+    label_list.push(LABEL_PENDING.to_string());
+
+    Ok((full_title, body, label_list, prefix))
+}
+
+/// 建 issue。**必须有令牌**：GitHub 不接受匿名写，而且这一步不能重试（§9.1 的站点限制）。
+#[tauri::command]
+pub async fn create_feedback_issue(
+    category: String,
+    nickname: String,
+    title: String,
+    description: String,
+    environment: Option<FeedbackEnvironment>,
+) -> Result<CreatedFeedbackIssue, String> {
+    let token = feedback_token().ok_or_else(|| {
+        "缺少 GitHub 反馈令牌：请设置环境变量 CROSSINGVOID_FEEDBACK_TOKEN 后重启启动器".to_string()
+    })?;
+
+    let environment = environment.unwrap_or_default();
+    let (full_title, body, labels, _prefix) =
+        prepare_issue_submission(&category, &nickname, &title, &description, &environment)?;
+
+    let proxy_url = crate::feedback_proxy_url();
+    tauri::async_runtime::spawn_blocking(move || {
+        let agent = crate::build_feedback_agent(proxy_url.as_deref());
+        let url = format!(
+            "https://api.github.com/repos/{}/issues",
+            FEEDBACK_REPOSITORY
+        );
+        let payload = serde_json::json!({
+            "title": full_title,
+            "body": body,
+            "labels": labels,
+        })
+        .to_string();
+
+        let request = agent
+            .post(&url)
+            .set("User-Agent", "CrossingVoidLauncher/0.1")
+            .set("Accept", "application/vnd.github+json")
+            .set("X-GitHub-Api-Version", "2022-11-28")
+            .set("Content-Type", "application/json; charset=utf-8")
+            .set("Authorization", &format!("Bearer {}", token));
+
+        match request.send_string(&payload) {
+            Ok(response) => {
+                let text = response
+                    .into_string()
+                    .map_err(|error| format!("读取建单响应失败：{}", error))?;
+                let raw: RawIssue = serde_json::from_str(&text)
+                    .map_err(|error| format!("解析建单响应失败：{}", error))?;
+                Ok(CreatedFeedbackIssue {
+                    number: raw.number,
+                    html_url: raw.html_url,
+                    labels: label_names(&raw.labels),
+                })
+            }
+            Err(ureq::Error::Status(code, response)) => {
+                let content_type = response
+                    .header("Content-Type")
+                    .unwrap_or_default()
+                    .to_string();
+                let detail = response.into_string().unwrap_or_default();
+                Err(describe_feedback_error(
+                    "提交反馈",
+                    Some(code),
+                    &content_type,
+                    &detail,
+                ))
+            }
+            Err(error) => Err(describe_feedback_error(
+                "提交反馈",
+                None,
+                "",
+                &error.to_string(),
+            )),
+        }
+    })
+    .await
+    .map_err(|error| format!("提交任务失败：{}", error))?
 }
 
 #[cfg(test)]
@@ -725,5 +1010,199 @@ mod tests {
         assert!(expired.is_none());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ── 写入侧 ────────────────────────────────────────────
+
+    fn environment() -> FeedbackEnvironment {
+        FeedbackEnvironment {
+            launcher_version: "1.3.5".into(),
+            game_version: "0.5.14".into(),
+            launcher_state: "ready".into(),
+            download_source: "official".into(),
+            install_path: r"C:\Users\liuyu\CrossingVoid".into(),
+            user_agent: "Windows 11 / WebView2".into(),
+            recent_logs: String::new(),
+        }
+    }
+
+    #[test]
+    fn submit_builds_title_prefix_body_and_labels() {
+        let (title, body, labels, prefix) = prepare_issue_submission(
+            CATEGORY_BUG,
+            "晓桀",
+            "  进入战斗后闪退  ",
+            "进入战斗后闪退，重开也一样。期望能正常打完这一关，实际直接回到桌面。",
+            &environment(),
+        )
+        .expect("应当通过校验");
+
+        assert_eq!(prefix, "[BUG]");
+        assert_eq!(title, "[BUG] 进入战斗后闪退");
+        assert!(body.contains("## 问题描述"));
+        assert!(body.contains("## 提交者\n晓桀"));
+        assert!(body.contains("- 启动器版本：1.3.5"));
+        assert!(body.contains("- 游戏版本：0.5.14"));
+        // 标签必须一次带齐，且含来源与待确认（PATCH 不可用，没有第二次机会）。
+        assert_eq!(labels, vec!["bug", "来源:启动器", "待确认"]);
+    }
+
+    #[test]
+    fn each_category_maps_to_its_own_prefix_and_label() {
+        for (category, prefix, label) in [
+            (CATEGORY_BUG, "[BUG]", "bug"),
+            (CATEGORY_ENHANCEMENT, "[建议]", "enhancement"),
+            (CATEGORY_IMPROVEMENT, "[优化]", "优化"),
+            (CATEGORY_QUESTION, "[提问]", "question"),
+        ] {
+            let (title, _body, labels, _) = prepare_issue_submission(
+                category,
+                "",
+                "一个合法的标题",
+                "这是一段足够长的描述，用来通过二十个字的校验，说明期望与实际。",
+                &FeedbackEnvironment::default(),
+            )
+            .unwrap_or_else(|error| panic!("{} 应当通过校验：{}", category, error));
+            assert!(title.starts_with(prefix), "{} -> {}", category, title);
+            assert!(labels.contains(&label.to_string()), "{:?}", labels);
+        }
+    }
+
+    #[test]
+    fn submit_rejects_unknown_category_and_bad_lengths() {
+        let ok_description = "这是一段足够长的描述，用来通过二十个字的校验，说明期望与实际。";
+
+        let error = prepare_issue_submission(
+            "not-a-category",
+            "",
+            "合法标题",
+            ok_description,
+            &FeedbackEnvironment::default(),
+        )
+        .expect_err("未知类别必须被拒绝");
+        assert!(error.contains("类别"), "{}", error);
+
+        let too_short = prepare_issue_submission(
+            CATEGORY_BUG,
+            "",
+            "短",
+            ok_description,
+            &FeedbackEnvironment::default(),
+        )
+        .expect_err("标题太短必须被拒绝");
+        assert!(too_short.contains("标题"), "{}", too_short);
+
+        let short_description = prepare_issue_submission(
+            CATEGORY_BUG,
+            "",
+            "合法标题",
+            "太短了",
+            &FeedbackEnvironment::default(),
+        )
+        .expect_err("描述太短必须被拒绝");
+        assert!(short_description.contains("描述"), "{}", short_description);
+
+        let long_nickname = prepare_issue_submission(
+            CATEGORY_BUG,
+            "这个名字实在是太长了超过十六个字了",
+            "合法标题",
+            ok_description,
+            &FeedbackEnvironment::default(),
+        )
+        .expect_err("昵称过长必须被拒绝");
+        assert!(long_nickname.contains("昵称"), "{}", long_nickname);
+    }
+
+    #[test]
+    fn submit_rejects_over_long_description() {
+        let long = "很".repeat(DESCRIPTION_MAX_CHARS + 1);
+        let error = prepare_issue_submission(
+            CATEGORY_BUG,
+            "",
+            "合法标题",
+            &long,
+            &FeedbackEnvironment::default(),
+        )
+        .expect_err("超长描述必须被拒绝");
+        assert!(error.contains("描述"), "{}", error);
+    }
+
+    #[test]
+    fn nickname_cannot_inject_newlines_into_the_body() {
+        let (_, body, _, _) = prepare_issue_submission(
+            CATEGORY_QUESTION,
+            "坏\n## 运行环境\n- 假的",
+            "合法标题",
+            "这是一段足够长的描述，用来通过二十个字的校验，说明期望与实际。",
+            &FeedbackEnvironment::default(),
+        )
+        .expect("应当通过校验");
+
+        // 换行被去掉后，伪造的二级标题不再独占一行。
+        assert!(!body.contains("\n## 运行环境\n- 假的"), "{}", body);
+        assert!(body.contains("## 提交者\n坏## 运行环境- 假的"), "{}", body);
+    }
+
+    #[test]
+    fn install_path_is_redacted_before_it_reaches_the_body() {
+        assert_eq!(
+            redact_install_path(r"C:\Users\liuyu\CrossingVoid"),
+            r"C:\Users\<用户>\CrossingVoid"
+        );
+        assert_eq!(
+            redact_install_path("D:/Users/Some Name/Games/CV"),
+            "D:/Users/<用户>/Games/CV"
+        );
+        // 认不出来就原样返回，别把路径改坏。
+        assert_eq!(
+            redact_install_path(r"D:\Games\CrossingVoid"),
+            r"D:\Games\CrossingVoid"
+        );
+        assert_eq!(redact_install_path(""), "");
+
+        let (_, body, _, _) = prepare_issue_submission(
+            CATEGORY_BUG,
+            "",
+            "合法标题",
+            "这是一段足够长的描述，用来通过二十个字的校验，说明期望与实际。",
+            &environment(),
+        )
+        .expect("应当通过校验");
+        assert!(body.contains(r"C:\Users\<用户>\CrossingVoid"), "{}", body);
+        assert!(!body.contains("liuyu"), "{}", body);
+    }
+
+    #[test]
+    fn body_omits_empty_environment_lines_and_includes_logs_when_asked() {
+        let (_, body, _, _) = prepare_issue_submission(
+            CATEGORY_BUG,
+            "",
+            "合法标题",
+            "这是一段足够长的描述，用来通过二十个字的校验，说明期望与实际。",
+            &FeedbackEnvironment {
+                launcher_version: "1.3.5".into(),
+                ..Default::default()
+            },
+        )
+        .expect("应当通过校验");
+        assert!(body.contains("## 运行环境"));
+        assert!(body.contains("- 启动器版本：1.3.5"));
+        // 没给值的行不该出现（否则正文里全是"- 游戏版本："这种空壳）。
+        assert!(!body.contains("- 游戏版本："));
+        assert!(!body.contains("## 最近错误日志"));
+
+        let (_, with_logs, _, _) = prepare_issue_submission(
+            CATEGORY_BUG,
+            "",
+            "合法标题",
+            "这是一段足够长的描述，用来通过二十个字的校验，说明期望与实际。",
+            &FeedbackEnvironment {
+                recent_logs: "Error: 文件校验失败".into(),
+                ..Default::default()
+            },
+        )
+        .expect("应当通过校验");
+        assert!(with_logs.contains("## 最近错误日志"));
+        assert!(with_logs.contains("Error: 文件校验失败"));
     }
 }
