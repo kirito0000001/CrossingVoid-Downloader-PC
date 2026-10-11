@@ -32,6 +32,7 @@ use windows_sys::Win32::System::Threading::{
 };
 
 mod download_task;
+mod feedback;
 mod game_package;
 mod single_instance;
 mod webview_cleanup;
@@ -1359,6 +1360,30 @@ fn is_github_url(url: &str) -> bool {
         || url.starts_with("https://api.github.com/")
         || url.starts_with("https://objects.githubusercontent.com/")
         || url.starts_with("https://release-assets.githubusercontent.com/")
+}
+
+/// 玩家反馈（issue）走不走系统代理。
+///
+/// 与下载不同：实测 `api.github.com` **直连稳定**（20/20 成功，0.28–0.7s），
+/// 而 `github.com` 才是被间歇阻断的那个（见 Docs/research/2026-10-11-github-intermittent-access.md）。
+/// 所以反馈接口默认直连；玩家代理环境特殊时用
+/// `CROSSINGVOID_FEEDBACK_PROXY=http://127.0.0.1:7897` 覆盖。
+///
+/// 注意这里**不跟随**「GitHub 走系统代理」那个开关：那个开关管的是大文件下载，
+/// 玩家把它关掉是为了提速，不应该连带影响反馈列表能不能拉出来。
+fn feedback_proxy_url() -> Option<String> {
+    std::env::var("CROSSINGVOID_FEEDBACK_PROXY")
+        .ok()
+        .and_then(|value| normalize_proxy_url(&value))
+}
+
+/// 反馈接口用的 HTTP agent（超时比下载短：列表要快，失败要早）。
+pub fn build_feedback_agent(proxy_url: Option<&str>) -> ureq::Agent {
+    build_http_agent_with_proxy(
+        Duration::from_secs(6),
+        Duration::from_secs(10),
+        proxy_url,
+    )
 }
 
 fn system_proxy_url() -> Option<String> {
@@ -4918,6 +4943,10 @@ pub fn run() {
             fetch_github_release_asset_text,
             get_github_network_status,
             post_remote_json,
+            feedback::fetch_feedback_issues,
+            feedback::fetch_feedback_issue_detail,
+            feedback::fetch_feedback_comments,
+            feedback::create_feedback_comment,
             pause_game_download,
             cancel_game_operation,
             set_download_speed_limit,
