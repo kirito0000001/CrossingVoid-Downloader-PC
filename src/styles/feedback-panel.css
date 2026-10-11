@@ -40,6 +40,40 @@
   -webkit-app-region: no-drag;
 }
 
+/*
+ * 进场/退场动画：跟远程公告那套（`.confirm-pop-*`）同一个节奏 ——
+ * 遮罩淡入淡出 + 面板轻微上浮放大，150ms 左右，不要更慢。
+ *
+ * 为什么写在这里而不是 App.vue：这段 DOM 在 FeedbackPanel 里，
+ * 样式必须由渲染它的组件自己 scoped 引入（指南 §25 那次「弹窗点了没反应」的根因）。
+ * App.vue 那边只负责写 <Transition name="feedback-layer">。
+ */
+.feedback-layer-enter-active,
+.feedback-layer-leave-active {
+  transition:
+    opacity 140ms ease,
+    backdrop-filter 160ms ease;
+}
+
+.feedback-layer-enter-active .feedback-panel,
+.feedback-layer-leave-active .feedback-panel {
+  transition:
+    opacity 150ms ease,
+    transform 170ms cubic-bezier(0.2, 0.86, 0.22, 1);
+}
+
+.feedback-layer-enter-from,
+.feedback-layer-leave-to {
+  opacity: 0;
+  backdrop-filter: blur(2px);
+}
+
+.feedback-layer-enter-from .feedback-panel,
+.feedback-layer-leave-to .feedback-panel {
+  opacity: 0;
+  transform: translateY(10px) scale(0.975);
+}
+
 .feedback-panel {
   position: relative;
   display: grid;
@@ -293,20 +327,6 @@
 }
 
 /* ── 详情 ───────────────────────────────────────────── */
-
-.feedback-back {
-  margin-bottom: 12px;
-  padding: 0;
-  border: 0;
-  color: var(--cv-accent-title);
-  background: none;
-  font-size: 13px;
-  font-weight: 900;
-}
-
-.feedback-back:hover {
-  color: var(--cv-theme-accent);
-}
 
 .feedback-detail-title {
   display: flex;

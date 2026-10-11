@@ -341,10 +341,6 @@ function startSubmit() {
   viewMode.value = "form";
 }
 
-function cancelSubmit() {
-  viewMode.value = "list";
-}
-
 async function submitIssue() {
   if (!canSubmit.value) return;
   submitPending.value = true;
@@ -406,7 +402,12 @@ onBeforeUnmount(() => {
           <strong class="feedback-title">{{ t("feedback.title") }}</strong>
         </div>
         <div class="feedback-head-actions">
-          <button v-if="viewMode === 'list'" class="feedback-primary" type="button" @click="startSubmit">
+          <!--
+            头部按钮统一用 .feedback-ghost：不做主次样式区分（用户 2026-10-11 要求）。
+            「返回列表」也放在这里、紧挨「关闭」左边 —— 它原来在内容区左上角，
+            和下面那排类别按钮挤在一起，实测容易点错。
+          -->
+          <button v-if="viewMode === 'list'" class="feedback-ghost" type="button" @click="startSubmit">
             {{ t("feedback.submit.open") }}
           </button>
           <button
@@ -417,6 +418,9 @@ onBeforeUnmount(() => {
             @click="loadList(true)"
           >
             {{ t("feedback.refresh") }}
+          </button>
+          <button v-else class="feedback-ghost" type="button" @click="backToList">
+            {{ t("feedback.back") }}
           </button>
           <button class="feedback-ghost" type="button" @click="emit('close')">
             {{ t("feedback.close") }}
@@ -465,8 +469,6 @@ onBeforeUnmount(() => {
 
       <!-- 反馈表单：类别 + 昵称 + 标题 + 描述 + 环境信息（文档 §4） -->
       <div v-else-if="viewMode === 'form'" class="feedback-body">
-        <button class="feedback-back" type="button" @click="cancelSubmit">← {{ t("feedback.back") }}</button>
-
         <p class="feedback-form-label">{{ t("feedback.submit.category") }}</p>
         <div class="feedback-categories">
           <button
@@ -515,9 +517,8 @@ onBeforeUnmount(() => {
             :maxlength="4000"
             :placeholder="t('feedback.submit.descriptionPlaceholder')"
           ></textarea>
-          <em class="feedback-field-count" :class="{ bad: submitDescription.length > 0 && !descriptionReady }">
-            {{ t("feedback.submit.descriptionCount", { count: descriptionLength }) }}
-          </em>
+          <!-- 正文不计长度门槛，只显示字数（上限是防超大 payload，不是质量要求） -->
+          <em class="feedback-field-count">{{ t("feedback.submit.descriptionCount", { count: descriptionLength }) }}</em>
         </label>
 
         <!-- 勾选框必须用共享组件：项目禁止裸写 input[type=checkbox]（守卫见 tests/settingsBehavior.test.ts） -->
@@ -556,7 +557,6 @@ onBeforeUnmount(() => {
         <p class="feedback-state">{{ t("feedback.loading") }}</p>
       </div>
       <div v-else-if="viewMode === 'detail' && activeIssue" ref="detailScroll" class="feedback-body">
-        <button class="feedback-back" type="button" @click="backToList">← {{ t("feedback.back") }}</button>
         <h3 class="feedback-detail-title">
           <span class="feedback-badge" :class="normalizeFeedbackCategory(activeIssue.category)">
             {{ categoryLabel(activeIssue.category) }}
@@ -610,7 +610,6 @@ onBeforeUnmount(() => {
 
       <div v-else class="feedback-body">
         <p class="feedback-state error">{{ detailError || t("feedback.empty") }}</p>
-        <button class="feedback-back" type="button" @click="backToList">← {{ t("feedback.back") }}</button>
       </div>
     </section>
   </div>

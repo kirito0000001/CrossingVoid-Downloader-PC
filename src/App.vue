@@ -5465,7 +5465,7 @@ provide(settingsContextKey, settingsContext);
       </div>
     </Transition>
 
-    <Transition name="settings-layer">
+    <Transition name="feedback-layer">
       <FeedbackPanel
         v-if="showFeedback"
         :t="t"

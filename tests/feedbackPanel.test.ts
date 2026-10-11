@@ -251,8 +251,43 @@ describe("feedback quick-link tooltip", () => {
     expect(appSource).toContain("feedbackAutoTipDeadline");
   });
 
-  it("anchors the feedback mask to the viewport, not the design canvas", () => {
-    // 与「背景图被裁得比设计多」（指南 §25）和 §10.5 记的规律同源：
+  it("keeps every header button on the same style and puts back next to close", () => {
+    // 用户 2026-10-11 实测反馈：头部按钮不要主次样式区分；「返回列表」原来在内容区左上角、
+    // 紧挨类别按钮，容易点错，挪到右上角「关闭」左边。
+    const panelSource = readSource("src/components/FeedbackPanel.vue");
+    const header = panelSource.slice(
+      panelSource.indexOf('class="feedback-head-actions"'),
+      panelSource.indexOf("</header>"),
+    );
+    expect(header.length).toBeGreaterThan(0);
+    // 头部只允许 ghost 一种按钮样式（不含主按钮 .feedback-primary）。
+    expect(header).not.toContain("feedback-primary");
+    expect((header.match(/class="feedback-ghost"/g) ?? []).length).toBe(4);
+    // 「返回列表」出现在头部，且不是列表视图专用的那两个按钮。
+    expect(header).toContain('t("feedback.back")');
+    // 详情/表单区里不该再有返回按钮。
+    expect(panelSource).not.toContain('class="feedback-back"');
+  });
+
+  it("plays the same enter animation as the announcement dialog", () => {
+    // 学公告弹窗（.confirm-pop-*）那套节奏；样式必须跟着组件走，所以断言它在 feedback-panel.css 里。
+    const css = readSource("src/styles/feedback-panel.css");
+    for (const rule of [
+      ".feedback-layer-enter-active",
+      ".feedback-layer-leave-active",
+      ".feedback-layer-enter-from",
+      ".feedback-layer-leave-to",
+    ]) {
+      expect(css).toContain(rule);
+    }
+    expect(css).toContain("transform: translateY(10px) scale(0.975)");
+    // App.vue 必须用这个过渡名（写成 settings-layer 就不会有动画）。
+    expect(readSource("src/App.vue")).toContain('<Transition name="feedback-layer">');
+  });
+});
+
+describe("feedback panel viewport rules", () => {
+  it("anchors the feedback mask to the viewport, not the design canvas", () => {    // 与「背景图被裁得比设计多」（指南 §25）和 §10.5 记的规律同源：
     // 窗口的 CSS 视口可能小于 1200×675 的设计坐标（本机 150% 缩放下约 1012×571）。
     // 遮罩若用 absolute，包含块是 1200 宽的画布，居中会把面板右缘推到视口外裁掉。
     const css = readSource("src/styles/feedback-panel.css");
