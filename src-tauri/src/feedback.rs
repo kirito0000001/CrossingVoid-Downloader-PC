@@ -760,6 +760,68 @@ pub fn prepare_issue_submission(
     Ok((full_title, body, label_list, prefix))
 }
 
+/// 真正发一次建单请求（同步）。
+///
+/// 抽成 public 同步函数有两个原因：async 命令里能被 `spawn_blocking` 包住；
+/// 以及可以写一次性程序直接跑这条真实路径做联调（幂等性/字段落位都靠它验）。
+pub fn submit_feedback_issue(
+    agent: &ureq::Agent,
+    token: &str,
+    full_title: &str,
+    body: &str,
+    labels: &[String],
+) -> Result<CreatedFeedbackIssue, String> {
+    let url = format!("https://api.github.com/repos/{}/issues", FEEDBACK_REPOSITORY);
+    let payload = serde_json::json!({
+        "title": full_title,
+        "body": body,
+        "labels": labels,
+    })
+    .to_string();
+
+    let request = agent
+        .post(&url)
+        .set("User-Agent", "CrossingVoidLauncher/0.1")
+        .set("Accept", "application/vnd.github+json")
+        .set("X-GitHub-Api-Version", "2022-11-28")
+        .set("Content-Type", "application/json; charset=utf-8")
+        .set("Authorization", &format!("Bearer {}", token));
+
+    match request.send_string(&payload) {
+        Ok(response) => {
+            let text = response
+                .into_string()
+                .map_err(|error| format!("读取建单响应失败：{}", error))?;
+            let raw: RawIssue = serde_json::from_str(&text)
+                .map_err(|error| format!("解析建单响应失败：{}", error))?;
+            Ok(CreatedFeedbackIssue {
+                number: raw.number,
+                html_url: raw.html_url,
+                labels: label_names(&raw.labels),
+            })
+        }
+        Err(ureq::Error::Status(code, response)) => {
+            let content_type = response
+                .header("Content-Type")
+                .unwrap_or_default()
+                .to_string();
+            let detail = response.into_string().unwrap_or_default();
+            Err(describe_feedback_error(
+                "提交反馈",
+                Some(code),
+                &content_type,
+                &detail,
+            ))
+        }
+        Err(error) => Err(describe_feedback_error(
+            "提交反馈",
+            None,
+            "",
+            &error.to_string(),
+        )),
+    }
+}
+
 /// 建 issue。**必须有令牌**：GitHub 不接受匿名写，而且这一步不能重试（§9.1 的站点限制）。
 #[tauri::command]
 pub async fn create_feedback_issue(
@@ -780,58 +842,7 @@ pub async fn create_feedback_issue(
     let proxy_url = crate::feedback_proxy_url();
     tauri::async_runtime::spawn_blocking(move || {
         let agent = crate::build_feedback_agent(proxy_url.as_deref());
-        let url = format!(
-            "https://api.github.com/repos/{}/issues",
-            FEEDBACK_REPOSITORY
-        );
-        let payload = serde_json::json!({
-            "title": full_title,
-            "body": body,
-            "labels": labels,
-        })
-        .to_string();
-
-        let request = agent
-            .post(&url)
-            .set("User-Agent", "CrossingVoidLauncher/0.1")
-            .set("Accept", "application/vnd.github+json")
-            .set("X-GitHub-Api-Version", "2022-11-28")
-            .set("Content-Type", "application/json; charset=utf-8")
-            .set("Authorization", &format!("Bearer {}", token));
-
-        match request.send_string(&payload) {
-            Ok(response) => {
-                let text = response
-                    .into_string()
-                    .map_err(|error| format!("读取建单响应失败：{}", error))?;
-                let raw: RawIssue = serde_json::from_str(&text)
-                    .map_err(|error| format!("解析建单响应失败：{}", error))?;
-                Ok(CreatedFeedbackIssue {
-                    number: raw.number,
-                    html_url: raw.html_url,
-                    labels: label_names(&raw.labels),
-                })
-            }
-            Err(ureq::Error::Status(code, response)) => {
-                let content_type = response
-                    .header("Content-Type")
-                    .unwrap_or_default()
-                    .to_string();
-                let detail = response.into_string().unwrap_or_default();
-                Err(describe_feedback_error(
-                    "提交反馈",
-                    Some(code),
-                    &content_type,
-                    &detail,
-                ))
-            }
-            Err(error) => Err(describe_feedback_error(
-                "提交反馈",
-                None,
-                "",
-                &error.to_string(),
-            )),
-        }
+        submit_feedback_issue(&agent, &token, &full_title, &body, &labels)
     })
     .await
     .map_err(|error| format!("提交任务失败：{}", error))?
@@ -1204,5 +1215,47 @@ mod tests {
         .expect("应当通过校验");
         assert!(with_logs.contains("## 最近错误日志"));
         assert!(with_logs.contains("Error: 文件校验失败"));
+    }
+
+    /// 真实建单联调（默认不跑：会真的在 GitHub 上开一条 issue）。
+    ///
+    /// 跑法：设好 `CROSSINGVOID_FEEDBACK_TOKEN` 后
+    /// `cargo test --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture live_create_issue`
+    ///
+    /// 为什么值得留：单元测试只能验"拼出来的标题/正文/标签对不对"，
+    /// **验不了**令牌权限、HTTP 头、GitHub 对 payload 的接受程度（§9.1 的坑都在这一层）。
+    #[test]
+    #[ignore = "会真的在 GitHub 上建一条 issue，只在手工联调时运行"]
+    fn live_create_issue_creates_a_real_issue() {
+        let Some(token) = feedback_token() else {
+            panic!("需要 CROSSINGVOID_FEEDBACK_TOKEN");
+        };
+        let environment = FeedbackEnvironment {
+            launcher_version: "1.3.5".into(),
+            game_version: "0.5.14".into(),
+            launcher_state: "ready".into(),
+            download_source: "official".into(),
+            install_path: r"C:\Users\liuyu\CrossingVoid".into(),
+            user_agent: "Windows 11 / WebView2 联调".into(),
+            recent_logs: String::new(),
+        };
+        let (title, body, labels, _) = prepare_issue_submission(
+            CATEGORY_QUESTION,
+            "联调机器人",
+            "联调：验证启动器建单路径",
+            "这是一条联调 issue，用来验证启动器的建单代码路径（校验、模板、标签、脱敏）。验证完会关闭，不影响其他反馈。",
+            &environment,
+        )
+        .expect("应当通过校验");
+
+        let agent = ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_secs(8))
+            .timeout_read(Duration::from_secs(15))
+            .build();
+        let created = submit_feedback_issue(&agent, &token, &title, &body, &labels)
+            .expect("建单应当成功");
+        println!("建单成功：{} （标签 {:?}）", created.html_url, created.labels);
+        assert!(created.number > 0);
+        assert!(created.labels.iter().any(|label| label == LABEL_SOURCE));
     }
 }
