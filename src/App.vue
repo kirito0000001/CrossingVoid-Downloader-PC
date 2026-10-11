@@ -4931,24 +4931,22 @@ provide(settingsContextKey, settingsContext);
             alt=""
             aria-hidden="true"
           />
-          <span class="button-tooltip quick-tooltip" :class="{ 'qr-tooltip': item.qr }">
+          <!--
+            反馈入口的提示就在这**同一个** tooltip 上换成三行（引导语 + 两个计数），
+            不再额外叠一个——2026-10-11 首版多渲染了一个，现场是两个提示重叠。
+            `tip-visible` 由"进零境页面自动弹出一次、停 8 秒"驱动；悬停仍然照旧。
+          -->
+          <span
+            class="button-tooltip quick-tooltip"
+            :class="{ 'qr-tooltip': item.qr, 'feedback-tooltip': item.key === QUICK_LINK_FEEDBACK_KEY, 'tip-visible': item.key === QUICK_LINK_FEEDBACK_KEY && feedbackAutoTip }"
+          >
             <img v-if="item.qr" class="quick-qr" :src="item.qr" :alt="item.qrAltKey ? t(item.qrAltKey) : t(item.tipKey)" />
-            <!-- 反馈入口的提示换成三行；计数还没回来/拉取失败时退回原来的单行引导语。 -->
             <template v-if="item.key === QUICK_LINK_FEEDBACK_KEY && feedbackCounts">
               <span>{{ t("quick.bugReportTip") }}</span>
               <span>{{ t("feedback.count.bug", { count: feedbackCounts.bug }) }}</span>
               <span>{{ t("feedback.count.suggestion", { count: feedbackCounts.suggestion }) }}</span>
             </template>
             <span v-else>{{ t(item.tipKey) }}</span>
-          </span>
-          <!-- 进入零境页面时自动弹出一次、停 8 秒（用户 2026-10-11 拍板）。 -->
-          <span
-            v-if="item.key === QUICK_LINK_FEEDBACK_KEY && feedbackCounts && feedbackAutoTip"
-            class="button-tooltip quick-tooltip feedback-tooltip"
-          >
-            <span>{{ t("quick.bugReportTip") }}</span>
-            <span>{{ t("feedback.count.bug", { count: feedbackCounts.bug }) }}</span>
-            <span>{{ t("feedback.count.suggestion", { count: feedbackCounts.suggestion }) }}</span>
           </span>
         </button>
       </nav>

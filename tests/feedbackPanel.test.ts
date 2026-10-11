@@ -163,3 +163,27 @@ describe("feedback panel style ownership", () => {
     expect(panelSource).not.toContain("marked");
   });
 });
+
+describe("feedback quick-link tooltip", () => {
+  it("reuses the single quick-link tooltip instead of stacking another one", () => {
+    // 2026-10-11 现场：首版额外渲染了一个自动弹出的 tooltip，玩家看到两个提示重叠。
+    // 现在三行内容画在同一个 .button-tooltip 里，靠 tip-visible 控制自动弹出。
+    // 注意：窗口按钮（设置/最小化/关闭）上也各有自己的 .button-tooltip，所以只数快捷入口那一处。
+    const appSource = readSource("src/App.vue");
+    const quickTooltips = [...appSource.matchAll(/class="button-tooltip quick-tooltip[^"]*"/g)].map(
+      (match) => match[0],
+    );
+    expect(quickTooltips).toHaveLength(1);
+
+    expect(quickTooltips[0]).toContain("class=\"button-tooltip quick-tooltip\"");
+    expect(appSource).toContain("'feedback-tooltip': item.key === QUICK_LINK_FEEDBACK_KEY");
+    expect(appSource).toContain("'tip-visible': item.key === QUICK_LINK_FEEDBACK_KEY && feedbackAutoTip");
+
+    // 自动弹出必须由样式类驱动：早先写成 `.feedback-tooltip:not(.tip-visible) { display: none }`
+    // 会把"悬停显示"一起关掉，所以那条规则不允许回来。
+    // 注意：本文件里的反引号会提前闭合模板字符串，注释里不要用它们包裹选择器。
+    const titlebar = readSource("src/styles/titlebar.css");
+    expect(titlebar).toContain(".button-tooltip.tip-visible");
+    expect(titlebar).not.toContain("feedback-tooltip:not(.tip-visible)");
+  });
+});
