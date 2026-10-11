@@ -151,13 +151,68 @@ export async function createFeedbackComment(number: number, body: string): Promi
   };
 }
 
+/** 提交表单里允许的四个类别（不含 `uncategorized`——那是网页直提的归属，不是玩家能选的）。 */
+export type FeedbackSubmitCategory = "bug" | "enhancement" | "优化" | "question";
+
+export const FEEDBACK_SUBMIT_CATEGORIES: readonly FeedbackSubmitCategory[] = [
+  "bug",
+  "enhancement",
+  "优化",
+  "question",
+];
+
+export type FeedbackEnvironment = {
+  launcherVersion: string;
+  gameVersion: string;
+  launcherState: string;
+  downloadSource: string;
+  /** 形如 `C:\Users\<用户名>\...`；Rust 侧写入正文前会脱敏。 */
+  installPath: string;
+  userAgent: string;
+  /** 玩家勾选"附带错误日志"时才有内容。 */
+  recentLogs: string;
+};
+
+export type CreatedFeedbackIssue = {
+  number: number;
+  htmlUrl: string;
+  labels: string[];
+};
+
+/**
+ * 建 issue。
+ *
+ * 校验、模板拼装、路径脱敏都在 Rust 侧（`src-tauri/src/feedback.rs`）：
+ * 那是唯一的写入路径，前端不做二次加工，避免两边规则漂移。
+ */
+export async function createFeedbackIssue(payload: {
+  category: FeedbackSubmitCategory;
+  nickname: string;
+  title: string;
+  description: string;
+  environment: FeedbackEnvironment;
+}): Promise<CreatedFeedbackIssue> {
+  const raw = await invoke<unknown>("create_feedback_issue", {
+    category: payload.category,
+    nickname: payload.nickname,
+    title: payload.title,
+    description: payload.description,
+    environment: payload.environment,
+  });
+  const source = (raw ?? {}) as Record<string, unknown>;
+  return {
+    number: Number(source.number ?? 0),
+    htmlUrl: typeof source.htmlUrl === "string" ? source.htmlUrl : "",
+    labels: Array.isArray(source.labels) ? source.labels.filter((item): item is string => typeof item === "string") : [],
+  };
+}
+
 /**
  * 相对时间文案。
  *
  * 只做"多久以前"，不做日期格式化：反馈列表里玩家关心的是"这条是新的还是旧的"。
  * 超过 30 天直接给日期，避免出现"97 天前"这种没信息量的说法。
- */
-export function formatFeedbackAge(iso: string, now: Date = new Date()): string {
+ */export function formatFeedbackAge(iso: string, now: Date = new Date()): string {
   const time = Date.parse(iso);
   if (!Number.isFinite(time)) return "";
   const diffMs = now.getTime() - time;

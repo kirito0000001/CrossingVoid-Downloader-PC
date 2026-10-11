@@ -168,6 +168,25 @@ export type TranslationKey =
   | "feedback.filter.label"
   | "feedback.filter.all"
   | "feedback.filter.empty"
+  | "feedback.submit.open"
+  | "feedback.submit.category"
+  | "feedback.submit.nickname"
+  | "feedback.submit.nicknamePlaceholder"
+  | "feedback.submit.nicknameHint"
+  | "feedback.submit.title"
+  | "feedback.submit.titlePlaceholder"
+  | "feedback.submit.titleCount"
+  | "feedback.submit.description"
+  | "feedback.submit.descriptionPlaceholder"
+  | "feedback.submit.descriptionCount"
+  | "feedback.submit.includeEnvironment"
+  | "feedback.submit.env.launcher"
+  | "feedback.submit.env.game"
+  | "feedback.submit.env.path"
+  | "feedback.submit.send"
+  | "feedback.submit.sending"
+  | "feedback.submit.created"
+  | "feedback.submit.note"
   | "feedback.count.bug"
   | "feedback.count.suggestion"
   | "feedback.comments"
@@ -394,6 +413,25 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "feedback.filter.label": "按分类筛选",
     "feedback.filter.all": "全部",
     "feedback.filter.empty": "这个分类下暂时没有内容",
+    "feedback.submit.open": "我要反馈",
+    "feedback.submit.category": "这是哪一类？",
+    "feedback.submit.nickname": "你的昵称",
+    "feedback.submit.nicknamePlaceholder": "想让别人怎么称呼你",
+    "feedback.submit.nicknameHint": "只写进这条反馈里，会被记住，下次不用再填。",
+    "feedback.submit.title": "一句话标题",
+    "feedback.submit.titlePlaceholder": "什么情况下出的问题，例如：进入战斗后闪退",
+    "feedback.submit.titleCount": "{count} / 60 字",
+    "feedback.submit.description": "详细描述",
+    "feedback.submit.descriptionPlaceholder": "你做了什么 → 你期望什么 → 实际发生了什么",
+    "feedback.submit.descriptionCount": "{count} 字（至少 20 字）",
+    "feedback.submit.includeEnvironment": "附带运行环境（版本、状态、安装目录已脱敏）",
+    "feedback.submit.env.launcher": "启动器版本",
+    "feedback.submit.env.game": "游戏版本",
+    "feedback.submit.env.path": "安装目录",
+    "feedback.submit.send": "提交反馈",
+    "feedback.submit.sending": "正在提交…",
+    "feedback.submit.created": "已提交为 #{number}，可以在列表里看到它。",
+    "feedback.submit.note": "提交后会公开在 GitHub 上；请不要在内容里写账号或密码。",
     "feedback.count.bug": "当前BUG数目：{count}。",
     "feedback.count.suggestion": "当前建议数目：{count}。",
     "feedback.comments": "{count} 条评论",
@@ -608,6 +646,25 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "feedback.filter.label": "按分類篩選",
     "feedback.filter.all": "全部",
     "feedback.filter.empty": "這個分類下暫時沒有內容",
+    "feedback.submit.open": "我要回報",
+    "feedback.submit.category": "這是哪一類？",
+    "feedback.submit.nickname": "你的暱稱",
+    "feedback.submit.nicknamePlaceholder": "想讓別人怎麼稱呼你",
+    "feedback.submit.nicknameHint": "只寫進這條回報裡，會被記住，下次不用再填。",
+    "feedback.submit.title": "一句話標題",
+    "feedback.submit.titlePlaceholder": "什麼情況下出的問題，例如：進入戰鬥後閃退",
+    "feedback.submit.titleCount": "{count} / 60 字",
+    "feedback.submit.description": "詳細描述",
+    "feedback.submit.descriptionPlaceholder": "你做了什麼 → 你期望什麼 → 實際發生了什麼",
+    "feedback.submit.descriptionCount": "{count} 字（至少 20 字）",
+    "feedback.submit.includeEnvironment": "附帶執行環境（版本、狀態、安裝目錄已去識別化）",
+    "feedback.submit.env.launcher": "啟動器版本",
+    "feedback.submit.env.game": "遊戲版本",
+    "feedback.submit.env.path": "安裝目錄",
+    "feedback.submit.send": "提交回報",
+    "feedback.submit.sending": "正在提交…",
+    "feedback.submit.created": "已提交為 #{number}，可以在列表裡看到它。",
+    "feedback.submit.note": "提交後會公開在 GitHub 上；請不要在內容裡寫帳號或密碼。",
     "feedback.count.bug": "目前 BUG 數：{count}。",
     "feedback.count.suggestion": "目前建議數：{count}。",
     "feedback.comments": "{count} 則留言",
@@ -822,6 +879,25 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "feedback.filter.label": "Filter by category",
     "feedback.filter.all": "All",
     "feedback.filter.empty": "Nothing in this category yet",
+    "feedback.submit.open": "Send feedback",
+    "feedback.submit.category": "Which kind is it?",
+    "feedback.submit.nickname": "Your nickname",
+    "feedback.submit.nicknamePlaceholder": "How should we call you",
+    "feedback.submit.nicknameHint": "Only used in this report; remembered for next time.",
+    "feedback.submit.title": "One-line title",
+    "feedback.submit.titlePlaceholder": "What were you doing when it broke, e.g. crashed after entering battle",
+    "feedback.submit.titleCount": "{count} / 60 chars",
+    "feedback.submit.description": "Details",
+    "feedback.submit.descriptionPlaceholder": "What you did → what you expected → what happened",
+    "feedback.submit.descriptionCount": "{count} chars (at least 20)",
+    "feedback.submit.includeEnvironment": "Attach environment (versions, state; install path is redacted)",
+    "feedback.submit.env.launcher": "Launcher",
+    "feedback.submit.env.game": "Game",
+    "feedback.submit.env.path": "Install path",
+    "feedback.submit.send": "Submit",
+    "feedback.submit.sending": "Submitting…",
+    "feedback.submit.created": "Submitted as #{number}; it is now in the list.",
+    "feedback.submit.note": "Your report will be public on GitHub. Never include account credentials.",
     "feedback.count.bug": "Open bugs: {count}.",
     "feedback.count.suggestion": "Open ideas: {count}.",
     "feedback.comments": "{count} comment(s)",
@@ -1036,6 +1112,25 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "feedback.filter.label": "分類で絞り込む",
     "feedback.filter.all": "すべて",
     "feedback.filter.empty": "この分類にはまだ何もありません",
+    "feedback.submit.open": "報告する",
+    "feedback.submit.category": "どれに当てはまりますか？",
+    "feedback.submit.nickname": "ニックネーム",
+    "feedback.submit.nicknamePlaceholder": "表示される名前",
+    "feedback.submit.nicknameHint": "この報告にだけ書かれ、次回から自動で入ります。",
+    "feedback.submit.title": "一行タイトル",
+    "feedback.submit.titlePlaceholder": "どんな時に起きたか（例：戦闘に入ると落ちる）",
+    "feedback.submit.titleCount": "{count} / 60 文字",
+    "feedback.submit.description": "詳しい説明",
+    "feedback.submit.descriptionPlaceholder": "したこと → 期待したこと → 実際に起きたこと",
+    "feedback.submit.descriptionCount": "{count} 文字（20 文字以上）",
+    "feedback.submit.includeEnvironment": "実行環境を添付（バージョン・状態、インストール先は伏せ字）",
+    "feedback.submit.env.launcher": "ランチャー",
+    "feedback.submit.env.game": "ゲーム",
+    "feedback.submit.env.path": "インストール先",
+    "feedback.submit.send": "送信",
+    "feedback.submit.sending": "送信中…",
+    "feedback.submit.created": "#{number} として送信しました。一覧に表示されます。",
+    "feedback.submit.note": "送信内容は GitHub で公開されます。アカウント情報は書かないでください。",
     "feedback.count.bug": "現在の BUG 数：{count}。",
     "feedback.count.suggestion": "現在の要望数：{count}。",
     "feedback.comments": "コメント {count} 件",

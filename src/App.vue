@@ -5440,7 +5440,17 @@ provide(settingsContextKey, settingsContext);
     </Transition>
 
     <Transition name="settings-layer">
-      <FeedbackPanel v-if="showFeedback" :t="t" :language="currentLanguage" @close="showFeedback = false" />
+      <FeedbackPanel
+        v-if="showFeedback"
+        :t="t"
+        :language="currentLanguage"
+        :launcher-version="launcherVersion"
+        :game-version="localGameVersion"
+        :launcher-state="launcherState"
+        :download-source="downloadSource"
+        :install-path="installPath"
+        @close="showFeedback = false"
+      />
     </Transition>
 
     <Transition name="settings-layer">

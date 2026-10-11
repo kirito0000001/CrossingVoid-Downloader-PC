@@ -443,3 +443,176 @@
 .feedback-primary:disabled {
   opacity: 0.42;
 }
+
+/* ── 反馈表单（写入侧，文档 §4） ───────────────────────── */
+
+.feedback-form-label {
+  margin: 14px 0 8px;
+  color: var(--cv-accent-title);
+  font-size: 13px;
+  font-weight: 950;
+}
+
+.feedback-categories {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.feedback-category {
+  height: 34px;
+  border: 1px solid color-mix(in srgb, var(--cv-accent-soft) 24%, transparent);
+  border-radius: 3px;
+  color: rgba(255, 255, 255, 0.78);
+  background: color-mix(in srgb, var(--cv-bg-surface) 58%, transparent);
+  font-size: 13px;
+  font-weight: 900;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+.feedback-category:hover {
+  border-color: color-mix(in srgb, var(--cv-theme-accent) 44%, transparent);
+}
+
+/* 选中态沿用列表徽标的配色，玩家一眼能对上"我选的这类的颜色" */
+.feedback-category.active.bug {
+  color: #ffe4e0;
+  border-color: color-mix(in srgb, #d73a4a 70%, transparent);
+  background: color-mix(in srgb, #d73a4a 46%, transparent);
+}
+
+.feedback-category.active.enhancement {
+  color: #d9f7dd;
+  border-color: color-mix(in srgb, #0e8a16 70%, transparent);
+  background: color-mix(in srgb, #0e8a16 42%, transparent);
+}
+
+.feedback-category.active.优化 {
+  color: #dbeeff;
+  border-color: color-mix(in srgb, #1d76db 70%, transparent);
+  background: color-mix(in srgb, #1d76db 44%, transparent);
+}
+
+.feedback-category.active.question {
+  color: #f0e2ff;
+  border-color: color-mix(in srgb, #8250df 70%, transparent);
+  background: color-mix(in srgb, #8250df 42%, transparent);
+}
+
+.feedback-field {
+  position: relative;
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.feedback-field > span {
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12.5px;
+  font-weight: 900;
+}
+
+.feedback-field input,
+.feedback-field textarea {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid color-mix(in srgb, var(--cv-accent-soft) 22%, transparent);
+  border-radius: 3px;
+  color: rgba(255, 255, 255, 0.92);
+  background: color-mix(in srgb, var(--cv-bg-deep) 62%, transparent);
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+.feedback-field textarea {
+  resize: vertical;
+}
+
+.feedback-field input:focus,
+.feedback-field textarea:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--cv-theme-accent) 58%, transparent);
+}
+
+.feedback-field-count {
+  justify-self: end;
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 11.5px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.feedback-field-count.bad {
+  color: #ffb9ac;
+}
+
+.feedback-field-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.feedback-field-row .feedback-field {
+  flex: 0 0 240px;
+  margin-bottom: 12px;
+}
+
+.feedback-field-hint {
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.feedback-inline-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12.5px;
+  font-weight: 800;
+}
+
+.feedback-environment {
+  display: grid;
+  gap: 3px;
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-left: 2px solid color-mix(in srgb, var(--cv-theme-accent) 46%, transparent);
+  color: rgba(255, 255, 255, 0.6);
+  background: color-mix(in srgb, var(--cv-bg-deep) 42%, transparent);
+  font-size: 12px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.feedback-submit-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+
+.feedback-created {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border-radius: 3px;
+  color: #d9f7dd;
+  background: color-mix(in srgb, #0e8a16 22%, transparent);
+  font-size: 12.5px;
+  font-weight: 850;
+}
+
+.feedback-submit-note {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.4);
+  font-size: 11.5px;
+  font-weight: 700;
+  line-height: 1.6;
+}

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   categoryIssueCount,
   FEEDBACK_CATEGORY_LABEL_KEYS,
+  FEEDBACK_SUBMIT_CATEGORIES,
   formatFeedbackAge,
   normalizeFeedbackCategory,
   normalizeFeedbackIssue,
@@ -164,13 +165,16 @@ describe("feedback panel style ownership", () => {
     const invoked = [...source.matchAll(/invoke<[^>]*>\("([a-z_]+)"/g)].map((match) => match[1]);
     expect(invoked.sort()).toEqual([
       "create_feedback_comment",
+      "create_feedback_issue",
       "fetch_feedback_comments",
       "fetch_feedback_issue_detail",
       "fetch_feedback_issues",
     ]);
     for (const command of invoked) {
-      expect(command.startsWith("fetch_feedback_") || command === "create_feedback_comment").toBe(true);
+      expect(command.startsWith("fetch_feedback_") || command.startsWith("create_feedback_")).toBe(true);
     }
+    // 不允许出现任何"改 issue"的命令名（PATCH 那条路走不通，见文档 §9.1）。
+    expect(source).not.toMatch(/invoke<[^>]*>\("(update|patch|edit|delete)_feedback/);
   });
 
   it("renders the issue body and comments as plain text", () => {
@@ -180,6 +184,24 @@ describe("feedback panel style ownership", () => {
     expect(panelSource).toContain("<pre class=\"feedback-comment-body\">");
     expect(panelSource).not.toContain("v-html");
     expect(panelSource).not.toContain("marked");
+  });
+
+  it("uses the four submittable categories and never lets the player pick uncategorized", () => {
+    // 未分类是"网页直提"的归属，不是玩家能选的类别（文档 §3.4）。
+    expect([...FEEDBACK_SUBMIT_CATEGORIES]).toEqual(["bug", "enhancement", "优化", "question"]);
+    const panelSource = readSource("src/components/FeedbackPanel.vue");
+    expect(panelSource).toContain("v-for=\"category in FEEDBACK_SUBMIT_CATEGORIES\"");
+  });
+
+  it("remembers the nickname and previews the redacted install path", () => {
+    const panelSource = readSource("src/components/FeedbackPanel.vue");
+    // 昵称要持久化：玩家不该每次反馈都想一遍上次叫什么（文档 §4）。
+    expect(panelSource).toContain("crossing-void.launcher.feedback-nickname");
+    expect(panelSource).toContain("readStoredNickname()");
+    expect(panelSource).toContain("rememberNickname(");
+    // 提交前要把脱敏后的路径显示给玩家看（真正脱敏在 Rust 侧，这里是预览）。
+    expect(panelSource).toContain("previewInstallPath(");
+    expect(panelSource).toContain("<用户>");
   });
 });
 
