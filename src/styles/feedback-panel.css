@@ -1,0 +1,406 @@
+/*
+ * 玩家反馈面板（`components/FeedbackPanel.vue`）。
+ *
+ * 这个文件必须由 **FeedbackPanel.vue 自己**以 scoped 方式引入：
+ * 早先「设置页弹窗点了没反应」就是样式留在 App.vue、选择器带错 data-v 哈希导致的
+ * （见 Docs/PCLauncherDevelopmentGuide.md §25）。App.vue 不要再引入本文件。
+ *
+ * 画布按 1200×675 设计坐标排版（指南 §10.3）：面板固定 900×540，不做跟随缩放。
+ */
+
+.feedback-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 240;
+  display: grid;
+  place-items: center;
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--cv-bg-surface) 20%, transparent),
+      color-mix(in srgb, var(--cv-theme-accent) 8%, transparent),
+      color-mix(in srgb, var(--cv-bg-surface-cool) 22%, transparent)
+    ),
+    color-mix(in srgb, var(--cv-bg-deep) 42%, transparent);
+  backdrop-filter: blur(8px);
+  app-region: no-drag;
+  -webkit-app-region: no-drag;
+}
+
+.feedback-panel {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  width: 900px;
+  height: 540px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--cv-accent-soft) 22%, transparent);
+  border-radius: 3px;
+  background:
+    radial-gradient(circle at 2% 4%, color-mix(in srgb, var(--cv-theme-accent) 14%, transparent), transparent 26%),
+    linear-gradient(
+      160deg,
+      color-mix(in srgb, var(--cv-bg-surface) 92%, transparent),
+      color-mix(in srgb, var(--cv-bg-surface-cool) 88%, transparent)
+    );
+  box-shadow: 0 26px 80px rgba(0, 0, 0, 0.46);
+}
+
+/* ── 头部 ───────────────────────────────────────────── */
+
+.feedback-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px 24px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--cv-accent-soft) 16%, transparent);
+}
+
+.feedback-head-main {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  min-width: 0;
+}
+
+.feedback-title {
+  color: var(--cv-accent-title);
+  font-size: 19px;
+  font-weight: 950;
+  letter-spacing: 0.4px;
+}
+
+.feedback-counts {
+  display: flex;
+  gap: 10px;
+}
+
+.feedback-count {
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 900;
+}
+
+.feedback-count.bug {
+  color: #ffd9d3;
+  background: color-mix(in srgb, #d73a4a 34%, transparent);
+}
+
+.feedback-count.suggestion {
+  color: #d8f3ff;
+  background: color-mix(in srgb, #0e8a16 30%, transparent);
+}
+
+.feedback-head-actions {
+  display: flex;
+  gap: 10px;
+  flex: none;
+}
+
+.feedback-ghost {
+  height: 30px;
+  padding: 0 14px;
+  border: 1px solid color-mix(in srgb, var(--cv-accent-soft) 26%, transparent);
+  border-radius: 3px;
+  color: rgba(255, 255, 255, 0.86);
+  background: color-mix(in srgb, var(--cv-bg-surface) 70%, transparent);
+  font-size: 13px;
+  font-weight: 900;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.feedback-ghost:hover:not(:disabled) {
+  color: #1d1a12;
+  background: var(--cv-theme-accent);
+}
+
+.feedback-ghost:disabled {
+  opacity: 0.45;
+}
+
+/* ── 主体（可滚动） ─────────────────────────────────── */
+
+.feedback-body {
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 14px 24px 22px;
+  scrollbar-width: thin;
+}
+
+.feedback-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.feedback-body::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--cv-accent-soft) 34%, transparent);
+}
+
+.feedback-state {
+  margin: 22px 0;
+  color: rgba(255, 255, 255, 0.58);
+  font-size: 14px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.feedback-state.error {
+  color: #ffb9ac;
+  text-align: left;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.feedback-hint {
+  margin: 12px 0 0;
+  color: rgba(255, 255, 255, 0.42);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* ── 列表 ───────────────────────────────────────────── */
+
+.feedback-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.feedback-row {
+  display: grid;
+  grid-template-columns: 76px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  padding: 11px 14px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  color: rgba(255, 255, 255, 0.92);
+  background: color-mix(in srgb, var(--cv-bg-surface) 58%, transparent);
+  text-align: left;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.feedback-row:hover {
+  border-color: color-mix(in srgb, var(--cv-theme-accent) 46%, transparent);
+  background: color-mix(in srgb, var(--cv-theme-accent) 14%, transparent);
+}
+
+.feedback-row-title {
+  overflow: hidden;
+  font-size: 14.5px;
+  font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.feedback-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.feedback-comment-count::before {
+  content: "💬 ";
+}
+
+/* ── 类别徽标 ───────────────────────────────────────── */
+
+.feedback-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 9px;
+  border-radius: 2px;
+  font-size: 12px;
+  font-weight: 950;
+  white-space: nowrap;
+}
+
+.feedback-badge.bug {
+  color: #ffe4e0;
+  background: color-mix(in srgb, #d73a4a 46%, transparent);
+}
+
+.feedback-badge.enhancement {
+  color: #d9f7dd;
+  background: color-mix(in srgb, #0e8a16 42%, transparent);
+}
+
+/* 后端把「优化」类别的 category 原样返回（中文字面量），
+   所以这里直接写中文类名；`.improvement` 是将来改用英文标识时的兼容分支。 */
+.feedback-badge.优化,
+.feedback-badge.improvement {
+  color: #dbeeff;
+  background: color-mix(in srgb, #1d76db 44%, transparent);
+}
+
+.feedback-badge.question {
+  color: #f0e2ff;
+  background: color-mix(in srgb, #8250df 42%, transparent);
+}
+
+.feedback-badge.uncategorized {
+  color: rgba(255, 255, 255, 0.82);
+  background: color-mix(in srgb, #6e7781 46%, transparent);
+}
+
+/* ── 详情 ───────────────────────────────────────────── */
+
+.feedback-back {
+  margin-bottom: 12px;
+  padding: 0;
+  border: 0;
+  color: var(--cv-accent-title);
+  background: none;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.feedback-back:hover {
+  color: var(--cv-theme-accent);
+}
+
+.feedback-detail-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 8px;
+  color: #fff;
+  font-size: 17px;
+  font-weight: 950;
+  line-height: 1.4;
+}
+
+.feedback-detail-meta {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0 0 14px;
+  color: rgba(255, 255, 255, 0.48);
+  font-size: 12.5px;
+  font-weight: 800;
+}
+
+.feedback-link {
+  padding: 0;
+  border: 0;
+  color: var(--cv-accent-title);
+  background: none;
+  font-size: 12.5px;
+  font-weight: 900;
+  text-decoration: underline;
+}
+
+/* 正文与评论一律按纯文本渲染：Markdown 直接显示源码，
+   不引入 Markdown 库去渲染任意 HTML（文档 §6.3）。 */
+.feedback-detail-body,
+.feedback-comment-body {
+  margin: 0 0 18px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--cv-accent-soft) 14%, transparent);
+  border-radius: 3px;
+  color: rgba(255, 255, 255, 0.86);
+  background: color-mix(in srgb, var(--cv-bg-deep) 52%, transparent);
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 650;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ── 评论 ───────────────────────────────────────────── */
+
+.feedback-comments-title {
+  display: block;
+  margin-bottom: 10px;
+  color: var(--cv-accent-title);
+  font-size: 14px;
+  font-weight: 950;
+}
+
+.feedback-comment-list {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 14px;
+  padding: 0;
+  list-style: none;
+}
+
+.feedback-comment-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 0 0 6px;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12.5px;
+}
+
+.feedback-comment-meta span {
+  color: rgba(255, 255, 255, 0.42);
+  font-weight: 700;
+}
+
+.feedback-comment-body {
+  margin: 0;
+}
+
+.feedback-compose {
+  display: grid;
+  gap: 8px;
+}
+
+.feedback-compose-input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--cv-accent-soft) 22%, transparent);
+  border-radius: 3px;
+  color: rgba(255, 255, 255, 0.92);
+  background: color-mix(in srgb, var(--cv-bg-deep) 62%, transparent);
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.feedback-compose-input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--cv-theme-accent) 58%, transparent);
+}
+
+.feedback-compose-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 14px;
+}
+
+.feedback-compose-error {
+  color: #ffb9ac;
+  font-size: 12.5px;
+  font-weight: 800;
+}
+
+.feedback-primary {
+  height: 34px;
+  padding: 0 22px;
+  border: 0;
+  border-radius: 3px;
+  color: #1d1a12;
+  background: var(--cv-theme-accent);
+  font-size: 13.5px;
+  font-weight: 950;
+}
+
+.feedback-primary:disabled {
+  opacity: 0.42;
+}

@@ -159,6 +159,31 @@ export type TranslationKey =
   | "quick.qqQrAlt"
   | "quick.bugReport"
   | "quick.bugReportTip"
+  | "feedback.title"
+  | "feedback.loading"
+  | "feedback.empty"
+  | "feedback.cached"
+  | "feedback.refresh"
+  | "feedback.close"
+  | "feedback.back"
+  | "feedback.count.bug"
+  | "feedback.count.suggestion"
+  | "feedback.comments"
+  | "feedback.comments.title"
+  | "feedback.comments.empty"
+  | "feedback.compose.placeholder"
+  | "feedback.compose.send"
+  | "feedback.compose.sending"
+  | "feedback.openOnGithub"
+  | "feedback.age.justNow"
+  | "feedback.age.minutes"
+  | "feedback.age.hours"
+  | "feedback.age.days"
+  | "feedback.category.bug"
+  | "feedback.category.suggestion"
+  | "feedback.category.improvement"
+  | "feedback.category.question"
+  | "feedback.category.other"
   | "side.expand"
   | "side.collapse"
   | "install.title"
@@ -358,6 +383,31 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "quick.qqQrAlt": "零境交错同好会二维码",
     "quick.bugReport": "BUG 提交",
     "quick.bugReportTip": "遇到问题或有建议，来这里反馈",
+    "feedback.title": "玩家反馈",
+    "feedback.loading": "正在读取反馈…",
+    "feedback.empty": "目前没有未处理的问题",
+    "feedback.cached": "当前显示的是缓存内容，稍后会自动更新",
+    "feedback.refresh": "刷新",
+    "feedback.close": "关闭",
+    "feedback.back": "返回列表",
+    "feedback.count.bug": "BUG {count}",
+    "feedback.count.suggestion": "建议 {count}",
+    "feedback.comments": "{count} 条评论",
+    "feedback.comments.title": "评论",
+    "feedback.comments.empty": "还没有评论",
+    "feedback.compose.placeholder": "写下你的补充或复现步骤…",
+    "feedback.compose.send": "发表评论",
+    "feedback.compose.sending": "正在发表…",
+    "feedback.openOnGithub": "在 GitHub 打开",
+    "feedback.age.justNow": "刚刚",
+    "feedback.age.minutes": "{count} 分钟前",
+    "feedback.age.hours": "{count} 小时前",
+    "feedback.age.days": "{count} 天前",
+    "feedback.category.bug": "BUG",
+    "feedback.category.suggestion": "建议",
+    "feedback.category.improvement": "优化",
+    "feedback.category.question": "提问",
+    "feedback.category.other": "未分类",
     "side.expand": "展开左侧栏",
     "side.collapse": "收起左侧栏",
     "install.title": "选择安装路径",
@@ -545,6 +595,31 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "quick.qqQrAlt": "零境交錯同好會 QR Code",
     "quick.bugReport": "BUG 提交",
     "quick.bugReportTip": "遇到問題或有建議，來這裡回報",
+    "feedback.title": "玩家回報",
+    "feedback.loading": "正在讀取回報…",
+    "feedback.empty": "目前沒有未處理的問題",
+    "feedback.cached": "目前顯示的是快取內容，稍後會自動更新",
+    "feedback.refresh": "重新整理",
+    "feedback.close": "關閉",
+    "feedback.back": "返回列表",
+    "feedback.count.bug": "BUG {count}",
+    "feedback.count.suggestion": "建議 {count}",
+    "feedback.comments": "{count} 則留言",
+    "feedback.comments.title": "留言",
+    "feedback.comments.empty": "還沒有留言",
+    "feedback.compose.placeholder": "寫下你的補充或重現步驟…",
+    "feedback.compose.send": "發表留言",
+    "feedback.compose.sending": "正在發表…",
+    "feedback.openOnGithub": "在 GitHub 開啟",
+    "feedback.age.justNow": "剛剛",
+    "feedback.age.minutes": "{count} 分鐘前",
+    "feedback.age.hours": "{count} 小時前",
+    "feedback.age.days": "{count} 天前",
+    "feedback.category.bug": "BUG",
+    "feedback.category.suggestion": "建議",
+    "feedback.category.improvement": "優化",
+    "feedback.category.question": "提問",
+    "feedback.category.other": "未分類",
     "side.expand": "展開左側欄",
     "side.collapse": "收起左側欄",
     "install.title": "選擇安裝路徑",
@@ -732,6 +807,31 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "quick.qqQrAlt": "Crossing Void Fan Group QR code",
     "quick.bugReport": "Report a bug",
     "quick.bugReportTip": "Found a problem or have a suggestion? Tell us here",
+    "feedback.title": "Player feedback",
+    "feedback.loading": "Loading feedback…",
+    "feedback.empty": "No open issues right now",
+    "feedback.cached": "Showing cached results; they refresh automatically",
+    "feedback.refresh": "Refresh",
+    "feedback.close": "Close",
+    "feedback.back": "Back to list",
+    "feedback.count.bug": "Bugs {count}",
+    "feedback.count.suggestion": "Ideas {count}",
+    "feedback.comments": "{count} comment(s)",
+    "feedback.comments.title": "Comments",
+    "feedback.comments.empty": "No comments yet",
+    "feedback.compose.placeholder": "Add details or steps to reproduce…",
+    "feedback.compose.send": "Post comment",
+    "feedback.compose.sending": "Posting…",
+    "feedback.openOnGithub": "Open on GitHub",
+    "feedback.age.justNow": "just now",
+    "feedback.age.minutes": "{count} min ago",
+    "feedback.age.hours": "{count} h ago",
+    "feedback.age.days": "{count} d ago",
+    "feedback.category.bug": "BUG",
+    "feedback.category.suggestion": "Idea",
+    "feedback.category.improvement": "Improve",
+    "feedback.category.question": "Question",
+    "feedback.category.other": "Uncategorized",
     "side.expand": "Expand sidebar",
     "side.collapse": "Collapse sidebar",
     "install.title": "Choose Install Path",
@@ -919,6 +1019,31 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "quick.qqQrAlt": "零境交錯ファングループ QR コード",
     "quick.bugReport": "不具合報告",
     "quick.bugReportTip": "問題や要望があればこちらへ",
+    "feedback.title": "プレイヤー報告",
+    "feedback.loading": "報告を読み込み中…",
+    "feedback.empty": "未対応の報告はありません",
+    "feedback.cached": "キャッシュを表示中です。まもなく更新されます",
+    "feedback.refresh": "更新",
+    "feedback.close": "閉じる",
+    "feedback.back": "一覧へ戻る",
+    "feedback.count.bug": "BUG {count}",
+    "feedback.count.suggestion": "要望 {count}",
+    "feedback.comments": "コメント {count} 件",
+    "feedback.comments.title": "コメント",
+    "feedback.comments.empty": "コメントはまだありません",
+    "feedback.compose.placeholder": "補足や再現手順を書いてください…",
+    "feedback.compose.send": "コメントを投稿",
+    "feedback.compose.sending": "投稿中…",
+    "feedback.openOnGithub": "GitHub で開く",
+    "feedback.age.justNow": "たった今",
+    "feedback.age.minutes": "{count} 分前",
+    "feedback.age.hours": "{count} 時間前",
+    "feedback.age.days": "{count} 日前",
+    "feedback.category.bug": "BUG",
+    "feedback.category.suggestion": "要望",
+    "feedback.category.improvement": "改善",
+    "feedback.category.question": "質問",
+    "feedback.category.other": "未分類",
     "side.expand": "左サイドバーを展開",
     "side.collapse": "左サイドバーを折りたたむ",
     "install.title": "インストール先を選択",
@@ -953,6 +1078,15 @@ export function isLauncherLanguage(value: string | null): value is LauncherLangu
   return value === "zh-Hans" || value === "zh-Hant" || value === "en" || value === "ja";
 }
 
-export function translate(language: LauncherLanguage, key: TranslationKey) {
-  return translations[language][key] ?? translations["zh-Hans"][key] ?? key;
+export function translate(
+  language: LauncherLanguage,
+  key: TranslationKey,
+  replacements?: Record<string, string | number>,
+) {
+  const text = translations[language][key] ?? translations["zh-Hans"][key] ?? key;
+  if (!replacements) return text;
+  // 占位符写法与已有文案一致（如 `发现异常 {count} 项`）。
+  return text.replace(/\{(\w+)\}/g, (match, name: string) =>
+    name in replacements ? String(replacements[name]) : match,
+  );
 }

@@ -278,6 +278,37 @@
   background: #fff;
 }
 
+/*
+ * 反馈入口的三行提示：引导语 + BUG 数 + 建议数。
+ * 计数行用主题色，和引导语拉开层次（两行数字是玩家真正要看的信息）。
+ */
+.feedback-tooltip {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.feedback-tooltip > span:nth-child(2),
+.feedback-tooltip > span:nth-child(3) {
+  color: var(--cv-accent-title);
+}
+
+/*
+ * 自动弹出：进入零境页面时不用悬停也显示一次，停 8 秒后由 App.vue 摘掉这个类。
+ * 这里和 `.icon-button:hover .button-tooltip` 是同一套视觉，只是触发源不同。
+ */
+.feedback-tooltip:not(.tip-visible) {
+  display: none;
+}
+
+.icon-button:hover .feedback-tooltip {
+  display: grid;
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+
 .plain-icon > svg {
   display: block;
   transform: none;

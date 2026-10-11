@@ -161,6 +161,7 @@ import {
   USE_DX11_STORAGE_KEY,
 } from "./storageKeys";
 import SettingsPanel from "./components/SettingsPanel.vue";
+import FeedbackPanel from "./components/FeedbackPanel.vue";
 import LauncherCheckbox from "./components/LauncherCheckbox.vue";
 import { useSettingsScrollbar } from "./composables/useSettingsScrollbar";
 import { settingsContextKey } from "./settings/settingsContext";
@@ -357,6 +358,20 @@ document.documentElement.lang = currentLanguage.value;
 const activeNewsTab = ref<NewsTab>("characters");
 const activeCharacterBanner = ref(0);
 const showSettings = ref(false);
+
+/**
+ * 玩家反馈面板与"BUG 提交"悬停提示。
+ *
+ * - 提示内容 = BUG / 建议两个计数（文档 §3.1 的口径：只数未关闭里带 bug / enhancement 的）；
+ * - 进零境页面自动弹出一次、停 8 秒（用户 2026-10-11 拍板），之后仍可悬停查看；
+ * - 计数在启动完成后异步拉一次，失败就静默（提示退回原来的引导语，不能让首页报错）。
+ */
+const showFeedback = ref(false);
+const feedbackAutoTip = ref(false);
+const feedbackCounts = ref<{ bug: number; suggestion: number } | null>(null);
+let feedbackAutoTipTimer: number | undefined;
+let feedbackAutoTipConsumed = false;
+const QUICK_LINK_FEEDBACK_KEY = "bug-report";
 const showDeleteGameConfirm = ref(false);
 const showInstallConfirm = ref(false);
 const installDialogMode = ref<InstallDialogMode>("install");
@@ -655,7 +670,8 @@ const noticeBoard = ref<NoticeBoard>(fallbackNoticeBoard);
 const videos = ref<VideoItem[]>(fallbackVideos);
 const activeVideo = ref<VideoItem | null>(null);
 const videoFallbackBanner = "/launcher/video-fallback.png";
-const t = (key: TranslationKey) => translate(currentLanguage.value, key);
+const t = (key: TranslationKey, replacements?: Record<string, string | number>) =>
+  translate(currentLanguage.value, key, replacements);
 const currentPromoBanner = computed(() => {
   if (activeNewsTab.value === "notice") return noticeBoard.value.banner;
   if (activeNewsTab.value === "video") return videoFallbackBanner;
@@ -1253,6 +1269,11 @@ onMounted(() => {
     } finally {
       await initializePlatformPage();
       hideBootSplash();
+      // 反馈计数不阻塞启动：拉回来之后再让提示带上数字。
+      // 提示要等加载层淡出后才有意义，所以这里延迟到 bootSplash 让位之后。
+      void refreshFeedbackCounts().then(() => {
+        window.setTimeout(showFeedbackAutoTipOnce, bootSplashMinimumDurationMs / 2);
+      });
     }
   })();
 });
@@ -4691,6 +4712,11 @@ async function closeWindow() {
 }
 
 async function openQuickLink(item: QuickLink) {
+  // 「BUG 提交」不再直接跳 Gitee，而是在启动器里打开反馈面板（文档 §10）。
+  if (item.key === QUICK_LINK_FEEDBACK_KEY) {
+    openFeedbackPanel();
+    return;
+  }
   if (!item.url) return;
 
   try {
@@ -4699,6 +4725,37 @@ async function openQuickLink(item: QuickLink) {
     console.warn("Unable to open launcher quick link", error);
     window.open(item.url, "_blank", "noopener,noreferrer");
   }
+}
+
+/** 拉一次反馈计数。失败静默：提示退回原来的引导语，不让首页报错。 */
+async function refreshFeedbackCounts() {
+  try {
+    const list = await invoke<unknown>("fetch_feedback_issues", { forceRefresh: false });
+    const source = (list ?? {}) as Record<string, unknown>;
+    feedbackCounts.value = {
+      bug: Number(source.bugCount ?? 0) || 0,
+      suggestion: Number(source.suggestionCount ?? 0) || 0,
+    };
+  } catch (error) {
+    console.warn("Unable to load feedback counts", error);
+  }
+}
+
+/** 进零境页面时自动弹一次提示，停 8 秒（每次启动只弹一次）。 */
+function showFeedbackAutoTipOnce() {
+  if (feedbackAutoTipConsumed || !isGamePageActive.value) return;
+  feedbackAutoTipConsumed = true;
+  feedbackAutoTip.value = true;
+  window.clearTimeout(feedbackAutoTipTimer);
+  feedbackAutoTipTimer = window.setTimeout(() => {
+    feedbackAutoTip.value = false;
+  }, 8000);
+}
+
+function openFeedbackPanel() {
+  showFeedback.value = true;
+  feedbackAutoTip.value = false;
+  window.clearTimeout(feedbackAutoTipTimer);
 }
 
 async function startWindowDrag(event: MouseEvent) {
@@ -4876,7 +4933,22 @@ provide(settingsContextKey, settingsContext);
           />
           <span class="button-tooltip quick-tooltip" :class="{ 'qr-tooltip': item.qr }">
             <img v-if="item.qr" class="quick-qr" :src="item.qr" :alt="item.qrAltKey ? t(item.qrAltKey) : t(item.tipKey)" />
-            <span>{{ t(item.tipKey) }}</span>
+            <!-- 反馈入口的提示换成三行；计数还没回来/拉取失败时退回原来的单行引导语。 -->
+            <template v-if="item.key === QUICK_LINK_FEEDBACK_KEY && feedbackCounts">
+              <span>{{ t("quick.bugReportTip") }}</span>
+              <span>{{ t("feedback.count.bug", { count: feedbackCounts.bug }) }}</span>
+              <span>{{ t("feedback.count.suggestion", { count: feedbackCounts.suggestion }) }}</span>
+            </template>
+            <span v-else>{{ t(item.tipKey) }}</span>
+          </span>
+          <!-- 进入零境页面时自动弹出一次、停 8 秒（用户 2026-10-11 拍板）。 -->
+          <span
+            v-if="item.key === QUICK_LINK_FEEDBACK_KEY && feedbackCounts && feedbackAutoTip"
+            class="button-tooltip quick-tooltip feedback-tooltip"
+          >
+            <span>{{ t("quick.bugReportTip") }}</span>
+            <span>{{ t("feedback.count.bug", { count: feedbackCounts.bug }) }}</span>
+            <span>{{ t("feedback.count.suggestion", { count: feedbackCounts.suggestion }) }}</span>
           </span>
         </button>
       </nav>
@@ -5293,6 +5365,10 @@ provide(settingsContextKey, settingsContext);
           </button>
         </section>
       </div>
+    </Transition>
+
+    <Transition name="settings-layer">
+      <FeedbackPanel v-if="showFeedback" :t="t" :language="currentLanguage" @close="showFeedback = false" />
     </Transition>
 
     <Transition name="settings-layer">
