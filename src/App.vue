@@ -4844,6 +4844,32 @@ async function startWindowDrag(event: MouseEvent) {
   }
 }
 
+/**
+ * 外壳上的「不许选中/复制/剪切」守卫：**遇到可编辑控件就放行**。
+ *
+ * 背景：启动器为了不像网页，在外壳上全局 `.prevent` 掉了 copy / cut / selectstart。
+ * 但反馈表单里有 input / textarea —— 玩家在那儿按 Ctrl+A、Ctrl+C、Ctrl+V 全部无效，
+ * 手感非常怪（2026-10-11 用户报）。
+ *
+ * 判据只有一条：事件目标是不是 input / textarea / contenteditable。
+ * 是就完全不拦（返回、不 preventDefault），不是才按老规矩拦住。
+ */
+function isEditableTarget(target: EventTarget | null) {
+  const node = target as HTMLElement | null;
+  if (!node || typeof node.closest !== "function") return false;
+  return Boolean(node.closest('input, textarea, [contenteditable="true"], [contenteditable=""]'));
+}
+
+function guardShellClipboardEvent(event: ClipboardEvent) {
+  if (isEditableTarget(event.target)) return;
+  event.preventDefault();
+}
+
+function guardShellSelectStart(event: Event) {
+  if (isEditableTarget(event.target)) return;
+  event.preventDefault();
+}
+
 function handleContextMenu(event: MouseEvent) {
   event.preventDefault();
   event.stopPropagation();
@@ -4964,10 +4990,10 @@ provide(settingsContextKey, settingsContext);
 <template>
   <main
     class="launcher-shell"
-    @copy.prevent
-    @cut.prevent
+    @copy="guardShellClipboardEvent"
+    @cut="guardShellClipboardEvent"
     @contextmenu="handleContextMenu"
-    @selectstart.prevent
+    @selectstart="guardShellSelectStart"
     @mousedown="startWindowDrag"
   >
     <img v-if="!gameOverviewVisible && activeGame.backgroundSrc" class="background" :src="activeGame.backgroundSrc" alt="" />

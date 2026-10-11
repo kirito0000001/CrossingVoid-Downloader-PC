@@ -64,14 +64,64 @@ const commentError = ref("");
 const viewMode = ref<"list" | "detail" | "form">("list");
 
 /** 表单状态。 */
-const submitCategory = ref<FeedbackSubmitCategory>("bug");
 const submitNickname = ref("");
-const submitTitle = ref("");
-const submitDescription = ref("");
-const submitPending = ref(false);
 const submitError = ref("");
 const createdIssue = ref<CreatedFeedbackIssue | null>(null);
 const nicknameStorageKey = "crossing-void.launcher.feedback-nickname";
+const draftStorageKey = "crossing-void.launcher.feedback-draft";
+
+/** 未提交的内容存本地：误点外面 / 关掉面板 / 重启启动器都不该丢（2026-10-11 用户报）。 */
+type StoredDraft = {
+  category?: FeedbackSubmitCategory;
+  title?: string;
+  description?: string;
+  includeEnvironment?: boolean;
+};
+
+function readStoredDraft(): StoredDraft {
+  try {
+    const raw = window.localStorage.getItem(draftStorageKey);
+    return raw ? (JSON.parse(raw) as StoredDraft) : {};
+  } catch {
+    return {};
+  }
+}
+
+const storedDraft = readStoredDraft();
+const submitCategory = ref<FeedbackSubmitCategory>(
+  storedDraft.category && FEEDBACK_SUBMIT_CATEGORIES.includes(storedDraft.category)
+    ? storedDraft.category
+    : "bug",
+);
+const submitTitle = ref(storedDraft.title ?? "");
+const submitDescription = ref(storedDraft.description ?? "");
+const includeEnvironment = ref(storedDraft.includeEnvironment ?? true);
+
+function persistDraft() {
+  try {
+    window.localStorage.setItem(
+      draftStorageKey,
+      JSON.stringify({
+        category: submitCategory.value,
+        title: submitTitle.value,
+        description: submitDescription.value,
+        includeEnvironment: includeEnvironment.value,
+      } satisfies StoredDraft),
+    );
+  } catch {
+    // 存不下不影响填写。
+  }
+}
+
+function clearStoredDraft() {
+  try {
+    window.localStorage.removeItem(draftStorageKey);
+  } catch {
+    // 同上。
+  }
+}
+
+watch([submitCategory, submitTitle, submitDescription, includeEnvironment], persistDraft);
 
 const listScroll = ref<HTMLElement | null>(null);
 const detailScroll = ref<HTMLElement | null>(null);
@@ -267,12 +317,13 @@ watch(
   },
 );
 /** 环境信息默认整段带上；玩家可以取消勾选（提交前正文以服务端拼装为准）。 */
-const includeEnvironment = ref(true);
 
+const submitPending = ref(false);
 const titleLength = computed(() => submitTitle.value.trim().length);
 const descriptionLength = computed(() => submitDescription.value.trim().length);
 const titleReady = computed(() => titleLength.value >= 4 && titleLength.value <= 60);
-const descriptionReady = computed(() => descriptionLength.value >= 20);
+// 正文不做长度限制（用户 2026-10-11 要求）：非空即可提交，上限由 Rust 侧兜底。
+const descriptionReady = computed(() => descriptionLength.value > 0);
 const canSubmit = computed(() => titleReady.value && descriptionReady.value && !submitPending.value);
 
 /** 脱敏预览：把 `C:\Users\<名>\` 换成 `<用户>`，让玩家看得见将要公开什么。 */
@@ -311,6 +362,8 @@ async function submitIssue() {
     });
     createdIssue.value = created;
     rememberNickname(submitNickname.value.trim());
+    // 提交成功后清掉本地草稿，避免下次打开还挂着已经提过的内容。
+    clearStoredDraft();
     // 建完就刷新列表：新 issue 会出现在最前面，玩家能立刻看到自己的那条。
     await loadList(true);
     submitTitle.value = "";

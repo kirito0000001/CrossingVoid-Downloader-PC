@@ -56,10 +56,11 @@ if ($sourceFull -ne $targetFull) {
 Write-Host ">>> 注册/更新计划任务 $TaskName" -ForegroundColor Cyan
 $action = New-ScheduledTaskAction -Execute "powershell.exe" `
     -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$target`""
+# 触发时机跟服务器上其它服务保持一致：开机 + 每天凌晨 4 点（用户 2026-10-11 拍板）。
+# 服务本身是常驻监听，这两条只是"开机拉起"和"每天兜底重启一次"，不是干活周期。
 $triggers = @(
     (New-ScheduledTaskTrigger -AtStartup),
-    # 每 6 小时重起一次：即使监听器卡死，也不需要人工介入。
-    (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Hours 6))
+    (New-ScheduledTaskTrigger -Daily -At 4:00AM)
 )
 $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `

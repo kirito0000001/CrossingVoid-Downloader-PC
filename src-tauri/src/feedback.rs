@@ -656,7 +656,6 @@ pub const SUBMIT_CATEGORIES: [&str; 4] = [
 
 const TITLE_MIN_CHARS: usize = 4;
 const TITLE_MAX_CHARS: usize = 80;
-const DESCRIPTION_MIN_CHARS: usize = 20;
 const DESCRIPTION_MAX_CHARS: usize = 4000;
 const NICKNAME_MAX_CHARS: usize = 16;
 const ENVIRONMENT_VALUE_MAX_CHARS: usize = 300;
@@ -823,11 +822,10 @@ pub fn prepare_issue_submission(
 
     let description = description.trim();
     let description_chars = char_count(description);
-    if description_chars < DESCRIPTION_MIN_CHARS {
-        return Err(format!(
-            "描述太短了，至少 {} 个字（写清：你做了什么、期望什么、实际发生了什么）",
-            DESCRIPTION_MIN_CHARS
-        ));
+    // 正文只要求"不是空"：用户 2026-10-11 明确要求不做长度限制。
+    // 太短的内容由"待确认"标签 + 人工过目兜底（文档 §8.3），不要拿校验拦玩家。
+    if description_chars == 0 {
+        return Err("请先写一点描述，哪怕一句话也行".to_string());
     }
     if description_chars > DESCRIPTION_MAX_CHARS {
         return Err(format!("描述太长了，最多 {} 个字", DESCRIPTION_MAX_CHARS));
@@ -1155,15 +1153,28 @@ mod tests {
         .expect_err("标题太短必须被拒绝");
         assert!(too_short.contains("标题"), "{}", too_short);
 
-        let short_description = prepare_issue_submission(
+        // 正文不做长度限制（用户 2026-10-11 要求）：只有完全空白才拦。
+        let empty_description = prepare_issue_submission(
             CATEGORY_BUG,
             "",
             "合法标题",
-            "太短了",
+            "   ",
             &FeedbackEnvironment::default(),
         )
-        .expect_err("描述太短必须被拒绝");
-        assert!(short_description.contains("描述"), "{}", short_description);
+        .expect_err("空描述必须被拒绝");
+        assert!(empty_description.contains("描述"), "{}", empty_description);
+
+        assert!(
+            prepare_issue_submission(
+                CATEGORY_BUG,
+                "",
+                "合法标题",
+                "就这样",
+                &FeedbackEnvironment::default(),
+            )
+            .is_ok(),
+            "很短的正文也应当允许提交"
+        );
 
         let long_nickname = prepare_issue_submission(
             CATEGORY_BUG,

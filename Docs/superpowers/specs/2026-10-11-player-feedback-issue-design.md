@@ -583,6 +583,17 @@ IIS (www.crossingvoid.top:80/443)
   只卡写不卡读）。所以「关掉联调 issue」这类收尾动作得在网页上点。
 - **服务器侧还没有缓存**：现在每次读都直连 GitHub（5000/小时够用，但玩家多了值得加 5 分钟缓存）。
 
+### 表单可用性修正（2026-10-11 用户实测反馈）
+
+| 问题 | 原因 | 修法 |
+| --- | --- | --- |
+| 输入框里 `Ctrl+A / C / V` 全失效 | `.launcher-shell` 上全局 `@copy.prevent @cut.prevent @selectstart.prevent`（为了让启动器不像网页）**连输入框一起拦了** | 换成 `guardShellClipboardEvent` / `guardShellSelectStart`：目标是 `input/textarea/contenteditable` 就完全不拦，其余照旧 |
+| 填一半点出框，内容全丢 | 表单状态只活在组件里，而面板是 `v-if`，点遮罩关闭即销毁 | 草稿落 `localStorage`（键 `crossing-void.launcher.feedback-draft`，含类别/标题/正文/是否带环境），提交成功才清空。**依赖 Rust 侧脱敏作为安全边界**，不靠"每次重填" |
+| 正文要求 ≥20 字太硬 | 用户明确要求不做长度限制 | 前端：非空即可提交；Rust：只拦空白，上限 4000 字保留（防滥用上限，不是质量门槛） |
+
+> 词汇澄清（避免以后误解）：正文长度上限 4000 字**保留**，它是"防超大 payload"，不是"要求你写够多少字"。
+
+
 
 
 ### 11.2 待验证 / 未决
