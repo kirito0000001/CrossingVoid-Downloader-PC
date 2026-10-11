@@ -43,7 +43,7 @@
 .feedback-panel {
   position: relative;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   /*
    * 设计尺寸 900×540；窗口（或显示缩放后的视口）比它小时按**包含块**收敛。
    * 用 `100%` 而不是 `100vw`：包含块就是遮罩的 padding box（= 视口），
@@ -94,21 +94,49 @@
   gap: 10px;
 }
 
-.feedback-count {
-  padding: 3px 10px;
+/* ── 分类筛选（替代了原来的两个计数徽标） ─────────────── */
+
+.feedback-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 24px;
+  border-bottom: 1px solid color-mix(in srgb, var(--cv-accent-soft) 16%, transparent);
+}
+
+.feedback-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--cv-accent-soft) 24%, transparent);
   border-radius: 999px;
+  color: rgba(255, 255, 255, 0.78);
+  background: color-mix(in srgb, var(--cv-bg-surface) 58%, transparent);
   font-size: 12.5px;
+  font-weight: 900;
+  transition: border-color 120ms ease, background 120ms ease, color 120ms ease;
+}
+
+.feedback-filter em {
+  color: rgba(255, 255, 255, 0.5);
+  font-style: normal;
   font-weight: 900;
 }
 
-.feedback-count.bug {
-  color: #ffd9d3;
-  background: color-mix(in srgb, #d73a4a 34%, transparent);
+.feedback-filter:hover {
+  border-color: color-mix(in srgb, var(--cv-theme-accent) 44%, transparent);
 }
 
-.feedback-count.suggestion {
-  color: #d8f3ff;
-  background: color-mix(in srgb, #0e8a16 30%, transparent);
+.feedback-filter.active {
+  border-color: color-mix(in srgb, var(--cv-theme-accent) 62%, transparent);
+  color: #1d1a12;
+  background: var(--cv-theme-accent);
+}
+
+.feedback-filter.active em {
+  color: rgba(29, 26, 18, 0.66);
 }
 
 .feedback-head-actions {

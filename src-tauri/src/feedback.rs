@@ -112,12 +112,12 @@ pub struct FeedbackComment {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct FeedbackIssueList {
-    /// 未关闭且带 `bug` 的数量（文档 §3.1 的统计口径）。
-    pub bug_count: u32,
-    /// 未关闭且带 `enhancement` 的数量。
-    pub suggestion_count: u32,
+    /// 每个类别各有多少条（键就是 `category` 的取值，含 `uncategorized`）。
+    ///
+    /// 前端用它做两件事：面板顶部的分类筛选、以及悬停提示里的 BUG / 建议两个数。
+    pub category_counts: std::collections::BTreeMap<String, u32>,
     pub issues: Vec<FeedbackIssue>,
-    /// 数据来自本地缓存时为 true（界面可以提示"稍后刷新"）。
+    /// 数据来自本地缓存时为 true。
     pub from_cache: bool,
 }
 
@@ -178,25 +178,20 @@ fn to_feedback_issue(raw: RawIssue) -> FeedbackIssue {
 /// 从原始列表算出计数与条目。保持后端的"未关闭"顺序（GitHub 默认按创建时间倒序）。
 pub fn build_issue_list(raw: Vec<RawIssue>, from_cache: bool) -> FeedbackIssueList {
     let issues: Vec<FeedbackIssue> = raw.into_iter().map(to_feedback_issue).collect();
-    let bug_count = issues
-        .iter()
-        .filter(|issue| issue.labels.iter().any(|label| label == CATEGORY_BUG))
-        .count() as u32;
-    let suggestion_count = issues
-        .iter()
-        .filter(|issue| {
-            issue
-                .labels
-                .iter()
-                .any(|label| label == CATEGORY_ENHANCEMENT)
-        })
-        .count() as u32;
+    let mut category_counts: std::collections::BTreeMap<String, u32> = std::collections::BTreeMap::new();
+    for issue in &issues {
+        *category_counts.entry(issue.category.clone()).or_insert(0) += 1;
+    }
     FeedbackIssueList {
-        bug_count,
-        suggestion_count,
+        category_counts,
         issues,
         from_cache,
     }
+}
+
+/// 「全部」的计数 = 当前未关闭的 issue 总数。
+pub fn total_count(list: &FeedbackIssueList) -> u32 {
+    list.category_counts.values().sum()
 }
 
 /// 取令牌：只认环境变量，且不把值写进任何日志。
@@ -597,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn issue_list_counts_only_bug_and_enhancement() {
+    fn issue_list_counts_every_category() {
         let raw = vec![
             RawIssue {
                 number: 1,
@@ -629,7 +624,6 @@ mod tests {
                 created_at: "2026-01-03T00:00:00Z".into(),
                 updated_at: "2026-01-03T00:00:00Z".into(),
                 html_url: "https://example.com/3".into(),
-                // 优化 / 提问 / 未分类 都不计入两个数（文档 §3.1）。
                 labels: vec![RawLabel { name: "优化".into() }],
             },
             RawIssue {
@@ -640,15 +634,49 @@ mod tests {
                 created_at: "2026-01-04T00:00:00Z".into(),
                 updated_at: "2026-01-04T00:00:00Z".into(),
                 html_url: "https://example.com/4".into(),
+                labels: vec![RawLabel {
+                    name: "question".into(),
+                }],
+            },
+            RawIssue {
+                number: 5,
+                title: "e".into(),
+                body: None,
+                comments: 0,
+                created_at: "2026-01-05T00:00:00Z".into(),
+                updated_at: "2026-01-05T00:00:00Z".into(),
+                html_url: "https://example.com/5".into(),
+                // 网页直提的 issue：四类都不沾。
                 labels: vec![],
+            },
+            RawIssue {
+                number: 6,
+                title: "f".into(),
+                body: None,
+                comments: 0,
+                created_at: "2026-01-06T00:00:00Z".into(),
+                updated_at: "2026-01-06T00:00:00Z".into(),
+                html_url: "https://example.com/6".into(),
+                labels: vec![RawLabel { name: "bug".into() }],
             },
         ];
         let list = build_issue_list(raw, false);
-        assert_eq!(list.bug_count, 1);
-        assert_eq!(list.suggestion_count, 1);
-        assert_eq!(list.issues.len(), 4);
-        assert_eq!(list.issues[3].category, CATEGORY_OTHER);
+        assert_eq!(list.category_counts.get("bug"), Some(&2));
+        assert_eq!(list.category_counts.get("enhancement"), Some(&1));
+        assert_eq!(list.category_counts.get("优化"), Some(&1));
+        assert_eq!(list.category_counts.get("question"), Some(&1));
+        assert_eq!(list.category_counts.get(CATEGORY_OTHER), Some(&1));
+        assert_eq!(list.issues.len(), 6);
+        assert_eq!(total_count(&list), 6);
         assert!(!list.from_cache);
+    }
+
+    #[test]
+    fn category_counts_are_empty_for_an_empty_list() {
+        let list = build_issue_list(Vec::new(), true);
+        assert!(list.category_counts.is_empty());
+        assert_eq!(total_count(&list), 0);
+        assert!(list.from_cache);
     }
 
     #[test]

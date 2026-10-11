@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  categoryIssueCount,
   FEEDBACK_CATEGORY_LABEL_KEYS,
   formatFeedbackAge,
   normalizeFeedbackCategory,
   normalizeFeedbackIssue,
   normalizeFeedbackIssueList,
   normalizeIssueCount,
+  totalIssueCount,
 } from "../src/feedback";
 import { launcherStyleFilePaths, readSource } from "./helpers/launcherSources";
 
@@ -45,8 +47,7 @@ describe("feedback category mapping", () => {
 describe("feedback list normalization", () => {
   it("keeps counts and issues from a well-formed payload", () => {
     const list = normalizeFeedbackIssueList({
-      bugCount: 2,
-      suggestionCount: 1,
+      categoryCounts: { bug: 2, enhancement: 1, question: 3, uncategorized: 1 },
       fromCache: true,
       issues: [
         {
@@ -62,8 +63,10 @@ describe("feedback list normalization", () => {
       ],
     });
 
-    expect(list.bugCount).toBe(2);
-    expect(list.suggestionCount).toBe(1);
+    expect(list.categoryCounts.bug).toBe(2);
+    expect(list.categoryCounts.enhancement).toBe(1);
+    expect(list.categoryCounts.question).toBe(3);
+    expect(list.categoryCounts.uncategorized).toBe(1);
     expect(list.fromCache).toBe(true);
     expect(list.issues).toHaveLength(1);
     expect(list.issues[0].category).toBe("bug");
@@ -76,11 +79,27 @@ describe("feedback list normalization", () => {
     expect(normalizeIssueCount(-5)).toBe(0);
     expect(normalizeIssueCount(2.7)).toBe(2);
 
-    const list = normalizeFeedbackIssueList({ bugCount: "x", suggestionCount: null, issues: null });
-    expect(list.bugCount).toBe(0);
-    expect(list.suggestionCount).toBe(0);
+    const list = normalizeFeedbackIssueList({ categoryCounts: { bug: "x", enhancement: null }, issues: null });
+    expect(list.categoryCounts.bug).toBe(0);
+    expect(list.categoryCounts.enhancement ?? 0).toBe(0);
     expect(list.issues).toEqual([]);
     expect(list.fromCache).toBe(false);
+  });
+
+  it("drops unknown categories from counts and totals every known one", () => {
+    // 后端将来加类别而前端没跟上时，多出来的键要丢掉，否则会渲染出一个没有文案的筛选按钮。
+    const list = normalizeFeedbackIssueList({
+      categoryCounts: { bug: 2, 优化: 1, somethingNew: 9 },
+      issues: [],
+    });
+    expect(list.categoryCounts.bug).toBe(2);
+    expect(list.categoryCounts["优化"]).toBe(1);
+    expect(Object.keys(list.categoryCounts)).not.toContain("somethingNew");
+
+    expect(totalIssueCount(list)).toBe(3);
+    expect(categoryIssueCount(list, "bug")).toBe(2);
+    expect(categoryIssueCount(list, "question")).toBe(0);
+    expect(totalIssueCount(null)).toBe(0);
   });
 
   it("fills missing issue fields so the template never renders undefined", () => {

@@ -165,6 +165,9 @@ export type TranslationKey =
   | "feedback.refresh"
   | "feedback.close"
   | "feedback.back"
+  | "feedback.filter.label"
+  | "feedback.filter.all"
+  | "feedback.filter.empty"
   | "feedback.count.bug"
   | "feedback.count.suggestion"
   | "feedback.comments"
@@ -388,6 +391,9 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "feedback.refresh": "刷新",
     "feedback.close": "关闭",
     "feedback.back": "返回列表",
+    "feedback.filter.label": "按分类筛选",
+    "feedback.filter.all": "全部",
+    "feedback.filter.empty": "这个分类下暂时没有内容",
     "feedback.count.bug": "当前BUG数目：{count}。",
     "feedback.count.suggestion": "当前建议数目：{count}。",
     "feedback.comments": "{count} 条评论",
@@ -599,6 +605,9 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "feedback.refresh": "重新整理",
     "feedback.close": "關閉",
     "feedback.back": "返回列表",
+    "feedback.filter.label": "按分類篩選",
+    "feedback.filter.all": "全部",
+    "feedback.filter.empty": "這個分類下暫時沒有內容",
     "feedback.count.bug": "目前 BUG 數：{count}。",
     "feedback.count.suggestion": "目前建議數：{count}。",
     "feedback.comments": "{count} 則留言",
@@ -810,6 +819,9 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "feedback.refresh": "Refresh",
     "feedback.close": "Close",
     "feedback.back": "Back to list",
+    "feedback.filter.label": "Filter by category",
+    "feedback.filter.all": "All",
+    "feedback.filter.empty": "Nothing in this category yet",
     "feedback.count.bug": "Open bugs: {count}.",
     "feedback.count.suggestion": "Open ideas: {count}.",
     "feedback.comments": "{count} comment(s)",
@@ -1021,6 +1033,9 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "feedback.refresh": "更新",
     "feedback.close": "閉じる",
     "feedback.back": "一覧へ戻る",
+    "feedback.filter.label": "分類で絞り込む",
+    "feedback.filter.all": "すべて",
+    "feedback.filter.empty": "この分類にはまだ何もありません",
     "feedback.count.bug": "現在の BUG 数：{count}。",
     "feedback.count.suggestion": "現在の要望数：{count}。",
     "feedback.comments": "コメント {count} 件",

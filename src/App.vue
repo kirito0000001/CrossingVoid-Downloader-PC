@@ -1234,39 +1234,6 @@ function togglePlatformDetails() {
 
 onMounted(() => {
   installLauncherErrorLogging();
-
-  // 【临时诊断，测完删除】把真实的窗口/画布/面板像素写进启动器日志目录。
-  // 靠截图反推"设计坐标 1200×675 与实际 CSS 视口"的关系已经错了两次，这次直接量。
-  window.setTimeout(() => {
-    const rect = (selector: string) => {
-      const node = document.querySelector(selector);
-      if (!node) return null;
-      const box = node.getBoundingClientRect();
-      return { left: Math.round(box.left), top: Math.round(box.top), w: Math.round(box.width), h: Math.round(box.height) };
-    };
-    const metrics = {
-      innerWidth: window.innerWidth,
-      innerHeight: window.innerHeight,
-      outerWidth: window.outerWidth,
-      outerHeight: window.outerHeight,
-      devicePixelRatio: window.devicePixelRatio,
-      visualViewport: window.visualViewport
-        ? { width: Math.round(window.visualViewport.width), height: Math.round(window.visualViewport.height), scale: window.visualViewport.scale }
-        : null,
-      shell: rect(".launcher-shell"),
-      canvas: rect(".ui-canvas"),
-      settingsModal: rect(".settings-modal"),
-      userAgent: navigator.userAgent,
-    };
-    const now = new Date();
-    void invoke<string>("write_launcher_error_log", {
-      title: "临时诊断-窗口尺寸",
-      detail: JSON.stringify(metrics, null, 2),
-      context: "自动生成，用于确定设计坐标与视口的关系",
-      occurredAt: now.toLocaleString("zh-CN", { hour12: false }),
-      fileTimestamp: String(now.getTime()),
-    });
-  }, 3000);
   downloadEstimateRefreshTimer = window.setInterval(() => {
     if (launcherState.value !== "downloading") return;
     downloadEstimate.value = downloadTimeEstimator.getEstimate(performance.now());
@@ -4763,9 +4730,10 @@ async function refreshFeedbackCounts() {
   try {
     const list = await invoke<unknown>("fetch_feedback_issues", { forceRefresh: false });
     const source = (list ?? {}) as Record<string, unknown>;
+    const countsByCategory = (source.categoryCounts ?? {}) as Record<string, unknown>;
     const counts = {
-      bug: Number(source.bugCount ?? 0) || 0,
-      suggestion: Number(source.suggestionCount ?? 0) || 0,
+      bug: Number(countsByCategory.bug ?? 0) || 0,
+      suggestion: Number(countsByCategory.enhancement ?? 0) || 0,
     };
     feedbackCounts.value = counts;
     try {

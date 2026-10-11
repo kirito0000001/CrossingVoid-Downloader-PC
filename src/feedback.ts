@@ -36,8 +36,8 @@ export type FeedbackComment = {
 };
 
 export type FeedbackIssueList = {
-  bugCount: number;
-  suggestionCount: number;
+  /** 每个类别各有多少条（键是 `category` 的取值，含 `uncategorized`）。 */
+  categoryCounts: Partial<Record<FeedbackCategory, number>>;
   issues: FeedbackIssue[];
   fromCache: boolean;
 };
@@ -84,12 +84,30 @@ export function normalizeIssueCount(value: unknown): number {
 
 export function normalizeFeedbackIssueList(raw: unknown): FeedbackIssueList {
   const source = (raw ?? {}) as Record<string, unknown>;
+  const rawCounts = (source.categoryCounts ?? {}) as Record<string, unknown>;
+  const categoryCounts: Partial<Record<FeedbackCategory, number>> = {};
+  for (const [key, value] of Object.entries(rawCounts)) {
+    // 未知类别（后端将来新增、前端还没跟上）直接丢掉：宁可少一个筛选按钮，也不要显示空白标签。
+    if (value === undefined || value === null) continue;
+    if (!(key in FEEDBACK_CATEGORY_LABEL_KEYS)) continue;
+    categoryCounts[key as FeedbackCategory] = normalizeIssueCount(value);
+  }
   return {
-    bugCount: normalizeIssueCount(source.bugCount),
-    suggestionCount: normalizeIssueCount(source.suggestionCount),
+    categoryCounts,
     issues: Array.isArray(source.issues) ? source.issues.map(normalizeFeedbackIssue) : [],
     fromCache: source.fromCache === true,
   };
+}
+
+/** 「全部」的条数 = 各类别之和。 */
+export function totalIssueCount(list: FeedbackIssueList | null): number {
+  if (!list) return 0;
+  return Object.values(list.categoryCounts).reduce<number>((sum, value) => sum + (value ?? 0), 0);
+}
+
+/** 某个类别的条数。 */
+export function categoryIssueCount(list: FeedbackIssueList | null, category: FeedbackCategory): number {
+  return list?.categoryCounts[category] ?? 0;
 }
 
 /** 拉取未关闭 issue 列表与两个计数。`forceRefresh` 跳过缓存（玩家手动刷新时用）。 */

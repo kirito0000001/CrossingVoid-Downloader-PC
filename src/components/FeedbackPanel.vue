@@ -9,6 +9,8 @@ import {
   FEEDBACK_CATEGORY_LABEL_KEYS,
   formatFeedbackAge,
   normalizeFeedbackCategory,
+  totalIssueCount,
+  type FeedbackCategory,
   type FeedbackComment,
   type FeedbackIssue,
   type FeedbackIssueDetail,
@@ -162,9 +164,33 @@ function handleKeydown(event: KeyboardEvent) {
   emit("close");
 }
 
-const bugCount = computed(() => list.value?.bugCount ?? 0);
-const suggestionCount = computed(() => list.value?.suggestionCount ?? 0);
 const issues = computed(() => list.value?.issues ?? []);
+
+/** 分类筛选：`all` 或五个类别之一（2026-10-11 用户要求用筛选替换顶部的两个计数徽标）。 */
+const activeFilter = ref<FeedbackCategory | "all">("all");
+
+const filterOptions = computed(() => {
+  const counts = list.value?.categoryCounts ?? {};
+  return [
+    { key: "all" as const, labelKey: "feedback.filter.all" as TranslationKey, count: totalIssueCount(list.value) },
+    // 顺序与反馈表单的四个类别一致，未分类放最后。
+    ...(["bug", "enhancement", "优化", "question", "uncategorized"] as const).map((category) => ({
+      key: category,
+      labelKey: FEEDBACK_CATEGORY_LABEL_KEYS[category],
+      count: counts[category] ?? 0,
+    })),
+  ];
+});
+
+const visibleIssues = computed(() => {
+  if (activeFilter.value === "all") return issues.value;
+  return issues.value.filter((issue) => normalizeFeedbackCategory(issue.category) === activeFilter.value);
+});
+
+function selectFilter(key: FeedbackCategory | "all") {
+  activeFilter.value = key;
+  if (listScroll.value) listScroll.value.scrollTop = 0;
+}
 
 // 切到详情时把滚动位置复位，避免列表滚到底后点进去看见的是中间。
 watch(activeIssue, (value) => {
@@ -185,10 +211,6 @@ onBeforeUnmount(() => {
       <header class="feedback-head">
         <div class="feedback-head-main">
           <strong class="feedback-title">{{ t("feedback.title") }}</strong>
-          <div class="feedback-counts">
-            <span class="feedback-count bug">{{ t("feedback.count.bug", { count: bugCount }) }}</span>
-            <span class="feedback-count suggestion">{{ t("feedback.count.suggestion", { count: suggestionCount }) }}</span>
-          </div>
         </div>
         <div class="feedback-head-actions">
           <button class="feedback-ghost" type="button" :disabled="listPending" @click="loadList(true)">
@@ -200,13 +222,29 @@ onBeforeUnmount(() => {
         </div>
       </header>
 
+      <!-- 分类筛选：替代了原来顶部的两个计数徽标（2026-10-11 用户要求） -->
+      <nav class="feedback-filters" :aria-label="t('feedback.filter.label')">
+        <button
+          v-for="option in filterOptions"
+          :key="option.key"
+          class="feedback-filter"
+          :class="{ active: activeFilter === option.key }"
+          type="button"
+          @click="selectFilter(option.key)"
+        >
+          <span>{{ t(option.labelKey) }}</span>
+          <em>{{ option.count }}</em>
+        </button>
+      </nav>
+
       <!-- 列表：只显示未关闭的 issue（文档 §6.2） -->
       <div v-if="!activeIssue && !detailPending" ref="listScroll" class="feedback-body">
         <p v-if="listPending && !issues.length" class="feedback-state">{{ t("feedback.loading") }}</p>
         <p v-else-if="listError" class="feedback-state error">{{ listError }}</p>
         <p v-else-if="!issues.length" class="feedback-state">{{ t("feedback.empty") }}</p>
+        <p v-else-if="!visibleIssues.length" class="feedback-state">{{ t("feedback.filter.empty") }}</p>
         <ul v-else class="feedback-list">
-          <li v-for="issue in issues" :key="issue.number">
+          <li v-for="issue in visibleIssues" :key="issue.number">
             <button class="feedback-row" type="button" @click="openIssue(issue)">
               <span class="feedback-badge" :class="normalizeFeedbackCategory(issue.category)">
                 {{ categoryLabel(issue.category) }}
