@@ -532,20 +532,57 @@ POST  /repos/{o}/{r}/issues/{n}/comments ->  x-accepted-github-permissions: issu
 
 **验证记录**：`npm.cmd test` 234 通过、`npm.cmd run build` 通过、`cargo test` 52 通过。
 
-**第二期 · 写入（待做）**
+**第二期 · 写入 —— ✅ 已实现（2026-10-11，方案 B：走自建服务器）**
 
-| # | 内容 |
+| # | 内容 | 落地位置 |
+| --- | --- | --- |
+| 8 | 反馈表单：类别单选 + 昵称（`localStorage` 持久化）+ 标题 + 描述 + 环境信息 | `src/components/FeedbackPanel.vue`（提交 `9115c08`） |
+| 9 | 建 issue：校验 + 模板 + 标签一次带齐 | `src-tauri/src/feedback.rs` 的 `prepare_issue_submission` / `submit_feedback_issue`（提交 `9744abb`、`78c1699`） |
+| 10 | 服务器中转端点 | `Scripts/Server/IssueFeedbackServer.ps1` + `Install-IssueFeedbackServer.ps1`（提交 `8bb8303`） |
+| 11 | 客户端改走服务器，令牌彻底移出玩家机器 | `feedback.rs`（提交 `fef8f25`） |
+
+### 服务器中转（方案 B）的实际部署
+
+**架构沿用服务器既有约定**：一条功能 = 一个本机监听端口 + 一条 IIS URL Rewrite 反代规则
+（同 `LauncherDiagnostics` :51988、`MinecraftPerformanceReceiver` :51989）。
+
+```text
+IIS (www.crossingvoid.top:80/443)
+  └─ /api/issue-feedback/*  →  http://127.0.0.1:51990/api/issue-feedback/{R:1}
+                                 └─ PowerShell HttpListener（计划任务 CrossingVoidIssueFeedback，SYSTEM / 开机启动）
+                                      └─ GitHub API（令牌只在服务器上）
+```
+
+| 项 | 值 |
 | --- | --- |
-| 8 | 反馈表单：类别单选 + 昵称（`localStorage` 持久化）+ 标题 + 描述 + 环境信息折叠区 |
-| 9 | 服务端提交端点 → 建 issue（`title` + `body` + `labels` 一次带齐，**永不 PATCH**） |
-| 10 | 提交结果页：显示 issue 链接 |
+| 服务目录 | `C:\Users\Administrator\Desktop\OSSAPI\IssueFeedback\IssueFeedbackServer.ps1` |
+| 令牌文件 | `C:\ProgramData\CrossingVoidIssueFeedback\github-token.txt`（ACL 只给 SYSTEM + Administrators） |
+| 监听 | `http://127.0.0.1:51990/` |
+| 计划任务 | `CrossingVoidIssueFeedback`（SYSTEM、开机 + 每 6 小时重启、崩溃重试 3 次） |
+| 日志 | `C:\ProgramData\CrossingVoidIssueFeedback\service.log`、`attempts-<日期>.jsonl` |
 
-**已知待改进（第一期遗留）**
+**接口**：`GET /health`、`GET /issues`、`GET /issues/{n}`、`GET /issues/{n}/comments`、
+`POST /issues`、`POST /issues/{n}/comments`；写请求需带 `productKey: crossingvoid-launcher-pc`。
 
-- **令牌只能靠环境变量**：当前发评论要求 `CROSSINGVOID_FEEDBACK_TOKEN` 在**启动器进程的环境里**，
-  对普通玩家不现实。第二期需要改成「启动器界面里填写一次、保存到本地配置文件（不进仓库）」，
-  或者干脆把写入收到自建服务器后（文档 §2 的 S1 形态）。
-- 自动弹出提示依赖计数拉取成功；拉不到就退回单行引导语（设计如此，不是故障）。
+**为什么令牌必须留在服务器**：GitHub 不接受匿名建 issue，而令牌一旦放进玩家机器就等于公开
+（classic token 能访问名下**全部仓库**）。服务器侧用 fine-grained PAT，只勾 `CrossingVoid` 一个仓库 + `Issues: Read and write`。
+
+**部署踩过的两个坑（都会重犯，记下来）**：
+1. **远端 PowerShell 5.1 按 ANSI 读脚本** → 含中文的 `.ps1` 语法报错。部署后必须转 UTF-8 **with BOM**，并用
+   `[Parser]::ParseFile()` 自检语法。
+2. **`Add-WebConfigurationProperty -Value @{...}` 建 IIS 规则不可靠**：规则建出来了但 `match.url` 为空，
+   IIS 匹配不到任何请求 → 公网 500（而本机直连 51990 正常）。可靠做法是用 XML 片段建规则并**回读校验** `match.url`；
+   见 `Install-IssueFeedbackServer.ps1`。
+
+**实测（2026-10-11，本机无任何令牌）**：`live_create_issue` 经服务器真实建单成功 →
+`issues/11`，标签 `["question","来源:启动器","待确认"]`。
+
+### 仍未解决
+
+- **issue 的修改/删除仍然只能人工**：`PATCH`/`DELETE` 在实测里持续 403（§9.1 的站点级限制，
+  只卡写不卡读）。所以「关掉联调 issue」这类收尾动作得在网页上点。
+- **服务器侧还没有缓存**：现在每次读都直连 GitHub（5000/小时够用，但玩家多了值得加 5 分钟缓存）。
+
 
 
 ### 11.2 待验证 / 未决
