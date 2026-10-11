@@ -364,11 +364,12 @@ const showSettings = ref(false);
  *
  * - 提示内容 = BUG / 建议两个计数（文档 §3.1 的口径：只数未关闭里带 bug / enhancement 的）；
  * - 进零境页面自动弹出一次、停 8 秒（用户 2026-10-11 拍板），之后仍可悬停查看；
- * - 计数在启动完成后异步拉一次，失败就静默（提示退回原来的引导语，不能让首页报错）。
+ * - 计数先读本地缓存（退出前那次的值），网络回来再刷新——弹出时机不受网络快慢影响。
  */
+const FEEDBACK_COUNTS_STORAGE_KEY = "crossing-void.launcher.feedback-counts";
 const showFeedback = ref(false);
 const feedbackAutoTip = ref(false);
-const feedbackCounts = ref<{ bug: number; suggestion: number } | null>(null);
+const feedbackCounts = ref<{ bug: number; suggestion: number } | null>(readCachedFeedbackCounts());
 let feedbackAutoTipTimer: number | undefined;
 let feedbackAutoTipConsumed = false;
 const QUICK_LINK_FEEDBACK_KEY = "bug-report";
@@ -1269,11 +1270,8 @@ onMounted(() => {
     } finally {
       await initializePlatformPage();
       hideBootSplash();
-      // 反馈计数不阻塞启动：拉回来之后再让提示带上数字。
-      // 提示要等加载层淡出后才有意义，所以这里延迟到 bootSplash 让位之后。
-      void refreshFeedbackCounts().then(() => {
-        window.setTimeout(showFeedbackAutoTipOnce, bootSplashMinimumDurationMs / 2);
-      });
+      // 反馈计数不阻塞启动：拉回来（或 3 秒超时）之后再安排自动弹出。
+      void armFeedbackAutoTip();
     }
   })();
 });
@@ -4732,31 +4730,106 @@ async function refreshFeedbackCounts() {
   try {
     const list = await invoke<unknown>("fetch_feedback_issues", { forceRefresh: false });
     const source = (list ?? {}) as Record<string, unknown>;
-    feedbackCounts.value = {
+    const counts = {
       bug: Number(source.bugCount ?? 0) || 0,
       suggestion: Number(source.suggestionCount ?? 0) || 0,
     };
+    feedbackCounts.value = counts;
+    try {
+      window.localStorage.setItem(FEEDBACK_COUNTS_STORAGE_KEY, JSON.stringify(counts));
+    } catch {
+      // 存不下就算了：缓存只是让下次启动更快显示，不是事实来源。
+    }
   } catch (error) {
     console.warn("Unable to load feedback counts", error);
+    throw error;
+  }
+}
+
+/** 上次的计数：让提示在**不等网络**的情况下就能显示（弹出时机不受网络快慢影响）。 */
+function readCachedFeedbackCounts() {
+  try {
+    const raw = window.localStorage.getItem(FEEDBACK_COUNTS_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { bug?: unknown; suggestion?: unknown };
+    return {
+      bug: Number(parsed.bug ?? 0) || 0,
+      suggestion: Number(parsed.suggestion ?? 0) || 0,
+    };
+  } catch {
+    return null;
   }
 }
 
 /** 进零境页面时自动弹一次提示，停 8 秒（每次启动只弹一次）。 */
+const FEEDBACK_AUTO_TIP_DURATION_MS = 8000;
+const FEEDBACK_AUTO_TIP_DELAY_MS = 900;
+let feedbackAutoTipRetryTimer: number | undefined;
+let feedbackAutoTipRetryCount = 0;
+
+/**
+ * 自动弹出反馈提示。
+ *
+ * 两条触发路径，合起来保证"该看到的时候一定看得到"：
+ * 1. 启动流程结束时（`armFeedbackAutoTip`）；
+ * 2. 玩家从平台总览切回零境页面时（`watch(isGamePageActive)`）。
+ *
+ * 条件不成立时**会重试**：首版写成"判定失败就 return"，而那一刻
+ * `isGamePageActive` 还没成立的话就再也没人叫它了（2026-10-11 用户报"8 秒弹出没做"）。
+ */
 function showFeedbackAutoTipOnce() {
-  if (feedbackAutoTipConsumed || !isGamePageActive.value) return;
+  if (feedbackAutoTipConsumed) return;
+  if (!isGamePageActive.value || gameOverviewVisible.value) {
+    // 还没站在零境页面上：等它成立，最多重试 20 次（约 6 秒）。
+    if (feedbackAutoTipRetryCount >= 20) return;
+    feedbackAutoTipRetryCount += 1;
+    window.clearTimeout(feedbackAutoTipRetryTimer);
+    feedbackAutoTipRetryTimer = window.setTimeout(showFeedbackAutoTipOnce, 300);
+    return;
+  }
   feedbackAutoTipConsumed = true;
   feedbackAutoTip.value = true;
   window.clearTimeout(feedbackAutoTipTimer);
   feedbackAutoTipTimer = window.setTimeout(() => {
     feedbackAutoTip.value = false;
-  }, 8000);
+  }, FEEDBACK_AUTO_TIP_DURATION_MS);
+  if (import.meta.env.DEV) {
+    console.info("[feedback] 自动弹出提示，8 秒后收起");
+  }
+}
+
+/** 启动流程结束时调用：先用缓存把提示安排上，再用网络结果刷新数字。 */
+async function armFeedbackAutoTip() {
+  feedbackAutoTipRetryCount = 0;
+  // 先安排弹出（缓存命中时立刻就有数字），网络请求在后台刷新。
+  window.clearTimeout(feedbackAutoTipRetryTimer);
+  feedbackAutoTipRetryTimer = window.setTimeout(showFeedbackAutoTipOnce, FEEDBACK_AUTO_TIP_DELAY_MS);
+  try {
+    await Promise.race([
+      refreshFeedbackCounts(),
+      new Promise((resolve) => window.setTimeout(resolve, 4000)),
+    ]);
+  } catch {
+    // 网络失败不影响弹出：数字用缓存里的旧值。
+  }
+  if (import.meta.env.DEV) {
+    console.info("[feedback] 自动提示已安排", { counts: feedbackCounts.value });
+  }
 }
 
 function openFeedbackPanel() {
   showFeedback.value = true;
   feedbackAutoTip.value = false;
   window.clearTimeout(feedbackAutoTipTimer);
+  window.clearTimeout(feedbackAutoTipRetryTimer);
 }
+
+// 从平台总览切回零境页面时也要能弹出：启动那一刻可能还没站在零境页面上。
+watch(isGamePageActive, (active) => {
+  if (active && !feedbackAutoTipConsumed) {
+    window.setTimeout(showFeedbackAutoTipOnce, 300);
+  }
+});
 
 async function startWindowDrag(event: MouseEvent) {
   if (event.button !== 0) return;
