@@ -211,17 +211,27 @@ describe("feedback quick-link tooltip", () => {
   });
 
   it("anchors the feedback mask to the viewport, not the design canvas", () => {
-    // 与「背景图被裁得比设计多」（指南 §25）同一个坑：窗口的 CSS 视口可能小于
-    // 1200×675 的设计坐标（本机实测约 1012×571）。遮罩若用 absolute，包含块是 1200 宽的画布，
-    // 居中会把面板右缘推到视口外裁掉（2026-10-11 用户报「页面比例也不对」）。
+    // 与「背景图被裁得比设计多」（指南 §25）和 §10.5 记的规律同源：
+    // 窗口的 CSS 视口可能小于 1200×675 的设计坐标（本机 150% 缩放下约 1012×571）。
+    // 遮罩若用 absolute，包含块是 1200 宽的画布，居中会把面板右缘推到视口外裁掉。
     const css = readSource("src/styles/feedback-panel.css");
-    const maskBlock = css.slice(css.indexOf(".feedback-mask {"), css.indexOf(".feedback-panel {"));
+    // 取"规则块"而不是"第一次出现"：注释里也会提到这两个类名。
+    const blockOf = (selector: string) => {
+      const start = css.indexOf(`\n${selector} {`);
+      expect(start, `${selector} 规则块应存在`).toBeGreaterThan(-1);
+      return css.slice(start, css.indexOf("\n}", start));
+    };
+
+    const maskBlock = blockOf(".feedback-mask");
     expect(maskBlock).toContain("position: fixed");
     expect(maskBlock).not.toContain("position: absolute");
 
-    // 面板尺寸要能随视口收敛，避免小窗口下面板边缘跑出屏幕。
-    const panelBlock = css.slice(css.indexOf(".feedback-panel {"));
-    expect(panelBlock).toContain("min(900px, calc(100vw - 96px))");
-    expect(panelBlock).toContain("min(540px, calc(100vh - 72px))");
+    // 面板尺寸要能随包含块收敛，避免小窗口（显示缩放后视口更窄）下面板边缘跑出屏幕。
+    const panelBlock = blockOf(".feedback-panel");
+    expect(panelBlock).toContain("min(900px, calc(100% - 64px))");
+    expect(panelBlock).toContain("min(540px, calc(100% - 64px))");
+    // 用百分比而不是 100vw/100vh：包含块就是遮罩（视口），和远程公告的写法保持一致。
+    // 只检查**声明**——注释里会解释为什么不这么写。
+    expect(panelBlock).not.toMatch(/(^|\n)\s*(width|height):[^;]*100v[wh]/);
   });
 });

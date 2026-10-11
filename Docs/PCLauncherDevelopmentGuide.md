@@ -413,6 +413,55 @@ JS 先跑完、主界面先画出来，加载层在 CSS 到位前是个**没有�
 > `document.elementFromPoint(窗口中心)` 命中的元素在加载层内部（`topmostInsideSplash = true`）；
 > ③ `tests/bootSplash.test.ts` 守住"只有一份加载层 + 样式必须内联在 index.html"。
 
+### 10.5 界面尺寸与弹窗定位规律（2026-10-11 补，**新接手先读这段**）
+
+这一节把散落在 §10.3、§25 里的尺寸经验收成一条规律，避免每次都靠截图反推（已经反推错两次）。
+
+**第一，设计坐标系只有一个：1200×675。**
+
+- `.launcher-shell`（`styles/shell-backdrop.css`）：`width: 100vw` + `min-width: 1200px` + `min-height: 675px` + `overflow: hidden`；
+- `.ui-canvas`：`position: absolute; inset: 0`，铺满外壳，**没有 transform**；
+- 窗口本身固定 1200×675 且 `resizable: false`（`src-tauri/tauri.conf.json`）。
+
+**第二，窗口设的是 1200×675，但用户实际看到的 CSS 视口可能更小。**
+
+原因是**显示缩放**：本机 150% 时逻辑分辨率只有 1280×720，启动器窗口放不下，
+实测视口约 **1012×571**（§25 里由用户截图按控件右缘反推得到，§10.3 那次也量到 1011×569）。
+此时外壳仍是 1200×675，**右/下各裁掉约 190/100 px**。界面之所以看着没坏，
+是因为右侧控件要么 `position: fixed`、要么锚在 `right: 236` 这类偏左的位置。
+
+**第三，两类界面的定位写法不一样，照抄同类的那个。**
+
+| 类型 | 例子 | 写法 | 为什么 |
+| --- | --- | --- | --- |
+| **铺满型** | 设置页 `.settings-modal`、平台总览 `.platform-game-overview` | 铺满画布（`inset: 0`；设置页再用 `zoom: .96` 微调） | 它们**本来就要占满可见区域**，画布被裁掉的部分本来也不显示 |
+| **弹窗型** | 远程公告 `.remote-notice-panel`、玩家反馈 `.feedback-panel` | 遮罩 `position: fixed; inset: 0` + `place-items: center`；面板宽度 `min(设计宽, calc(100% - 边距))` | `fixed` 的包含块是**视口**；若用 `absolute`，包含块变成 1200 宽的画布，居中会把面板右缘推到视口外**
+
+**弹窗型的两条硬约束**：
+
+1. **遮罩必须 `position: fixed`**。容器（`.ui-canvas`）虽然铺满外壳，但外壳可能是 1200 宽而视口只有 1012 —— `absolute` 居中会以 1200 为基准。
+2. **面板尺寸用包含块百分比，不要用 `100vw`**：`width: min(650px, calc(100% - 64px))` 这种写法（远程公告就是这么写的）。
+   包含块 = 遮罩的 padding box = 视口，语义清楚；`100vw` 在 Windows 上还会被滚动条之类的东西干扰。
+   ⚠️ 远程公告那段注释里写着"100% 指画布（100vw/vh 会绕开等比缩放，窗口一大就撑爆）"——
+   它是在遮罩改成 `fixed` **之前**写的，含义只在"面板挂在画布里"那个版本成立，别照那句话去理解现在的行为。
+
+**第四，背景 / 遮罩 / 扫描线必须锚在窗口上**（`position: fixed`），不要挂在 `.launcher-shell` 上，
+否则会跟着 1200×675 的外壳一起被裁（§25 的现场：背景少了一圈）。守卫：`tests/launcherUiSizeRule.test.ts`
+→「背景 / 遮罩 / 扫描线锚在窗口上，不跟着画布一起被裁」。
+
+**遇到"布局比例不对"时的排查顺序**（照着走，别先改 CSS）：
+
+1. 先确认**同类界面的写法**（铺满型 or 弹窗型），照抄；
+2. 还不对就**量**，不要靠截图反推：在 `App.vue` 里临时用
+   `invoke("write_launcher_error_log", { title: "临时诊断-窗口尺寸", detail: JSON.stringify({ innerWidth, innerHeight, devicePixelRatio, ...rect }) })`
+   把 `window.innerWidth/innerHeight/devicePixelRatio` 与相关元素 `getBoundingClientRect()`
+   写进日志目录（`%LOCALAPPDATA%\com.lingjing.launcher\logs\`），AI 可以直接读文件；
+3. 量完删掉诊断代码，并把结论回写到本节。
+
+> 来源：2026-10-11 玩家反馈弹窗两次定位错误 —— 第一次 `absolute` 居中（包含块是画布），
+> 第二次改成 `fixed` + `100vw` 仍是右边被裁；用户指出"这个启动器的窗口设计本来就不标准，
+> 别按正常视口做比例"，要求先总结其他界面的规律并写进文档。
+
 ## 11. 游戏版本与下载来源
 
 ### 11.1 OSS 官方源

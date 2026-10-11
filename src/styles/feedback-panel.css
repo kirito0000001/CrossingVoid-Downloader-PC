@@ -9,12 +9,17 @@
  */
 
 /*
- * 遮罩锚在**视口**上，不是 1200×675 的设计画布上。
+ * 遮罩锚在**视口**上，与 `.remote-notice-mask`、`.background` 同一套路。
  *
- * 为什么：窗口的 CSS 视口可能比设计尺寸小（本机实测约 1012×571，见指南 §10.3 与
- * §25「背景图被裁得比设计多」）。用 `position: absolute` 时包含块是 1200 宽的画布，
- * `place-items: center` 会把面板居中到画布中心 → 面板右边缘落到视口外被裁掉
- * （2026-10-11 用户报「页面比例也不对」）。`fixed` 让包含块变成用户真正看得见的窗口。
+ * 本项目的尺寸规律（新接手的人务必先读这段，或者看
+ * Docs/PCLauncherDevelopmentGuide.md §10.5「界面尺寸与弹窗定位规律」）：
+ * 1. 整套界面按 1200×675 的设计坐标排版，`min-width/min-height` 顶住，**不做跟随缩放**；
+ * 2. 窗口本身是固定 1200×675、不可缩放（tauri.conf.json），但**显示缩放会让实际 CSS 视口比它小**
+ *    —— 本机 150% 下只有约 1012×569（指南 §25 量到 1012×571）。此时外壳仍是 1200×675，
+ *    右/下超出部分被 `overflow: hidden` 裁掉；
+ * 3. 所以"铺满型"界面（设置页、平台总览）用 `inset: 0` 铺画布就行，**它们本来就要铺满**；
+ *    而"弹窗型"界面必须锚在视口上（`position: fixed`），否则居中会以 1200 宽的画布为准，
+ *    右缘跑到视口外被裁掉 —— 背景图那次（§25）和本弹窗第一次都是这么错的（2026-10-11 用户报「比例不对」）。
  */
 .feedback-mask {
   position: fixed;
@@ -39,9 +44,13 @@
   position: relative;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  /* 设计尺寸 900×540；窗口比设计坐标小的时候按视口收敛，别让边缘跑到屏幕外。 */
-  width: min(900px, calc(100vw - 96px));
-  height: min(540px, calc(100vh - 72px));
+  /*
+   * 设计尺寸 900×540；窗口（或显示缩放后的视口）比它小时按**包含块**收敛。
+   * 用 `100%` 而不是 `100vw`：包含块就是遮罩的 padding box（= 视口），
+   * `100vw` 在 Windows 上还会被滚动条之类的东西干扰，远程公告用的是前者（照它来）。
+   */
+  width: min(900px, calc(100% - 64px));
+  height: min(540px, calc(100% - 64px));
   overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--cv-accent-soft) 22%, transparent);
   border-radius: 3px;
