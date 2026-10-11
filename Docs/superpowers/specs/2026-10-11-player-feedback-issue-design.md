@@ -518,22 +518,35 @@ POST  /repos/{o}/{r}/issues/{n}/comments ->  x-accepted-github-permissions: issu
 
 ### 11.1 分期（2026-10-11 用户拍板：**先做读取侧**）
 
-**第一期 · 读取（现在做）**
+**第一期 · 读取 —— ✅ 已实现（2026-10-11）**
+
+| # | 内容 | 落地位置 |
+| --- | --- | --- |
+| 1 | Rust 只读通道：未关闭列表 + 两个计数 + 详情 + 评论读取/发表 + 磁盘缓存 | `src-tauri/src/feedback.rs`（提交 `7d338c7`） |
+| 2 | 前端数据层：类型、invoke 封装、类别/计数/时间规范化 | `src/feedback.ts` |
+| 3 | 悬停提示三行（引导语 + BUG 数 + 建议数） | `src/App.vue` + `src/styles/titlebar.css` |
+| 4 | 进零境页面自动弹出提示一次、停 8 秒 | `src/App.vue` 的 `showFeedbackAutoTipOnce()` |
+| 5 | 反馈面板：可滚动列表、只显示未关闭、点进详情看正文与评论、可发表评论、**不可修改** | `src/components/FeedbackPanel.vue` + `src/styles/feedback-panel.css`（提交 `1ed021e`） |
+| 6 | 4 种语言 × 22 条文案；`t()` 支持 `{count}` 占位符 | `src/i18n/launcherText.ts` |
+| 7 | 回归测试 | `tests/feedbackPanel.test.ts`、`tests/launcherTextModule.test.ts`、`feedback.rs` 单测 |
+
+**验证记录**：`npm.cmd test` 234 通过、`npm.cmd run build` 通过、`cargo test` 52 通过。
+
+**第二期 · 写入（待做）**
 
 | # | 内容 |
 | --- | --- |
-| 1 | 服务端只读端点：未关闭 issue 列表 + 两个计数（`bug` / `enhancement`）+ 单条详情 + 评论 |
-| 2 | 启动器：`bug-report` 悬停提示改成三行（引导语 / BUG 数 / 建议数） |
-| 3 | 启动器：进零境页面**自动弹出该提示一次，停 8 秒**后消失，之后仍可悬停查看 |
-| 4 | 启动器：点开 = 列表弹窗（可滚动、只显示未关闭、点进详情、**全程只读**） |
+| 8 | 反馈表单：类别单选 + 昵称（`localStorage` 持久化）+ 标题 + 描述 + 环境信息折叠区 |
+| 9 | 服务端提交端点 → 建 issue（`title` + `body` + `labels` 一次带齐，**永不 PATCH**） |
+| 10 | 提交结果页：显示 issue 链接 |
 
-**第二期 · 写入（用户 2026-10-11 表示次日再做）**
+**已知待改进（第一期遗留）**
 
-| # | 内容 |
-| --- | --- |
-| 5 | 反馈表单：类别单选 + 昵称（持久化）+ 标题 + 描述 + 环境信息折叠区 |
-| 6 | 服务端提交端点 → 建 issue（`title` + `body` + `labels` 一次带齐） |
-| 7 | 提交结果页：显示 issue 链接 |
+- **令牌只能靠环境变量**：当前发评论要求 `CROSSINGVOID_FEEDBACK_TOKEN` 在**启动器进程的环境里**，
+  对普通玩家不现实。第二期需要改成「启动器界面里填写一次、保存到本地配置文件（不进仓库）」，
+  或者干脆把写入收到自建服务器后（文档 §2 的 S1 形态）。
+- 自动弹出提示依赖计数拉取成功；拉不到就退回单行引导语（设计如此，不是故障）。
+
 
 ### 11.2 待验证 / 未决
 
