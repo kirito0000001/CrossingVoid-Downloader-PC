@@ -565,6 +565,15 @@ const launcherLanguage = computed({
 });
 const officialUpdateApiUrl = "https://www.crossingvoid.top/api/toolbox-updates";
 /**
+ * 服务器月流量额度（2026-10-18 起）。
+ *
+ * 以前读的是 `${officialUpdateApiUrl}/traffic-status`，那个统计的是**阿里云 OSS 的额度**。
+ * OSS 已经解除，而真实额度在**香港下载站那台机器**上（野草云 600 GiB/月，每月 1 号 08:00 重置）。
+ * 现在改读官网静态文件：香港机器自己统计出口流量，由阿里云的计划任务
+ * `CrossingVoid-TrafficStatusSync` 每 5 分钟同步过来。安卓端读的是同一份。
+ */
+const trafficStatusUrl = "https://www.crossingvoid.top/traffic-status.json";
+/**
  * 零境那套旧的 v2 清单（www `manifests/game/*`）。
  * 已经接下载站的档位走 `latest.json → manifest`，只有还没接入的档位才回退到这里。
  */
@@ -2502,7 +2511,7 @@ async function refreshTrafficQuota() {
   try {
     // The quota may change immediately after the download-site traffic package is topped up.
     // Avoid displaying a stale browser/WebView cache entry as an active download block.
-    const next = await fetchRemoteJson<TrafficQuotaResponse>(`${officialUpdateApiUrl}/traffic-status?t=${Date.now()}`);
+    const next = await fetchRemoteJson<TrafficQuotaResponse>(`${trafficStatusUrl}?t=${Date.now()}`);
     if (!next.success) throw new Error(next.message || "traffic quota request failed");
     trafficQuota.value = next;
     if (next.available && !next.downloadAllowed && downloadSource.value === "official") {

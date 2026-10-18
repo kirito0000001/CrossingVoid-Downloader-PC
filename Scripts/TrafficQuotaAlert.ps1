@@ -1,8 +1,20 @@
+# ⚠️⚠️ 部署时必须以「UTF-8 带 BOM」落盘！
+#
+# 仓库里这份是无 BOM 的 UTF-8（跟随本仓库约定），但**服务器上实际跑的那份是带 BOM 的**。
+# Windows PowerShell 5.1 读无 BOM 的 UTF-8 文件会按 GBK 解码，中文全部变乱码、脚本直接
+# 语法报错（2026-10-18 实测：直接 scp 覆盖之后，计划任务 CrossingVoid 每 5 分钟失败一次）。
+#
+# 两种安全的部署方式：
+#   1. 在服务器上原位改内容，别整文件覆盖；
+#   2. 真要覆盖，用 [System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($true)) 写回。
 param(
     [string]$ConfigPath = 'C:\UEWatchdog\watchdog.config.psd1',
     [string]$StatePath = 'C:\UEWatchdog\traffic-quota-alert-state.json',
     [string]$LogPath = 'C:\UEWatchdog\logs\traffic-quota-alert.log',
-    [string]$TrafficStatusUrl = 'http://127.0.0.1:51987/api/toolbox-updates/traffic-status'
+    # 2026-10-18 起改指向官网静态文件：老地址 /api/toolbox-updates/traffic-status 统计的是
+    # 阿里云 OSS 流量包，而 OSS 已经解除，那个数字不再代表真实额度。现在这份由香港下载机
+    # 自己统计出口流量、经计划任务 CrossingVoid-TrafficStatusSync 同步到官网。
+    [string]$TrafficStatusUrl = 'https://www.crossingvoid.top/traffic-status.json'
 )
 
 $ErrorActionPreference = 'Stop'
