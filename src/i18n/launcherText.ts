@@ -130,6 +130,7 @@ export type TranslationKey =
   | "traffic.updating"
   | "traffic.unavailable"
   | "traffic.low"
+  | "traffic.throttled"
   | "traffic.sourcePaused"
   | "profile.featureCode"
   | "profile.weeklyActive"
@@ -375,6 +376,7 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "traffic.updating": "正在获取服务器流量额度…",
     "traffic.unavailable": "暂时无法获取流量额度，不影响下载。",
     "traffic.low": "服务器当前流量不足，请更换下载源。",
+    "traffic.throttled": "下载源流量已用尽，服务商限速中，下载会明显变慢",
     "traffic.sourcePaused": "服务器当前流量不足，零境交错源下载已暂停。",
     "profile.featureCode": "特征码",
     "profile.weeklyActive": "每周活跃",
@@ -608,6 +610,7 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "traffic.updating": "正在取得伺服器流量額度…",
     "traffic.unavailable": "暫時無法取得流量額度，不影響下載。",
     "traffic.low": "伺服器目前流量不足",
+    "traffic.throttled": "下載源流量已用盡，服務商限速中，下載會明顯變慢",
     "traffic.sourcePaused": "伺服器目前流量不足，零境交錯源下載已暫停。",
     "profile.featureCode": "特徵碼",
     "profile.weeklyActive": "每週活躍",
@@ -841,6 +844,7 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "traffic.updating": "Checking server traffic quota…",
     "traffic.unavailable": "Traffic quota is temporarily unavailable. Downloads remain enabled.",
     "traffic.low": "Server traffic quota is low",
+    "traffic.throttled": "The download source is throttled (monthly traffic used up). Downloads will be much slower.",
     "traffic.sourcePaused": "Server traffic quota is low. The official source download was paused.",
     "profile.featureCode": "Code",
     "profile.weeklyActive": "Weekly Active",
@@ -1074,6 +1078,7 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "traffic.updating": "サーバー通信量を確認しています…",
     "traffic.unavailable": "通信量を取得できません。ダウンロードは引き続き利用できます。",
     "traffic.low": "サーバーの通信量が不足しています",
+    "traffic.throttled": "ダウンロード元の通信量を使い切ったため帯域制限中です。ダウンロードが大幅に遅くなります。",
     "traffic.sourcePaused": "サーバーの通信量不足により、公式ソースのダウンロードを一時停止しました。",
     "profile.featureCode": "識別コード",
     "profile.weeklyActive": "週間活躍",

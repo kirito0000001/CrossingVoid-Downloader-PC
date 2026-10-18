@@ -1907,6 +1907,15 @@ const officialTrafficBlocked = computed(
 const showOfficialTrafficWarning = computed(
   () => downloadSource.value === "official" && officialTrafficBlocked.value,
 );
+/**
+ * 下载源被限速（2026-10-18 新增）。
+ *
+ * 月流量超过 600 GiB 之后服务商会把下载站的端口限到约 150 KB/s —— 下载不报错，只是慢得离谱。
+ * 以前主界面那条横幅对这种情况一言不发，玩家只看到进度条几乎不动。
+ */
+const showOfficialTrafficThrottled = computed(
+  () => downloadSource.value === "official" && trafficQuota.value?.throttled === true,
+);
 const githubNetworkWarningText = computed(() =>
   githubNetworkStatus.value
     ? githubNetworkWarning(githubNetworkStatus.value, {
@@ -1924,11 +1933,17 @@ const showGithubNetworkWarning = computed(
  * 下载相关（渠道被关 / 流量不足 / 没挂代理会很慢）这三条**只在真的还有东西要下**的时候出现：
  * 游戏已经装好且是最新版本时，它们纯属噪音（用户 2026-09-21 的截图：装好了还在报"下载会很慢"）。
  */
+/** 横幅上到底写哪一句：渠道 → 流量（不足 / 被限速）→ Github，取第一条命中的。 */
+const downloadWarningText = computed(() => {
+  if (downloadChannelWarningText.value) return downloadChannelWarningText.value;
+  if (showOfficialTrafficWarning.value) return t("traffic.low");
+  if (showOfficialTrafficThrottled.value) return t("traffic.throttled");
+  if (showGithubNetworkWarning.value) return githubNetworkWarningText.value;
+  return "";
+});
 const showDownloadWarning = computed(() => {
   if (launcherState.value === "ready" && !updateAvailable.value) return false;
-  return Boolean(
-    downloadChannelWarningText.value || showOfficialTrafficWarning.value || showGithubNetworkWarning.value,
-  );
+  return Boolean(downloadWarningText.value);
 });
 const githubProxyText = computed(() => {
   if (githubNetworkPending.value) return "正在检测";
@@ -4982,6 +4997,7 @@ const settingsContext = {
   showDeleteGameConfirm,
   showDevPackageConfirm,
   showGameChunkImportAction,
+  showOfficialTrafficThrottled,
   showSettings,
   showSettingsScrollbar,
   speedLimit,
@@ -5063,7 +5079,7 @@ provide(settingsContextKey, settingsContext);
       <Transition name="traffic-warning">
         <div v-if="isGamePageActive && !gameOverviewVisible && showDownloadWarning" class="traffic-warning" role="status">
           <CircleAlert :size="18" stroke-width="2.8" />
-          <span>{{ downloadChannelWarningText || (showOfficialTrafficWarning ? t("traffic.low") : githubNetworkWarningText) }}</span>
+          <span>{{ downloadWarningText }}</span>
         </div>
       </Transition>
 

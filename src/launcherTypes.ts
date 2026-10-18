@@ -99,6 +99,11 @@ export type TrafficQuotaResponse = {
   available: boolean;
   downloadAllowed: boolean;
   isLow: boolean;
+  /**
+   * 已超出套餐额度、服务商已经把下载站端口限速（实测 600 GiB 用满后掉到约 150 KB/s）。
+   * 服务器是老版没给这个字段时按 false 处理，所以是可选的。
+   */
+  throttled?: boolean;
   totalBytes: number;
   remainingBytes: number;
   thresholdBytes: number;

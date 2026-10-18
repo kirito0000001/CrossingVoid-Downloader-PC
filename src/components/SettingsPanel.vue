@@ -101,6 +101,7 @@ const {
   showDeleteGameConfirm,
   showDevPackageConfirm,
   showGameChunkImportAction,
+  showOfficialTrafficThrottled,
   showSettings,
   showSettingsScrollbar,
   speedLimit,
@@ -194,6 +195,14 @@ const {
                 >
                   {{ t("traffic.lowHint") }}
                 </p>
+                <!-- 2026-10-18：月流量超了之后服务商限速（下载不报错、只是慢），
+                     这里也要说一句，别让玩家以为是自己网络的问题。 -->
+                <p
+                  v-else-if="downloadSource === 'official' && showOfficialTrafficThrottled"
+                  class="traffic-quota__notice low"
+                >
+                  {{ t("traffic.throttled") }}
+                </p>
                 <p v-else-if="downloadSource === 'github'" class="traffic-quota__notice" :class="{ low: Boolean(githubNetworkWarningText) }">
                   {{ githubNetworkWarningText || "Github 网络连接正常。" }}
                 </p>
@@ -203,7 +212,7 @@ const {
                 <div
                   v-if="downloadSource === 'official'"
                   class="traffic-quota"
-                  :class="{ low: officialTrafficBlocked, unavailable: trafficQuota && !trafficQuota.available }"
+                  :class="{ low: officialTrafficBlocked || showOfficialTrafficThrottled, unavailable: trafficQuota && !trafficQuota.available }"
                 >
                   <div class="traffic-quota__header">
                     <span>{{ t("traffic.title") }}</span>

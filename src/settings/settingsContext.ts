@@ -81,6 +81,7 @@ export type SettingsContext = {
   showDeleteGameConfirm: any;
   showDevPackageConfirm: any;
   showGameChunkImportAction: any;
+  showOfficialTrafficThrottled: any;
   showSettings: any;
   showSettingsScrollbar: any;
   speedLimit: any;
