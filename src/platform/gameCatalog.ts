@@ -51,6 +51,14 @@ export type GamePackageConfig = {
    * 界面不会再摆一个永远 404 的官方源，版本检查和下载也直接走 GitHub。
    */
   sources?: readonly DownloadSourceKey[];
+  /**
+   * 碎片清单（`fragments.json`）的 GitHub 兜底地址。
+   *
+   * 碎片 zip 本身走网盘 / QQ 群，GitHub Release 里只放**这一份清单**（固定 tag
+   * `fragments-latest`）。下载站的 `latest.json` 缺 `fragmentsUrl`、或者整份都拿不到
+   * （幻杀目前不发下载站）时用它 —— 否则碎片导入那页连"这一版应该有哪几个包"都显示不出来。
+   */
+  githubFragmentsUrl?: string | null;
 };
 
 /** `gamePackage.sources` 的缺省值：两个源都发。 */
@@ -126,6 +134,8 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
       productKey: "crossingvoid-game",
       runtime: "Windows",
       versionMarker: "CrossingVoid.version.json",
+      githubFragmentsUrl:
+        "https://github.com/kirito0000001/CrossingVoid/releases/download/fragments-latest/fragments.json",
     },
     runtime: {
       installDirectoryName: "CrossingVoid",
@@ -155,6 +165,10 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
       versionMarker: "FantasyProject.version.json",
       // 0.1.0 只发了 GitHub（下载站还没发完），官方源先不摆出来
       sources: ["github"],
+      // 幻杀不走下载站，所以它连 latest.json 都没有：碎片清单只能走 GitHub 兜底，
+      // 否则碎片导入页一直是"读不到这一版的碎片清单"。
+      githubFragmentsUrl:
+        "https://github.com/kirito0000001/fantasy-project-packages/releases/download/fragments-latest/fragments.json",
     },
     runtime: {
       installDirectoryName: "FantasyProject",

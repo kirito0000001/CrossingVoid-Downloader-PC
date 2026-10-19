@@ -57,7 +57,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://www.crossingvoid.top/api/toolbox-updates/tauri/crossingvoid-launcher-pc/windows/x86_64/{{current_version}}"
+        "https://www.crossingvoid.top/manifests/launcher/pc-latest.json"
       ],
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ0MjZFQzczMDUxRDZENzMKUldSemJSMEZjK3dtUktya2FUNFc0Q3VCcG5COGlTTnZlSzdoT0ltazIwRmxqOHZvUFY4SEN5eWcK",
       "windows": {

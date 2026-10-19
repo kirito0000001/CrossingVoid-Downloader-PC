@@ -55,6 +55,57 @@ export type ChunkSelection = {
   allReady: boolean;
 };
 
+/**
+ * 碎片清单的 GitHub 兜底：release tag 固定 `fragments-latest`，附件固定 `fragments.json`。
+ *
+ * GitHub Release 里**只有这份清单**，碎片 zip 仍然走网盘 / QQ 群 ——
+ * 兜底只解决"这一版应该有哪几个包、齐没齐"，不解决下载。
+ */
+export const GITHUB_FRAGMENTS_TAG = "fragments-latest";
+
+/** `owner/repo` → `https://github.com/<repo>/releases/download/fragments-latest/fragments.json`。 */
+export function githubFragmentsManifestUrl(repository: string | null | undefined): string | null {
+  const repo = (repository ?? "").trim().replace(/^\/+|\/+$/g, "");
+  if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) return null;
+  return `https://github.com/${repo}/releases/download/${GITHUB_FRAGMENTS_TAG}/fragments.json`;
+}
+
+export type GameChunkFragmentsSource = {
+  url: string;
+  /**
+   * 版本指针给的期望版本；拿到就据此拒绝"上一版的清单"。
+   * 走 GitHub 兜底、而且下载站整份 `latest.json` 都拿不到时为空 —— 那时候没有版本可比。
+   */
+  expectedVersion?: string;
+  source: "download-station" | "github";
+};
+
+/**
+ * 决定这一版去读哪一份碎片清单：**下载站优先，GitHub 兜底**。
+ *
+ * 触发兜底的两件事都要覆盖到：
+ *   ① 下载站的 `latest.json` 根本拿不到（幻杀目前不发下载站 → 整份 404）；
+ *   ② 拿得到，但里面没有 `fragmentsUrl`。
+ * 两个地址都没有就返回 null，交给界面显示"直接选压缩包即可"——清单只负责好看，
+ * 不能把导入本身堵死。
+ */
+export function resolveGameChunkFragmentsSource(options: {
+  pointer: Record<string, unknown> | null;
+  githubFallbackUrl: string | null;
+}): GameChunkFragmentsSource | null {
+  const declared =
+    typeof options.pointer?.fragmentsUrl === "string" ? options.pointer.fragmentsUrl.trim() : "";
+  const version = typeof options.pointer?.version === "string" ? options.pointer.version.trim() : "";
+  const expectedVersion = version ? { expectedVersion: version } : {};
+  if (/^https?:\/\//i.test(declared)) {
+    return { url: declared, ...expectedVersion, source: "download-station" };
+  }
+
+  const fallback = (options.githubFallbackUrl ?? "").trim();
+  if (!/^https?:\/\//i.test(fallback)) return null;
+  return { url: fallback, ...expectedVersion, source: "github" };
+}
+
 function asPositiveInt(value: unknown): number | null {
   return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : null;
 }

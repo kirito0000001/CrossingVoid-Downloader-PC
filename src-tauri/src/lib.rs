@@ -1455,6 +1455,33 @@ fn hidden_windows_command(program: &str) -> Command {
     command
 }
 
+/// 非 Windows 直通。
+///
+/// 这个启动器只发 Windows，但"起个控制台程序别露窗口"这件事在别的平台没有对应概念；
+/// 给个同名直通，调用点就不必到处写 `#[cfg(windows)]`。
+#[cfg(not(windows))]
+fn hidden_windows_command(program: &str) -> Command {
+    Command::new(program)
+}
+
+/// 写一个交给 `powershell -File`（Windows PowerShell **5.1**）执行的临时脚本。
+///
+/// **必须带 UTF-8 BOM**：5.1 读不带 BOM 的 `.ps1` 时一律按系统 ANSI 代码页解码
+/// （简体中文机器就是 GBK），脚本里的中文会整段变成乱码。踩过的两处：
+///
+/// - 桌面快捷方式被建成「骞绘潃」这种名字（`幻杀` 的 UTF-8 字节按 GBK 读出来），
+///   用户 2026-10-19 报"这个快捷键？字是不是打错了"；
+/// - 卸载脚本里的 `零境启动器` 匹配不到真实 DisplayName，`卸载启动器` 直接抛
+///   "没有找到启动器卸载信息"。
+///
+/// BOM 是 5.1 唯一可靠的编码声明。换成 `pwsh` 7 也能绕开，但玩家的机器上不保证装了。
+fn write_powershell_script(path: &Path, script: &str) -> std::io::Result<()> {
+    let mut bytes = Vec::with_capacity(script.len() + 3);
+    bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    bytes.extend_from_slice(script.as_bytes());
+    fs::write(path, bytes)
+}
+
 #[cfg(not(windows))]
 fn windows_internet_proxy_url() -> Option<String> {
     None
@@ -1500,6 +1527,149 @@ async fn post_remote_json(url: String, body: String) -> Result<String, String> {
     })
     .await
     .map_err(|error| format!("Remote post task failed: {}", error))?
+}
+
+/// 启动器安装包下载到临时目录用的子目录名（系统 temp 下）。
+const LAUNCHER_UPDATE_STAGING_DIR: &str = "crossingvoid-launcher-update";
+
+/// 启动器更新在 `download_task` 里登记的伪安装路径。
+///
+/// `verify_sha256` 每一步都会问 `check_download_cancelled()`，而没进过任务作用域的线程
+/// 会退回**进程级**取消标志。启动器更新是独立任务：如果玩家这一轮里暂停过某个旧链路
+/// 游戏下载（进程级标志还是 true），下载好好的安装包会在校验那一步被判成
+/// `DOWNLOAD_CANCELLED` —— 现场就是"点更新，下载跑满，然后报下载失败"。
+const LAUNCHER_UPDATE_TASK_KEY: &str = "__launcher_update__";
+
+/// 拉起 NSIS 安装包的参数，必须与 tauri-plugin-updater 2.x 逐字一致：
+/// `install_mode.nsis_args()`（passive = `/P /R`）+ `/UPDATE` + `/ARGS`。
+/// 少了 `/UPDATE` 会走"首次安装"分支（不认 `$UpdateMode`，装完不重启）；
+/// 少了 `/ARGS` 装完不会把玩家重新拉起来。
+const LAUNCHER_INSTALLER_ARGS: [&str; 4] = ["/P", "/R", "/UPDATE", "/ARGS"];
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct LauncherUpdateProgressPayload {
+    downloaded_bytes: u64,
+    total_bytes: u64,
+}
+
+fn emit_launcher_update_progress(app: &AppHandle, downloaded_bytes: u64, total_bytes: u64) {
+    let _ = app.emit(
+        "launcher-update-progress",
+        LauncherUpdateProgressPayload {
+            downloaded_bytes,
+            total_bytes,
+        },
+    );
+}
+
+/// 扁平清单（`pc-installer-latest.json`）驱动的启动器安装包下载。
+///
+/// 只负责"下载到临时目录 + 校验 sha256"，安装交给 `install_launcher_installer`：
+/// 拆成两步，前端才能先把进度条走到 100%、再切"正在安装"。
+#[tauri::command]
+async fn download_launcher_installer(
+    app: AppHandle,
+    url: String,
+    sha256: String,
+    file_name: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // 独立任务作用域：既清掉上一轮可能留下的取消标志，也不跟任何游戏目录共用。
+        download_task::begin(LAUNCHER_UPDATE_TASK_KEY);
+        let url = url.trim().to_string();
+        if url.is_empty() {
+            return Err("启动器安装包地址为空。".to_string());
+        }
+        let file_name = Path::new(file_name.trim())
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| "启动器安装包文件名无效。".to_string())?;
+
+        let directory = std::env::temp_dir().join(LAUNCHER_UPDATE_STAGING_DIR);
+        fs::create_dir_all(&directory).map_err(|error| {
+            format!(
+                "无法创建启动器更新目录 {}: {}",
+                directory.display(),
+                error
+            )
+        })?;
+        let partial = directory.join(format!("{}.part", file_name));
+        let target = directory.join(&file_name);
+
+        let agent = build_http_agent(&url, Duration::from_secs(10), Duration::from_secs(30));
+        let response = agent
+            .get(&url)
+            .set("User-Agent", "CrossingVoidLauncher/0.1")
+            .call()
+            .map_err(|error| format!("无法下载启动器安装包 {}: {}", url, error))?;
+        let total_bytes = response
+            .header("Content-Length")
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0);
+        emit_launcher_update_progress(&app, 0, total_bytes);
+
+        let mut reader = response.into_reader();
+        let mut file = File::create(&partial)
+            .map_err(|error| format!("无法写入 {}: {}", partial.display(), error))?;
+        let mut buffer = vec![0u8; 1024 * 128];
+        let mut downloaded_bytes = 0u64;
+        let mut last_emit = Instant::now();
+        loop {
+            let read = reader
+                .read(&mut buffer)
+                .map_err(|error| format!("下载启动器安装包失败：{}", error))?;
+            if read == 0 {
+                break;
+            }
+            file.write_all(&buffer[..read])
+                .map_err(|error| format!("无法写入 {}: {}", partial.display(), error))?;
+            downloaded_bytes = downloaded_bytes.saturating_add(read as u64);
+            if last_emit.elapsed() >= Duration::from_millis(200) {
+                last_emit = Instant::now();
+                emit_launcher_update_progress(
+                    &app,
+                    downloaded_bytes,
+                    total_bytes.max(downloaded_bytes),
+                );
+            }
+        }
+        file.flush().ok();
+        drop(file);
+        emit_launcher_update_progress(&app, downloaded_bytes, total_bytes.max(downloaded_bytes));
+
+        verify_sha256(&partial, &sha256, None)?;
+        fs::rename(&partial, &target)
+            .map_err(|error| format!("无法保存启动器安装包 {}: {}", target.display(), error))?;
+        Ok(target.to_string_lossy().to_string())
+    })
+    .await
+    .map_err(|error| format!("启动器更新下载任务失败：{}", error))?
+}
+
+/// 运行下载好的 NSIS 安装包，并按 Tauri updater 的口径退出当前进程。
+///
+/// 参数必须和 tauri-plugin-updater 一致（见其 `nsis_args` 与 `install` 分支）：
+/// `/P` 被动安装、`/R` 装完重开、`/UPDATE` 走覆盖安装分支（`installer-hooks.nsh` 里读 `$UpdateMode`），
+/// `/ARGS` 后面跟重开时要带上的启动参数。少一个就会退化成"首次安装"或装完不启动。
+#[tauri::command]
+fn install_launcher_installer(app: AppHandle, path: String) -> Result<(), String> {
+    let installer = PathBuf::from(path.trim());
+    if !installer.is_file() {
+        return Err(format!("启动器安装包不存在：{}", installer.display()));
+    }
+    let mut command = Command::new(&installer);
+    command.args(LAUNCHER_INSTALLER_ARGS);
+    command.spawn().map_err(|error| {
+        format!(
+            "无法启动安装程序 {}: {}",
+            installer.display(),
+            error
+        )
+    })?;
+    app.exit(0);
+    Ok(())
 }
 
 #[tauri::command]
@@ -3536,7 +3706,8 @@ fn dev_powershell_command() -> String {
 
 #[cfg(all(debug_assertions, windows))]
 fn terminate_dev_script_process_tree(process_id: u32) -> Result<(), String> {
-    let output = Command::new("taskkill")
+    // 开发页"暂停上传"会走到这里：taskkill 同样是控制台程序，别在窗口上闪一下黑框。
+    let output = hidden_windows_command("taskkill")
         .arg("/PID")
         .arg(process_id.to_string())
         .arg("/T")
@@ -4351,7 +4522,9 @@ $Shortcut.Save()
         install_dir.display(),
         exe_path.display()
     );
-    fs::write(&script_path, script).map_err(|error| {
+    // 快捷方式名字带中文（例如「幻杀」「零境交错：空界幻境」），脚本必须带 BOM，
+    // 否则 Windows PowerShell 5.1 会按 GBK 读，桌面就多出一个「骞绘潃」。
+    write_powershell_script(&script_path, &script).map_err(|error| {
         format!(
             "Unable to write shortcut script {}: {}",
             script_path.display(),
@@ -4359,7 +4532,10 @@ $Shortcut.Save()
         )
     })?;
 
-    let status = Command::new("powershell")
+    // 桌面快捷方式靠 PowerShell 的 WScript.Shell 建（不走 COM 绑定）。
+    // **必须隐藏窗口**：这段是在"安装游戏"收尾时跑的（`create_desktop_shortcut` 默认开），
+    // 不隐藏的话玩家会看到一个黑框闪一下 —— 用户 2026-10-19 报的就是这个。
+    let status = hidden_windows_command("powershell")
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
@@ -4572,7 +4748,8 @@ fn stop_game_processes_internal(install_path: &str, game: &GameIdentity) -> Resu
     let processes = game_processes_for_install_with(install_path, game);
     let mut stopped = 0usize;
     for process in processes {
-        let output = Command::new("taskkill")
+        // taskkill 是控制台程序：不隐藏的话，点"结束游戏进程"会闪一个黑框。
+        let output = hidden_windows_command("taskkill")
             .arg("/PID")
             .arg(process.process_id.to_string())
             .arg("/T")
@@ -4707,7 +4884,8 @@ if ([string]::IsNullOrWhiteSpace($command)) {
 Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', $command) -WindowStyle Hidden
 "#;
     let script_path = std::env::temp_dir().join("crossingvoid_uninstall_launcher.ps1");
-    fs::write(&script_path, script).map_err(|error| {
+    // 脚本里有中文 DisplayName（零境启动器），同样必须带 BOM，否则匹配不到卸载项。
+    write_powershell_script(&script_path, script).map_err(|error| {
         format!(
             "Unable to write launcher uninstall script {}: {}",
             script_path.display(),
@@ -4715,7 +4893,7 @@ Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c', $command) -WindowStyle H
         )
     })?;
 
-    let status = Command::new("powershell")
+    let status = hidden_windows_command("powershell")
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
@@ -4955,6 +5133,8 @@ pub fn run() {
             fetch_github_release_asset_text,
             get_github_network_status,
             post_remote_json,
+            download_launcher_installer,
+            install_launcher_installer,
             feedback::fetch_feedback_issues,
             feedback::fetch_feedback_issue_detail,
             feedback::fetch_feedback_comments,
@@ -5210,6 +5390,39 @@ mod tests {
             select_dev_powershell_command(Some("C:\\Program Files\\PowerShell\\7\\pwsh.exe\r\n")),
             r"C:\Program Files\PowerShell\7\pwsh.exe"
         );
+    }
+
+    /// 交给 `powershell -File` 的脚本必须是带 BOM 的 UTF-8。
+    ///
+    /// 不带 BOM 时 PowerShell 5.1 按系统 ANSI（简中 GBK）解码，脚本里的中文全变乱码：
+    /// 现场就是桌面快捷方式被建成「骞绘潃」（`幻杀` 的 UTF-8 字节按 GBK 读），
+    /// 以及卸载脚本里的「零境启动器」匹配不到真实 DisplayName。
+    #[test]
+    fn powershell_scripts_are_written_as_utf8_with_bom() {
+        let path = std::env::temp_dir().join(format!(
+            "crossingvoid-test-script-{}-{}.ps1",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|value| value.as_nanos())
+                .unwrap_or(0)
+        ));
+        let script = "$Shortcut = $WshShell.CreateShortcut((Join-Path $Desktop '幻杀.lnk'))\n";
+        write_powershell_script(&path, script).expect("write powershell script");
+
+        let bytes = fs::read(&path).expect("read powershell script");
+        assert_eq!(
+            &bytes[..3],
+            &[0xEF, 0xBB, 0xBF],
+            "脚本必须以 UTF-8 BOM 开头，否则 5.1 会把中文读成 GBK 乱码"
+        );
+        assert_eq!(
+            String::from_utf8(bytes[3..].to_vec()).expect("utf8 payload"),
+            script,
+            "BOM 之后的正文必须原样保留"
+        );
+
+        let _ = fs::remove_file(&path);
     }
 
     #[test]

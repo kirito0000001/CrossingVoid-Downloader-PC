@@ -7,6 +7,11 @@ import { ask, open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
+import {
+  fetchPcLauncherInstallerManifest,
+  isPcLauncherUpdateAvailable,
+  type PcLauncherInstallerManifest,
+} from "./launcherUpdateManifest";
 import { finishBootSplash, updateBootSplash } from "./bootSplash";
 import PlatformGameRail from "./components/PlatformGameRail.vue";
 import PlatformGameOverview from "./components/PlatformGameOverview.vue";
@@ -65,6 +70,7 @@ import {
   importablePathsWithoutManifest,
   matchChunkSelection,
   parseGameChunkFragments,
+  resolveGameChunkFragmentsSource,
   type ChunkSelectionRow,
   type GameChunkFileInspection,
   type GameChunkFragments,
@@ -461,7 +467,15 @@ const launcherUpdateConfirmStage = ref<LauncherUpdateConfirmStage>("idle");
 const launcherUpdateGate = ref<LauncherUpdateGate>("checking");
 const launcherNetworkLocked = computed(() => !canUseLauncherNetwork(launcherUpdateGate.value));
 // Tauri's Update instance owns private state and must not be wrapped in a Vue Proxy.
-const pendingLauncherUpdate = shallowRef<Update | null>(null);
+/**
+ * 待安装的启动器更新。两条路：
+ * - `flat`：站点静态扁平清单（首选，换仓库/换地址不用发版）
+ * - `tauri`：Tauri updater 插件兜底（端点已是站点静态 latest.json）
+ */
+type PendingLauncherUpdate =
+  | { mode: "flat"; manifest: PcLauncherInstallerManifest }
+  | { mode: "tauri"; update: Update };
+const pendingLauncherUpdate = shallowRef<PendingLauncherUpdate | null>(null);
 const launcherUpdateVersion = ref("");
 const launcherUpdateDownloadedBytes = ref(0);
 const launcherUpdateTotalBytes = ref(0);
@@ -4147,10 +4161,16 @@ function openGameChunkImportGuide() {
 }
 
 /**
- * 读这一版的碎片清单（`latest.json` → `fragmentsUrl`）。
+ * 读这一版的碎片清单（下载站 `latest.json` → `fragmentsUrl`，拿不到就走 GitHub 兜底）。
  *
- * 只走下载站：碎片是网盘分发的，GitHub 备用源上没有这份东西。拿不到就退化成
- * “直接选文件、导入后判齐”——清单只负责好看，不能把导入本身堵死。
+ * 两条来源：
+ *   ① 下载站：`dl.crossingvoid.top/games/<产品段>/latest.json` 里的 `fragmentsUrl`（首选）；
+ *   ② GitHub：条目的 `githubFragmentsUrl`（固定 tag `fragments-latest`，里面**只有清单**，
+ *      碎片 zip 仍然走网盘 / QQ 群）。
+ * 幻杀目前根本不发下载站，整份 `latest.json` 都是 404 —— 没有兜底的话碎片导入页会一直
+ * 停在"读不到这一版的碎片清单"，等于这个机制对它不可用。
+ *
+ * 两条都拿不到就退化成“直接选文件、导入后判齐”：清单只负责好看，不能把导入本身堵死。
  */
 async function loadGameChunkFragments() {
   const request = ++chunkFragmentsRequest;
@@ -4166,25 +4186,46 @@ async function loadGameChunkFragments() {
   chunkFragmentsLoading.value = true;
   chunkFragmentsError.value = "";
   try {
-    const pointer = await fetchRemoteJson<Record<string, unknown>>(
-      withCacheBuster(gamePackageManifestUrl(config.productSegment)),
-    );
+    // 版本指针只是"首选来源"：这一档不发下载站时（幻杀）连问都不用问，
+    // 否则每次打开导入页都白跑一个注定 404 的请求。
+    const publishesToDownloadStation = gamePackageSources(config).includes("official");
+    let pointer: Record<string, unknown> | null = null;
+    if (publishesToDownloadStation) {
+      try {
+        pointer = await fetchRemoteJson<Record<string, unknown>>(
+          withCacheBuster(gamePackageManifestUrl(config.productSegment)),
+        );
+      } catch (error) {
+        console.warn("下载站版本指针不可用，碎片清单改走 GitHub 兜底", error);
+      }
+    }
     // 等网络的这几秒里玩家可能已经切了档位，别把上一个游戏的包名写进这一档。
     if (isStale()) return;
-    const fragmentsUrl =
-      typeof pointer.fragmentsUrl === "string" ? pointer.fragmentsUrl.trim() : "";
-    if (!/^https?:\/\//i.test(fragmentsUrl)) {
+
+    const source = resolveGameChunkFragmentsSource({
+      pointer,
+      githubFallbackUrl: config.githubFragmentsUrl ?? null,
+    });
+    if (!source) {
       chunkFragments.value = null;
-      chunkFragmentsError.value = "这一版没有发布碎片清单，直接选择压缩包即可。";
+      chunkFragmentsError.value = pointer
+        ? "这一版没有发布碎片清单，直接选择压缩包即可。"
+        : "读不到这一版的碎片清单，直接选择压缩包即可。";
       return;
     }
+
     const parsed = parseGameChunkFragments(
-      await fetchRemoteJson<unknown>(withCacheBuster(fragmentsUrl)),
-      typeof pointer.version === "string" ? pointer.version : undefined,
+      await fetchRemoteJson<unknown>(withCacheBuster(source.url)),
+      source.expectedVersion,
     );
     if (isStale()) return;
     chunkFragments.value = parsed;
-    if (!parsed) chunkFragmentsError.value = "碎片清单格式不对，直接选择压缩包即可。";
+    if (!parsed) {
+      chunkFragmentsError.value =
+        source.source === "github"
+          ? "GitHub 上的碎片清单格式不对，直接选择压缩包即可。"
+          : "碎片清单格式不对，直接选择压缩包即可。";
+    }
   } catch (error) {
     console.warn("Unable to load game chunk fragments", error);
     if (isStale()) return;
@@ -4656,25 +4697,36 @@ async function checkLauncherUpdate(options: { manual?: boolean } = {}): Promise<
   launcherUpdateDownloadedBytes.value = 0;
   launcherUpdateTotalBytes.value = 0;
   try {
-    const update = await check();
-    if (!update) {
-      launcherUpdateStage.value = "idle";
-      launcherUpdateGate.value = "ready";
-      if (options.manual) {
-        showSettings.value = false;
-        showCheckResult("启动器已是最新版本。");
-      }
-      return false;
+    // 首选：站点静态扁平清单（带 sha256，换仓库/换地址不用发版）。
+    let flat: PcLauncherInstallerManifest | null = null;
+    let flatError: unknown = null;
+    try {
+      flat = await resolveFlatLauncherUpdate();
+    } catch (error) {
+      flatError = error;
+      console.warn("扁平启动器清单不可用，改问 Tauri 端点", error);
     }
+    if (flat) return offerLauncherUpdate({ mode: "flat", manifest: flat }, flat.versionName);
 
-    showSettings.value = false;
-    launcherUpdateVersion.value = update.version;
-    pendingLauncherUpdate.value = update;
-    launcherUpdateConfirmStage.value = "available";
+    // 扁平清单说"已是最新"（或根本拉不到）时，仍然再问一次 Tauri 端点做交叉确认：
+    // 发布时两份镜像不是原子的，扁平清单落后一格就会让所有客户端永久漏掉这次更新，
+    // 只看它发现不了；反过来兜底通道自己不通，也不能把"已是最新"改判成检查失败。
+    let update: Update | null = null;
+    try {
+      update = await checkTauriLauncherUpdate();
+    } catch (error) {
+      if (flatError) throw error;
+      console.warn("Tauri 端点交叉确认失败，按扁平清单的结论处理", error);
+    }
+    if (update) return offerLauncherUpdate({ mode: "tauri", update }, update.version);
+
     launcherUpdateStage.value = "idle";
-    launcherUpdateGate.value = "updateRequired";
-    showCheckResult(`${t("settings.launcherUpdateReady")} ${update.version}`);
-    return true;
+    launcherUpdateGate.value = "ready";
+    if (options.manual) {
+      showSettings.value = false;
+      showCheckResult("启动器已是最新版本。");
+    }
+    return false;
   } catch (error) {
     console.error("Launcher update check failed", error);
     launcherUpdateStage.value = "failed";
@@ -4695,10 +4747,93 @@ async function checkLauncherUpdate(options: { manual?: boolean } = {}): Promise<
   }
 }
 
+/** 命中新版本：挂上"更新启动器"按钮，并把闸门抬到"必须先更新"。 */
+function offerLauncherUpdate(
+  pending: PendingLauncherUpdate,
+  version: string,
+): boolean {
+  showSettings.value = false;
+  launcherUpdateVersion.value = version;
+  pendingLauncherUpdate.value = pending;
+  launcherUpdateConfirmStage.value = "available";
+  launcherUpdateStage.value = "idle";
+  launcherUpdateGate.value = "updateRequired";
+  showCheckResult(`${t("settings.launcherUpdateReady")} ${version}`);
+  return true;
+}
+
+/**
+ * Tauri 插件通道的检查上限。
+ *
+ * 插件本身没有设请求超时（`UpdaterBuilder::timeout` 缺省是 None），站点半死不活时
+ * `check()` 会一直挂着 —— 而这条调用在开机流程里，会连带把加载界面卡住。
+ */
+const LAUNCHER_UPDATE_TAURI_CHECK_TIMEOUT_MS = 6000;
+
+/**
+ * 问一次 Tauri updater 端点（站点静态 `pc-latest.json`，带 minisign 签名）。
+ *
+ * 它现在的角色是"兜底 + 交叉确认"：扁平清单拉不到时靠它，扁平清单落后时也靠它。
+ * 抛错 = 这条通道不可用，由调用方决定是回退还是判检查失败。
+ */
+async function checkTauriLauncherUpdate(): Promise<Update | null> {
+  const pendingCheck = check();
+  let timer: number | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = window.setTimeout(
+      () => reject(new Error("启动器更新检查超时（Tauri 端点 6 秒无响应）")),
+      LAUNCHER_UPDATE_TAURI_CHECK_TIMEOUT_MS,
+    );
+  });
+  try {
+    return await Promise.race([pendingCheck, timeout]);
+  } finally {
+    if (timer !== undefined) window.clearTimeout(timer);
+    // 超时之后那个请求还会自己结束：补一次 catch，别留下未处理的 rejection。
+    void pendingCheck.catch(() => undefined);
+  }
+}
+
+/** 拉扁平清单并判断是否比当前版本新；没有新版返回 null。 */
+async function resolveFlatLauncherUpdate(): Promise<PcLauncherInstallerManifest | null> {
+  const manifest = await fetchPcLauncherInstallerManifest();
+  return isPcLauncherUpdateAvailable(launcherVersion.value, manifest) ? manifest : null;
+}
+
+interface LauncherUpdateProgressPayload {
+  downloadedBytes: number;
+  totalBytes: number;
+}
+
+/** 扁平清单路线的下载进度：Rust 侧 `download_launcher_installer` 每 200ms 报一次。 */
+async function downloadFlatLauncherInstaller(
+  manifest: PcLauncherInstallerManifest,
+): Promise<string> {
+  const unlisten = await listen<LauncherUpdateProgressPayload>(
+    "launcher-update-progress",
+    (event) => {
+      const payload = event.payload;
+      launcherUpdateStage.value = "downloading";
+      const totalBytes = Math.max(0, payload.totalBytes || 0);
+      if (totalBytes > 0) launcherUpdateTotalBytes.value = totalBytes;
+      launcherUpdateDownloadedBytes.value = Math.max(0, payload.downloadedBytes || 0);
+    },
+  );
+  try {
+    return await invoke<string>("download_launcher_installer", {
+      url: manifest.asset.url,
+      sha256: manifest.asset.sha256,
+      fileName: manifest.asset.fileName,
+    });
+  } finally {
+    unlisten();
+  }
+}
+
 async function installPendingLauncherUpdate() {
   if (launcherUpdatePending.value || launcherUpdateActive.value) return;
-  const update = pendingLauncherUpdate.value;
-  if (!update) {
+  const pending = pendingLauncherUpdate.value;
+  if (!pending) {
     launcherUpdateConfirmStage.value = "idle";
     showCheckResult("启动器更新信息已失效，请重新检查版本。");
     return;
@@ -4710,9 +4845,20 @@ async function installPendingLauncherUpdate() {
   launcherUpdateDownloadedBytes.value = 0;
   launcherUpdateTotalBytes.value = 0;
   try {
-    await update.download(handleLauncherUpdateDownloadEvent);
+    if (pending.mode === "flat") {
+      const manifest = pending.manifest;
+      launcherUpdateTotalBytes.value = Math.max(0, manifest.asset.sizeBytes);
+      const installerPath = await downloadFlatLauncherInstaller(manifest);
+      launcherUpdateStage.value = "installing";
+      // 这条命令会拉起 NSIS 并让当前进程退出，返回后通常已经没机会再跑 JS。
+      await invoke("install_launcher_installer", { path: installerPath });
+      launcherUpdateStage.value = "restarting";
+      return;
+    }
+
+    await pending.update.download(handleLauncherUpdateDownloadEvent);
     launcherUpdateStage.value = "installing";
-    await update.install();
+    await pending.update.install();
     launcherUpdateStage.value = "restarting";
     pendingLauncherUpdate.value = null;
     await relaunch();
@@ -4722,13 +4868,20 @@ async function installPendingLauncherUpdate() {
     launcherUpdateStage.value = "failed";
     showCheckResult(
       failedStage === "installing"
-        ? "启动器更新安装失败，请关闭启动器后重试。"
+        ? "启动器更新安装失败，请重试；仍然失败就重启启动器后再更新。"
         : "启动器更新下载失败，请稍后重试。",
     );
     window.setTimeout(() => {
-      if (launcherUpdateStage.value === "failed") {
-        resetLauncherUpdateProgress();
-      }
+      if (launcherUpdateStage.value !== "failed") return;
+      // 别把清单扔掉：重新挂上"更新启动器"，玩家原地再点一次就能重试。
+      // 以前这里 reset 掉确认阶段，闸门还停在 updateRequired，界面变成"仅可使用本地功能"，
+      // 只能重启启动器等下一次开机检查 —— 网络一抖就把玩家锁在门外了。
+      pendingLauncherUpdate.value = pending;
+      launcherUpdateStage.value = "idle";
+      launcherUpdateConfirmStage.value = "available";
+      launcherUpdateDownloadedBytes.value = 0;
+      launcherUpdateTotalBytes.value =
+        pending.mode === "flat" ? Math.max(0, pending.manifest.asset.sizeBytes) : 0;
     }, 3000);
   } finally {
     launcherUpdatePending.value = false;

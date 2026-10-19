@@ -1,15 +1,18 @@
 ﻿param(
     [string]$ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path,
     [string]$PrivateKeyPath = (Join-Path $ProjectRoot "src-tauri\private\updater.key"),
-    [string]$GiteeRepository = "xiaojie578/CrossingVoid-Downloader-PC",
+    [string]$GiteeRepository = "xiaojie578/CrossingVoid-Launcher-PC",
     [string]$GiteeReleaseTagPrefix = "launcher-v",
     [string]$ProductKey = "crossingvoid-launcher",
+    [string]$InstallerManifestProductKey = "crossingvoid-launcher-pc-installer",
     [string]$DisplayName = "零境启动器",
     [string]$OutputDir = "D:\启动器新包",
     [string]$IntermediateOutputDir = (Join-Path $ProjectRoot "dist-launcher-update"),
     [double]$ProgressStart = 0,
     [double]$ProgressEnd = 100
 )
+
+. (Join-Path $PSScriptRoot "LauncherManifestUtilities.ps1")
 
 $ErrorActionPreference = "Stop"
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -438,6 +441,18 @@ $backendManifestPath = Join-Path $IntermediateOutputDir "update.json"
 $staticManifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $staticManifestPath -Encoding UTF8
 $backendManifest | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $backendManifestPath -Encoding UTF8
 
+# 扁平清单：客户端自读自测的那一份（换仓库/换地址不用发版）。和 latest.json 同源同版本。
+$installerManifest = New-LauncherInstallerManifest `
+    -ProductKey $InstallerManifestProductKey `
+    -VersionName $version `
+    -Notes "$DisplayName $version" `
+    -InstallerPath $targetInstaller `
+    -DownloadUrl $downloadUrl `
+    -PublishedAt $staticManifest.pub_date `
+    -Signature $signatureText
+$installerManifestPath = Join-Path $IntermediateOutputDir "pc-installer-latest.json"
+$installerManifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $installerManifestPath -Encoding UTF8
+
 Write-DevProgress -Stage "export" -Percent 96 -Message "整理输出文件"
 $releasePackage = Export-ReleasePackageFiles `
     -InstallerPath $targetInstaller `
@@ -445,6 +460,10 @@ $releasePackage = Export-ReleasePackageFiles `
     -BackendManifestPath $backendManifestPath `
     -ReleaseDir $OutputDir `
     -StagingDir $IntermediateOutputDir
+
+# 扁平清单也放进发布目录：AxTools 的断点校验与人工发版都要它能找到。
+$publishedInstallerManifest = Join-Path $releasePackage.Root "pc-installer-latest.json"
+Copy-Item -LiteralPath $installerManifestPath -Destination $publishedInstallerManifest -Force
 
 Write-DevProgress -Stage "completed" -Percent 100 -Message "打包完成"
 Write-Host "Launcher updater package generated:"
@@ -456,4 +475,6 @@ Write-Host "  Staging Installer : $targetInstaller"
 Write-Host "  Staging Signature : $targetSignature"
 Write-Host "  Staging Static    : $staticManifestPath"
 Write-Host "  Staging Backend   : $backendManifestPath"
+Write-Host "  Staging Installer Manifest : $installerManifestPath"
+Write-Host "  Release Installer Manifest : $publishedInstallerManifest"
 Write-Host "  Gitee Release     : $GiteeRepository / $releaseTag"

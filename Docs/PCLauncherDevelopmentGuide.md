@@ -6,14 +6,16 @@
 
 - PC 启动器源码：`D:\UnrealMap\CrossingVoidinitiator-PC`
 - PC 源码 GitHub：`https://github.com/kirito0000001/CrossingVoid-Downloader-PC`
-- PC 更新发布 Gitee：`https://gitee.com/xiaojie578/CrossingVoid-Downloader-PC`
+- PC 更新发布 Gitee：`https://gitee.com/xiaojie578/CrossingVoid-Launcher-PC`（安装包与清单；旧的 `…/CrossingVoid-Downloader-PC` 已私有存档，raw 一律 403）
+- PC 启动器更新清单（站点静态）：`https://www.crossingvoid.top/manifests/launcher/pc-installer-latest.json`、`…/pc-latest.json`
 - Android 启动器源码：`D:\UnrealMap\CrossingVoidinitiator-Android`
 - Android 源码 GitHub：`https://github.com/kirito0000001/CrossingVoid-Downloader-Android`
 - Android 更新发布 Gitee：`https://gitee.com/xiaojie578/CrossingVoid-Downloader-Android`
 - 游戏资源 GitHub：`https://github.com/kirito0000001/CrossingVoid`
+- 游戏下载站：`https://dl.crossingvoid.top/games/<产品段>/latest.json`
 - 官网：`https://www.crossingvoid.top/`
-- 更新 API：`https://www.crossingvoid.top/api/toolbox-updates`
-- 线上更新服务器：`C:\Users\Administrator\Desktop\OSSAPI\ToolboxUpdateServer\app`
+- 更新 API（**已退役，客户端不再读**）：`https://www.crossingvoid.top/api/toolbox-updates` —— 它按 `objectKey` 现场签阿里云 OSS 临时链接，而 bucket `download-server-xj` 已删除，返回的地址必然 404。留存只为查历史。
+- 线上更新服务器：`C:\Users\Administrator\Desktop\OSSAPI\ToolboxUpdateServer\app`（`/manifests/launcher/` 那两份静态清单也在这台机器上，由发布脚本 scp 过去）
 
 硬性规则：不要修改、编译、停止、清理或重新打包 `D:\UnrealMap\CrossingVoid` 虚幻项目。启动器可以读取用户指定的游戏打包目录，但不能为了启动器开发顺手改 Unreal 配置。
 
@@ -270,33 +272,105 @@ crossing-void.launcher.hide-after-game-launch
 
 ## 10. 启动器热更新
 
-Tauri 更新端点：
+> 2026-10-19 起改成「Gitee Release 资产 + 站点静态清单」。原来的阿里云 OSS 通道（`www` 上的 .NET 接口按 `objectKey` 现场签 OSS 临时链接）**已经整体退役**：OSS bucket `download-server-xj` 已删除，接口返回的地址必然 404。
+>
+> **基线是 2.0.0。** 1.4.0 及更老的客户端读的是编译期写死的旧端点，而服务端那条记录停在 1.4.0
+> ——它们会把"自己"判成最新，永远看不到新版本。用户在 2026-10-19 明确拍板：**不救老客户端**
+> （不改服务器旧记录、不做引导升级），只保证 2.0.0 及以后能正常更新。所以看到"某台机器 1.4.0
+> 收不到更新"不是 bug，让人手动装一次 2.0.0 即可；**不要再为老版本搭第二套兼容通道**。
+
+### 10.1 两条路
+
+客户端的检查顺序是「扁平清单 → Tauri 端点（兜底 + 交叉确认）」，两条通道都指向同一份发布产物：
 
 ```text
-https://www.crossingvoid.top/api/toolbox-updates/tauri/crossingvoid-launcher-pc/windows/x86_64/{{current_version}}
+首选：扁平清单（和 Android 启动器同款）
+  客户端 GET https://www.crossingvoid.top/manifests/launcher/pc-installer-latest.json?t=<毫秒>
+  -> 比 versionName（预发布版小于同号正式版）
+  -> download_launcher_installer（Rust：下载到 temp + 校验 sha256 + 报进度）
+  -> install_launcher_installer（Rust：setup.exe /P /R /UPDATE /ARGS，然后退出当前进程）
+
+交叉确认 / 兜底：Tauri updater 插件
+  端点 https://www.crossingvoid.top/manifests/launcher/pc-latest.json
+  -> check() -> update.download() 报告 DownloadEvent
+  -> 校验 minisign 签名
+  -> NSIS passive 安装
+  -> relaunch()
 ```
 
-仓库职责必须分开：
+为什么"扁平清单说没有新版"之后还要问一次 Tauri 端点：发布时两份站点清单是
+两次写入，扁平清单如果落后一格，**所有客户端都会一直以为自己是新版**，不报错、
+不弹提示，从现场完全看不出来（见 §10.6）。这条交叉确认在开机流程里，所以有 6 秒上限
+（`LAUNCHER_UPDATE_TAURI_CHECK_TIMEOUT_MS`）——插件本身没设请求超时，站点半死不活
+时会把加载界面一起拖住。
+
+几条实现约束（改之前先读）：
+
+| 约束 | 为什么 |
+| --- | --- |
+| 失败后**保留清单**、重新挂回"更新启动器" | 以前失败收尾走 `resetLauncherUpdateProgress()`，确认阶段被清空而闸门还在 `updateRequired`，界面只剩"仅可使用本地功能"，只能重启启动器等下一次开机检查 |
+| 启动器下载走自己的取消作用域（`LAUNCHER_UPDATE_TASK_KEY`） | `verify_sha256` 每步都问 `check_download_cancelled()`；没进作用域的线程退回进程级标志，玩家这轮暂停过旧链路游戏下载时，安装包会在校验那步被判 `DOWNLOAD_CANCELLED` |
+| 安装参数必须逐字是 `/P /R /UPDATE /ARGS` | 与 tauri-plugin-updater 2.x 的 `nsis_args()` + `/UPDATE` + `/ARGS` 一致；少 `/UPDATE` 会走"首次安装"分支（不认 `$UpdateMode`，装完不重启） |
+| 拉不起 NSIS 时**不要**自己 `process::exit` | 命令里先 `Command::spawn` 再 `app.exit(0)`，让 `installer-hooks.nsh` 的 `wait_for_launcher_exit` 能等到本进程退出 |
+
+### 10.2 清单形态
+
+`pc-latest.json`（Tauri，兜底通道用）：
+
+```json
+{"version":"1.5.0","notes":"…","pub_date":"2026-10-19T……Z",
+ "platforms":{"windows-x86_64":{"signature":"<minisign>","url":"https://gitee.com/…/launcher-v1.5.0/….exe"}}}
+```
+
+`pc-installer-latest.json`（扁平，首选通道用；与 `CrossingVoidinitiator-Android` 的 `android-installer-latest.json` 同构）：
+
+```json
+{"schemaVersion":1,"productKey":"crossingvoid-launcher-pc-installer",
+ "versionName":"1.5.0","versionCode":1,"notes":"…","publishedAt":"2026-10-19T……Z",
+ "asset":{"fileName":"零境启动器_1.5.0_x64-setup.exe","url":"https://gitee.com/…/launcher-v1.5.0/….exe",
+          "sizeBytes":44477773,"sha256":"59874e90…","signature":"<minisign，预留>"}}
+```
+
+客户端只用 `versionName` / `asset.fileName|url|sizeBytes|sha256`；`publishedAt`、`notes` 只做展示与追溯，
+`versionCode` PC 端固定 1（没有 Android 那套自增语义）。
+
+### 10.3 仓库职责
 
 - GitHub `CrossingVoid-Downloader-PC`：源码。
-- `crossingvoid.top`：PC 启动器版本检查与 Tauri 更新清单。
-- Gitee `CrossingVoid-Downloader-PC`：历史发布资产；客户端不得再读取其 Raw 文件。
+- Gitee `CrossingVoid-Launcher-PC`：**安装包与清单的发布仓库**（公开）。`launcher/latest.json`、`launcher/pc-installer-latest.json` + `launcher-v*` Release。
+- `www.crossingvoid.top/manifests/launcher/`：客户端实际读取的静态镜像（`pc-latest.json`、`pc-installer-latest.json`），由发布脚本 scp 上去。
+- Gitee `CrossingVoid-Downloader-PC`（旧仓库）：**已转私有存档**，Gitee 判定「RAW 外链滥用」不允许再公开，客户端和玩家都不应再指向它。
 - Gitee Android 仓库：Android 启动器，不得混回 PC 仓库。
 
-更新流程：
+### 10.4 为什么客户端只读 www、不读 Gitee raw
 
-```text
-check()
--> 提示发现版本
--> Tauri 下载并报告 DownloadEvent
--> 校验 minisign/rsign 签名
--> NSIS passive 安装
--> relaunch()
-```
+- Gitee raw 有 CDN 缓存，清单改完要等；
+- 旧仓库就是被判定「RAW 外链滥用」后整体 403 的，raw 一旦被封，客户端就集体失联；
+- Release 资产下载（302 到 `foruda.gitee.com` 带 token 的短链）没问题，可以继续用。
 
-`src-tauri/tauri.conf.json` 中的 updater `pubkey` 是公开验证材料，可以提交。`src-tauri/private/updater.key` 是签名私钥，永远不能提交、上传日志或粘贴到文档。
+### 10.5 签名与密钥
 
-### 10.1 安装界面：必须是中文，而且不能误卸载
+`src-tauri/tauri.conf.json` 的 updater `pubkey` 是公开验证材料，可以提交；`src-tauri/private/updater.key` 是签名私钥，永远不能提交、上传日志或粘贴到文档。扁平通道目前只校验 sha256（与 Android 同口径），清单里预留了 `signature` 字段给以后做 minisign 复核 —— **目前客户端不校验它**，改这一点要同时改 `src/launcherUpdateManifest.ts` 和 Rust 侧的校验入口。
+
+### 10.6 发布链路的两道闸（2026-10-19 加固）
+
+`Publish-LauncherGiteePackage.ps1` 在提交任何清单之前多走两步，都是为了"别把更新链悄悄拆掉"：
+
+1. **地址验活**（`Assert-GiteeAssetDownloadable`）：清单里的下载地址不再信本地拼接，
+   真发布时以 Gitee 上传完回给的真实 `browser_download_url` 为准，再 HEAD 一次
+   （跟随 302 → `foruda.gitee.com`），要求最后一跳 200 且 `Content-Length` 等于本地安装包大小。
+   地址错就是这么被挡住的：客户端那条链路是"检测到新版 → 立刻下载"，404 就是全员更新失败。
+2. **两份清单同批换**（`Publish-WebsiteMirrorSet`）：先全部 scp 到 `Windows\Temp` → 一次 ssh 里
+   校验全部内容 → 全部通过才备份/覆盖 → 覆盖后再回读两份断言版本一致 → 最后统一修 ACL。
+   以前是一份一个 ssh，中途失败会留下"Tauri 清单已新、扁平清单还旧"的站点状态，
+   而客户端只看扁平清单 → 静默停更。
+
+配套的守卫在 `tests/launcherUpdateChannel.test.ts`（通道形态、交叉确认顺序、安装参数、
+取消作用域、发布闸门）和 `tests/launcherPublishing.test.ts`（清单字段、RFC 3339、NSIS 补丁）。
+
+
+
+### 10.7 安装界面：必须是中文，而且不能误卸载
 
 | 项 | 做法 | 为什么 |
 | --- | --- | --- |
@@ -313,7 +387,7 @@ check()
   - 启动器自身更新走 Tauri updater 的 `installMode: "passive"`（`/P /R /UPDATE`），本来就跳过全部向导页，上面的补丁只影响"用户手动双击安装包"这条路径；
   - 如果以后确实需要"先卸载再安装"，必须同时改脚本里的补丁和 `tests/launcherPublishing.test.ts` 里那条断言。
 
-### 10.2 重复启动：直接显示已经开着的那个窗口
+### 10.8 重复启动：直接显示已经开着的那个窗口
 
 **要的行为（用户拍板）**：点启动器图标/快捷方式时，如果已经有一个启动器在跑（哪怕它正藏在托盘里），
 **直接把那个窗口显示出来**；不关旧的、不另开新的。
@@ -354,7 +428,7 @@ check()
 > ④ 本机那个卡死的实例（`IsHungAppWindow=True`、`WM_NULL` 无应答）被正确跳过并记录，
 > 而不是被误当成"可显示的实例"而让点击落空。
 
-### 10.3 界面尺寸规则（整体规则，2026-09-21 用户拍板）
+### 10.9 界面尺寸规则（整体规则，2026-09-21 用户拍板）
 
 **规则：整套界面按 1200×675 的设计坐标原样排版，不做任何跟随窗口的等比缩放。**
 窗口比设计尺寸小的时候**裁掉超出部分**（不缩小界面）；窗口更大时由 `100vw/100vh` 让贴边的元素各自靠边。
@@ -381,7 +455,7 @@ check()
 > 两个窗口是 1518×856 与 1502×846（同一台机器、同一 DPI）。
 > 全部元素都正好放大 **1.186 倍 = 1 / 0.843**，所以目标图就是"界面 1:1、超出窗口的部分裁掉"的旧行为。
 
-### 10.4 启动加载界面（必须是第一帧，2026-09-21 重构）
+### 10.10 启动加载界面（必须是第一帧，2026-09-21 重构）
 
 **规则：加载界面是窗口里出现的第一帧，并且一直盖住主界面，直到加载完成才淡出。**
 它现在**不在 Vue 里**：
@@ -413,9 +487,9 @@ JS 先跑完、主界面先画出来，加载层在 CSS 到位前是个**没有�
 > `document.elementFromPoint(窗口中心)` 命中的元素在加载层内部（`topmostInsideSplash = true`）；
 > ③ `tests/bootSplash.test.ts` 守住"只有一份加载层 + 样式必须内联在 index.html"。
 
-### 10.5 界面尺寸与弹窗定位规律（2026-10-11 补，**新接手先读这段**）
+### 10.11 界面尺寸与弹窗定位规律（2026-10-11 补，**新接手先读这段**）
 
-这一节把散落在 §10.3、§25 里的尺寸经验收成一条规律，避免每次都靠截图反推（已经反推错两次）。
+这一节把散落在 §10.9、§25 里的尺寸经验收成一条规律，避免每次都靠截图反推（已经反推错两次）。
 
 **第一，设计坐标系只有一个：1200×675。**
 
@@ -546,7 +620,7 @@ GitHub 域名的请求默认借系统代理（`system_proxy_url()`：先读 `HTT
 同理，`scan_local_files` 这种能跑几十秒的循环里也要 `check_download_cancelled()?`，
 否则暂停之后任务会一直挂在"下载中"，前端那个"别再点"的闸门不会放开。
 
-配套的一条 UI 规矩：**主按钮绝不允许静默咽掉一次点击**（见 §10.2 的同一条原则）。
+配套的一条 UI 规矩：**主按钮绝不允许静默咽掉一次点击**（见 §10.8 的同一条原则）。
 闸门还开着时要给提示；任务在收尾期间按钮文案写"正在停止下载"，不要写"继续下载"。
 
 下载栏要显示：操作阶段、来源、已下载/总大小、百分比、速率和预计时间。预计时间立即计算；超过 24 小时显示“网络不佳”。按钮图标本身不能随着任务加载动画一起旋转。
@@ -603,6 +677,32 @@ Rust 侧 `scan_local_files` 每个文件都报一次、收尾报满。守卫见 
 `officialEnabled` / `githubEnabled` 两个参数上（把"另一个源"当关闭）。
 **没有改 `src/gamePackage.ts`** —— 那份文件与 Android 仓库逐字相同，动了另一边就会红。
 持久化键 `crossing-void.launcher.auto-source-fallback`。守卫：`tests/settingsBehavior.test.ts`。
+
+### 12.4 碎片导入的清单：下载站优先，GitHub 兜底（2026-10-19）
+
+碎片（那几个 GB 级的 `…碎片00N.zip`）**走网盘 / QQ 群分发**，启动器只负责"这一版应该有哪几个包、
+齐没齐、导进去"。这份清单（`fragments.json`）原来只从下载站的 `latest.json.fragmentsUrl` 取，
+于是**幻杀用不了这个机制** —— 它不发下载站，整份 `latest.json` 就是 404。
+
+现在两条来源，按顺序：
+
+| 顺序 | 来源 | 地址 |
+| --- | --- | --- |
+| ① | 下载站版本指针里的 `fragmentsUrl` | `https://dl.crossingvoid.top/games/<产品段>/latest.json` |
+| ② | 条目里的 `githubFragmentsUrl`（固定 tag） | 零境 `…/kirito0000001/CrossingVoid/releases/download/fragments-latest/fragments.json`；幻杀 `…/kirito0000001/fantasy-project-packages/releases/download/fragments-latest/fragments.json` |
+
+几条约束：
+
+- **GitHub Release 里只有清单，没有 zip。** 别指望兜底能下碎片 —— 它只补"该有哪些包"这一层信息。
+- 触发兜底要覆盖两种情形：`latest.json` **拿不到**（幻杀），和拿到了但**没有 `fragmentsUrl`**。
+- 这一档不发下载站时（`gamePackage.sources` 不含 `official`）**连问都不问**，避免每次开导入页白跑一次 404。
+- 版本校验：拿到版本指针就传 `expectedVersion`，上一版的清单直接判无效；只有走 GitHub 兜底、
+  而且连指针都没有时（幻杀）才不做版本比对——那时候没有版本可比。
+- 两条来源都拿不到就退化成"直接选压缩包、导入后判齐"。清单只负责好看，不能把导入堵死。
+
+代码：`src/gameChunkFragments.ts` 的 `githubFragmentsManifestUrl` / `resolveGameChunkFragmentsSource`，
+接在 `App.vue` 的 `loadGameChunkFragments()` 上；地址配在 `src/platform/gameCatalog.ts` 的
+`gamePackage.githubFragmentsUrl`。守卫：`tests/gameChunkFragments.test.ts`（含"配的地址必须和该档 GitHub 仓库对得上"）。
 
 ## 13. 安装、解压与原子替换
 
@@ -786,44 +886,62 @@ pwsh -NoProfile -File .\Scripts\Build-LauncherUpdaterPackage.ps1
 
 `bundle.createUpdaterArtifacts` 必须保持为 `true`。否则只有安装包，没有 Tauri 更新签名。
 
-### 20.2 发布到 Gitee
+### 20.2 发布到 Gitee + 站点镜像
 
 ```powershell
 pwsh -NoProfile -File .\Scripts\Publish-LauncherGiteePackage.ps1
 ```
 
-Token 只从参数或以下环境变量读取：
+Token 只从参数或以下环境变量读取（AxTools 设置页存的 `AXTOOLS_GITEE_TOKEN` 现在也算）：
 
 ```text
+AXTOOLS_GITEE_TOKEN
 FANTASYTOOLS_GITEE_TOKEN
 GITEE_TOKEN
 GITEE_ACCESS_TOKEN
 ```
 
-职责：创建/更新 `launcher-v<版本>` Release、上传安装包、写入仓库 `launcher/latest.json`，然后调用 OSS/服务器兼容发布。
+职责：
+
+1. 创建/更新 `launcher-v<版本>` Release（仓库默认 `xiaojie578/CrossingVoid-Launcher-PC`），上传安装包与 `.sig`（单附件上限 100 MiB，脚本硬卡）。
+2. 用 Gitee 回给的真实 `browser_download_url` 做清单里的下载地址，并 HEAD 验活（最后一跳 200 + `Content-Length` 对齐本地包）。
+3. 生成扁平清单 `pc-installer-latest.json`（`LauncherManifestUtilities.ps1` 的 `New-LauncherInstallerManifest`），与 `latest.json` 同源同版本。
+4. 写入 Gitee 仓库 `launcher/latest.json` 与 `launcher/pc-installer-latest.json`。
+5. 站点镜像 `C:\inetpub\wwwroot\manifests\launcher\pc-latest.json` / `pc-installer-latest.json` **一次换完**（`Publish-WebsiteMirrorSet`：全部先校验 → 全部通过才覆盖 → 回读断言一致 → 修 ACL）。
 
 支持：
 
 ```text
--SkipBuild
--InstallerPath
--ManifestPath
--DryRun
+-SkipBuild          复用已有断点包
+-InstallerPath      手动发布：指定安装包
+-ManifestPath       手动发布：指定 latest.json / update.json
+-SkipWebsiteMirror  只发 Gitee，不动站点
+-GiteeRepository    换发布仓库（换仓库不用改代码）
+-DryRun             只走本地清单生成与打印，不上传
+-WithOssCompat      回旧 OSS 通道（已退役，见 20.3）
 ```
 
-发布前必须校正 RFC 3339 时间。Gitee 返回 HTTP 错误时要输出响应正文，不能只显示“上传失败”。
+四条硬约束：
 
-### 20.3 OSS 与服务器兼容
+- 清单里写出去的下载地址必须指向"这次真正上传到的 Release"，而且要**真的能下**：地址以 Gitee 返回值为准、提交清单前 HEAD 验活（见 §10.6）。复用旧断点时脚本还会检测地址不一致并改写（`latest.rewritten.json`）。
+- 发布时间必须走 RFC 3339：`ConvertFrom-Json` 会把 `pub_date` 变成本地化 `DateTime`，直接 `[string]` 会写出 `10/12/2026 03:25:02` 这种值。
+- 站点镜像必须真的能匿名读：远端脚本按站点根 `index.html` 抄 ACL，并兜底给 `IIS_IUSRS/IUSR` 读权限。
+- **两份镜像不允许分两次成功**：客户端只看扁平清单，只换成功一份等于对所有玩家静默停更（见 §10.6）。
 
-`Publish-LauncherUpdaterPackage.ps1` 负责：
+Gitee 返回 HTTP 错误时要输出响应正文，不能只显示"上传失败"。
 
-- 将 PC 安装包上传到 OSS 的 PC 前缀。
-- 同步 `crossingvoid-launcher` 与 `crossingvoid-launcher-pc` 服务器清单。
-- 保持旧 PC 客户端所需的兼容索引。
-- 新版激活后删除旧启动器安装对象，避免持续占用储存。
-- 不写入或覆盖 Android 产品清单。
+### 20.3 OSS 与服务器兼容（已退役，登录式保留）
 
-发布脚本中的旧包删除是明确产品策略：只保留可下载的当前版本；测试版本使用独立通道，不用正式服旧版本承担测试。
+`Publish-LauncherUpdaterPackage.ps1` 是旧的阿里云通道：上传安装包到 `oss://download-server-xj/...`、把 `objectKey` 写进清单、ssh 覆盖服务器 `products/crossingvoid-launcher{,-pc}/update.json`。
+
+2026-10-19 起：
+
+- OSS bucket `download-server-xj` 已删除，Tauri 接口签出来的地址必然 404；
+- 该脚本**默认不再执行**，只有显式 `-WithOssCompat` 才会跑（仍需 ossutil 与 `ssh crossing-server`）；
+- 服务器上旧的 `update.json` 还留着 `objectKey`，客户端已经不再读那个接口，留着不影响新链路。
+
+发布脚本中的旧包删除策略（只保留当前版本）属于旧通道行为，新链路不再自动删 Gitee 历史 Release。
+
 
 ## 21. 游戏包发布
 
@@ -908,23 +1026,39 @@ cargo test --manifest-path src-tauri\Cargo.toml
 
 高风险修改还应做对应实测：
 
-- 更新器：从旧安装版检测、下载、签名校验、安装、重启。
+- 更新器：装一个旧版本 → 开机检测 → 下载 → sha256/minisign → NSIS `/P /R /UPDATE` → 自动重开；
+  同时验一遍"扁平清单 404 只剩 Tauri 终点"和"扁平清单落后一版"两种情形（后者必须仍然发现新版）。
 - 下载：暂停、恢复、切源、断网、重启应用和已完成分片复用。
 - 完整性：完整游戏、缺少一个文件、完全没有游戏、外部还原游戏。
 - 发布：`-DryRun`、正式发布、清单 URL、Release 资产和旧包删除。
 - UI：1200x675 窗口，设置页滚动、弹窗、右键菜单和进度悬浮栏。
 
-“代码编译”不等于“更新链路可用”。发布任务必须额外验证远端 `latest.json` 可访问、日期可解析、URL 能下载、签名与安装包匹配。
+“代码编译”不等于“更新链路可用”。发布任务必须额外验证远端两份清单都可访问、版本一致、日期可解析、URL 能真正下载、签名与安装包匹配。
 
 ## 25. 常见故障
 
 ### 更新能检测但安装失败
 
-检查：`latest.json` URL、`windows-x86_64` 键、签名、安装包是否属于同一构建、`pub_date` 是否 RFC 3339、NSIS 是否仍在 Release 中。
+先分清是哪条通道：日志里 `扁平启动器清单不可用` 说明走了 Tauri 兜底，否则是扁平通道。检查：扁平清单的
+`asset.url` / `sizeBytes` / `sha256` 与 Release 资产是否一致、`pc-latest.json` 的 `windows-x86_64` 键
+与 minisign 签名、`pub_date` 是否 RFC 3339、NSIS 是否仍在 Release 中。
+
+如果是"下载跑满后报下载失败"，看是不是 `DOWNLOAD_CANCELLED`：启动器更新必须用自己的
+`download_task` 作用域（`LAUNCHER_UPDATE_TASK_KEY`），否则会被这一轮暂停过的游戏下载误杀。
+
+### 检测不到新版本，但站点上明明是新版
+
+按这个顺序查：
+
+1. `curl https://www.crossingvoid.top/manifests/launcher/pc-installer-latest.json?t=$(date +%s)` —— 200？`versionName` 是新版？
+2. 新版是不是**真的比客户端版本高**（同版本重发＝所有人都不更新，这是设计行为）。
+3. 客户端版本号对不对：`__APP_VERSION__` 来自构建时的 `CV_LAUNCHER_VERSION`（`Saved/Launcher/developer-version.json`）。
+   包是 2.0.0、清单写 2.0.0、装机却显示 1.9.x → 是构建时版本没注入，不是更新链路。
+4. 1.4.0 及更老：按 §10 的基线约定**不救**（它们读的旧端点永远返回 1.4.0）。
 
 ### Gitee 检测很久后静默失败
 
-不要依赖网页 Release 下载页。启动器自身用固定 raw 清单；游戏 GitHub 资产用 Releases Asset API。捕获并显示实际 HTTP 状态和响应正文。
+不要依赖网页 Release 下载页。启动器自身读站点静态清单（不读 Gitee raw）；游戏 GitHub 资产用 Releases Asset API。捕获并显示实际 HTTP 状态和响应正文。
 
 ### 已有游戏却显示下载
 
@@ -934,6 +1068,24 @@ cargo test --manifest-path src-tauri\Cargo.toml
 
 启动进程前先检查关键 exe 和清单。缺失时立即标记为下载/修复，不要等待 Windows 进程错误超时。
 
+### 拉起临时 PowerShell 脚本的两个坑（2026-10-19，两个都踩过）
+
+启动器是 GUI 进程（没有控制台），所以从 Rust 侧起 `powershell` / `taskkill` 这类控制台程序时：
+
+| 症状 | 根因 | 做法 |
+| --- | --- | --- |
+| 装游戏时闪一个黑框 | 没设 `CREATE_NO_WINDOW`，Windows 会给子进程新开一个控制台窗口 | 一律用 `hidden_windows_command("powershell")`，不要裸 `Command::new("powershell")` |
+| 桌面快捷方式叫「骞绘潃」、卸载脚本找不到「零境启动器」 | 临时 `.ps1` 是**不带 BOM 的 UTF-8**，而 `powershell`（5.1）对无 BOM 的脚本按系统 ANSI（简中 = GBK）解码，脚本里的中文整段乱码 | 一律用 `write_powershell_script()` 落盘（UTF-8 + BOM） |
+
+现场还原（本机实测）：同一行 `$name = '幻杀'`，无 BOM 打印 `骞绘潃`、有 BOM 打印 `幻杀`；
+用 WScript.Shell 跑一遍，无 BOM 生成 `骞绘潃.lnk`、有 BOM 生成 `幻杀.lnk`。
+
+- 快捷方式名字取自 `GameIdentity::display_name()`，装游戏收尾（`create_desktop_shortcut` 默认开）和
+  「创建快捷方式」按钮都走 `create_game_desktop_shortcut_with`。
+- **已经生成的那份乱码快捷方式不会自动消失**（名字不同），要让玩家自己删掉再生成一次。
+- 换 `pwsh` 7 也能绕开编码问题，但玩家的机器上不保证装了 pwsh，所以根子上还是 BOM。
+- 守卫：`tests/consoleWindowHiding.test.ts` + Rust 单测 `powershell_scripts_are_written_as_utf8_with_bom`。
+
 ### 设置页的「删除游戏 / 卸载启动器」点了没反应
 
 不是命令挂了，是确认弹窗根本没显示出来：弹窗的 DOM 在 `src/components/SettingsPanel.vue`，
@@ -941,7 +1093,7 @@ cargo test --manifest-path src-tauri\Cargo.toml
 `.confirm-mask` / `.confirm-panel` 一条都匹配不到。遮罩于是退回普通块级元素，
 被上面 100% 高的 `.settings-modal` 顶到窗口外，看起来就是"点了完全没反应"（2026-09-21 修复）。
 
-和 `remote-notice.css` 那次（§10.4 的加载层）是同一条判据：**样式文件必须由渲染那段 DOM 的组件自己 scoped 引入。**
+和 `remote-notice.css` 那次（§10.10 的加载层）是同一条判据：**样式文件必须由渲染那段 DOM 的组件自己 scoped 引入。**
 现在 `SettingsPanel.vue` 引入 `styles/confirm-dialog.css`；`App.vue` 保留同一份引用只是为了远程公告的
 `.confirm-pop-*` 过渡类。守卫见 `tests/launcherStyleFiles.test.ts`。
 
@@ -1067,9 +1219,11 @@ cargo test --manifest-path src-tauri\Cargo.toml
 
 编写本文时：
 
+- 启动器更新链路的**基线是 2.0.0**（2026-10-19 用新的「Gitee Release 资产 + 站点静态清单」发出去的第一个版本）；
+  1.4.0 及更老不救援，详见 §10 开头。
 - 游戏默认发布版本为 `V0.5.12`。
-- 本机开发版本文件为 `1.0.13`，但该文件位于 `Saved`，不属于源码基线。
-- 源码配置中的回退版本仍可能较低，正式包版本由构建脚本注入。
+- 源码配置里的版本（`package.json` / `tauri.conf.json`）是回退值，本机开发版本文件在 `Saved/Launcher/developer-version.json`（编写本文时为 `2.0.0`），不属于源码基线。
+- 正式包版本由构建脚本注入，仓库里的回退值可能明显低于线上。
 - PC/Android 的 Gitee 发布仓库已经拆分，禁止重新合并。
 
 这些值会随发布变化。接手时应以本机开发版本、Gitee 最新清单、服务器产品清单和实际 Release 为准，不要仅凭本文中的快照决定发布版本。
@@ -1255,7 +1409,9 @@ Rust 侧新增了 `GameIdentity`（`src-tauri/src/lib.rs`），字段**全部可
 
 - 版本检查跳过官网 `latest.json`，直接读 GitHub Release 里的 `manifest.json`（不再白跑一次 404）；
 - 设置页的下载源只剩 GitHub，启动/切档时 `clampDownloadSourceToActiveGame()` 会把残留的官方源收窄；
-- 文件地址仍然按 `buildGamePackageUrlCandidates` 生成（首选 GitHub，自动换源开着时官网作为兜底）。
+- 文件地址仍然按 `buildGamePackageUrlCandidates` 生成（首选 GitHub，自动换源开着时官网作为兜底）；
+- **碎片清单也不再问下载站**，直接走 `gamePackage.githubFragmentsUrl`（见 §12.4）——
+  这正是"碎片导入机制对幻杀不可用"的修复点。
 
 **GitHub 上的 tag 怎么找**（`resolveGithubGameTag()`，三层）：
 

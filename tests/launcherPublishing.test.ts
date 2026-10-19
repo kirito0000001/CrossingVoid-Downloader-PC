@@ -27,11 +27,20 @@ describe("launcher publishing", () => {
     expect(ossPublisher).toContain("update.pc.json");
   });
 
-  it("publishes OSS compatibility after the Gitee launcher release", () => {
-    expect(giteePublisher).toContain("Publish-LauncherUpdaterPackage.ps1");
-    expect(giteePublisher).toContain("-SkipBuild");
-    expect(giteePublisher).toContain("-InstallerPath");
-    expect(giteePublisher).toContain("-ManifestPath");
+  it("publishes the flat installer manifest and mirrors both manifests to the website", () => {
+    // 2026-10-19：阿里云 OSS bucket 已删除，更新链改走「Gitee Release 资产 + 站点静态清单」。
+    // OSS 兼容发布降级为 -WithOssCompat 显式开关，默认不再执行。
+    expect(giteePublisher).toContain("WithOssCompat");
+    expect(giteePublisher).toContain("Publish-WebsiteMirrorSet");
+    expect(giteePublisher).toContain("pc-installer-latest.json");
+    expect(giteePublisher).toContain("New-LauncherInstallerManifest");
+    const ossCallIndex = giteePublisher.indexOf("Publish-LauncherUpdaterPackage.ps1");
+    const optInIndex = giteePublisher.indexOf("if ($WithOssCompat)");
+    expect(optInIndex).toBeGreaterThan(0);
+    expect(ossCallIndex).toBeGreaterThan(optInIndex);
+    // 镜像必须一次换两份：Tauri 清单与扁平清单。
+    expect(giteePublisher).toContain('ExpectedVersionProperty = "versionName"');
+    expect(giteePublisher).toContain('ExpectedVersionProperty = "version"');
   });
 
   it("writes the OSS object key to latest and versioned launcher assets", () => {
@@ -56,11 +65,29 @@ describe("launcher publishing", () => {
     expect(giteePublisher).toContain("Convert-ToRfc3339Timestamp $release.publishedAt");
   });
 
-  it("checks PC launcher updates through the stable website manifest", () => {
-    expect(tauriConfig).toContain(
-      "https://www.crossingvoid.top/api/toolbox-updates/tauri/crossingvoid-launcher-pc/windows/x86_64/{{current_version}}",
+  it("checks PC launcher updates through the website static manifests", () => {
+    const config = JSON.parse(tauriConfig) as {
+      plugins: { updater: { endpoints: string[] } };
+    };
+    // Tauri 兜底通道：端点必须是站点静态 latest.json（原先是 www 上会签 OSS 的接口）。
+    expect(config.plugins.updater.endpoints).toEqual([
+      "https://www.crossingvoid.top/manifests/launcher/pc-latest.json",
+    ]);
+    expect(config.plugins.updater.endpoints.join(" ")).not.toContain("toolbox-updates");
+    expect(config.plugins.updater.endpoints.join(" ")).not.toContain("gitee.com");
+  });
+
+  it("emits a flat installer manifest next to the Tauri manifest", () => {
+    expect(giteePackageBuilder).toContain("pc-installer-latest.json");
+    expect(giteePackageBuilder).toContain("New-LauncherInstallerManifest");
+    expect(giteePackageBuilder).toContain('InstallerManifestProductKey = "crossingvoid-launcher-pc-installer"');
+    const manifestUtilities = readFileSync(
+      resolve(process.cwd(), "Scripts/LauncherManifestUtilities.ps1"),
+      "utf8",
     );
-    expect(tauriConfig).not.toContain("gitee.com");
+    expect(manifestUtilities).toContain("function New-LauncherInstallerManifest");
+    // 发布时间必须走 RFC 3339：ConvertFrom-Json 会把 pub_date 变成本地化 DateTime。
+    expect(manifestUtilities).toContain("Convert-ToRfc3339Timestamp");
   });
 
   it("never recursively deletes the configured launcher output directory", () => {

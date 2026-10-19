@@ -81,8 +81,10 @@ describe("game chunk import", () => {
     expect(appSource).toContain("chunkUnexpectedLabel(file)");
     expect(appSource).toContain("chunkSelection.readyCount");
     expect(appSource).toContain(':disabled="!chunkCanStartImport"');
-    // 清单从 latest.json 的 fragmentsUrl 读，版本不一致直接判无效
-    expect(appSource).toContain("pointer.fragmentsUrl");
+    // 清单地址由 resolveGameChunkFragmentsSource 决定：下载站 fragmentsUrl 优先、GitHub 兜底，
+    // 版本不一致直接判无效（来源规则的细节在 tests/gameChunkFragments.test.ts）
+    expect(appSource).toContain("resolveGameChunkFragmentsSource");
+    expect(appSource).toContain("source.expectedVersion");
     expect(appSource).toContain("parseGameChunkFragments(");
     expect(launcherSource).toContain("https://qm.qq.com/q/Nrlo5pBLwY");
     expect(launcherSource).toContain("https://pan.baidu.com/s/1J5zcggAWiq0Ui47fSZ1P0Q?pwd=2333");

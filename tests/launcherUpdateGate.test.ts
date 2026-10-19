@@ -29,13 +29,17 @@ describe("mandatory launcher update gate", () => {
   it("bypasses launcher updates in Vite and native Debug development builds", () => {
     const checkLauncherUpdate = appSource.slice(
       appSource.indexOf("async function checkLauncherUpdate"),
-      appSource.indexOf("async function installPendingLauncherUpdate"),
+      appSource.indexOf("function offerLauncherUpdate"),
     );
 
     expect(checkLauncherUpdate).toContain("await isDevelopmentBuild()");
     expect(checkLauncherUpdate).toContain('launcherUpdateGate.value = "ready"');
     expect(checkLauncherUpdate).toContain("开发版不参与启动器更新检查。");
-    expect(checkLauncherUpdate.indexOf("await isDevelopmentBuild()")).toBeLessThan(checkLauncherUpdate.indexOf("await check()"));
+    // 开发版必须在任何网络请求之前返回。检查顺序现在是"扁平清单 → Tauri 端点"，
+    // 所以这里盯的是第一个真正的网络入口，而不是某一条具体通道。
+    expect(checkLauncherUpdate.indexOf("await isDevelopmentBuild()")).toBeLessThan(
+      checkLauncherUpdate.indexOf("await resolveFlatLauncherUpdate()"),
+    );
   });
 
   it("uses the native debug assertion flag instead of inferring Debug mode from a path", () => {
