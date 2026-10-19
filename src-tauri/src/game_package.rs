@@ -873,13 +873,15 @@ pub async fn write_game_package_state(
 // ---------------------------------------------------------------------------
 //
 // 分发形态（2026-10-19 定）：整个游戏打成若干**独立整包 zip**，当前是三个
-// `零境V0.6基础碎片001~003.zip`（约 850MB/包）。包内条目名就是清单里的相对路径，
+// `零境V0.6PC基础碎片001~003.zip`（约 850MB/包）。包内条目名就是清单里的相对路径，
 // 清单里的每个文件都必须出现 —— 包括根目录的 `CrossingVoid.version.json`。
 // 旧形态（保持目录结构的散件、每部影片单独一个 zip）仍然兼容，不用玩家改习惯。
 //
 // **压缩包里的条目名就是清单里的相对路径**，所以这里既不需要知道包叫什么、
 // 也不需要知道哪个包装了哪些文件 —— 拆开按路径对清单就够了。
 // 玩家把包改名、把三个包拆开重新分，照样能导（条目名没动）。
+// 0.6.0 重发只改了外层名（`零境V0.6基础碎片` → `零境V0.6PC基础碎片`），字节没变，
+// 旧名包照样能导 —— 这里从来不认包名。
 //
 // 判定和下载共用同一把尺子：目标位置的 size + sha256 对得上清单就算"已就位"。
 // 于是导入是幂等的、导到一半中断再导不会白拷 —— 已经对上的直接在进度里跳过。
@@ -2148,8 +2150,8 @@ mod tests {
         let source = temp_dir("import-explicit-files-source");
         let (_, exe, video) = fragment_payload();
 
-        let first = source.join("零境V0.6基础碎片001.zip");
-        let second = source.join("零境V0.6基础碎片002.zip");
+        let first = source.join("零境V0.6PC基础碎片001.zip");
+        let second = source.join("零境V0.6PC基础碎片002.zip");
         write_archive(&first, &[("CrossingVoid.exe", &exe)]);
         write_archive(
             &second,

@@ -9,9 +9,9 @@ import {
 } from "../src/gameChunkFragments";
 
 const fragments: GameChunkFragment[] = [
-  { fileName: "零境V0.6基础碎片001.zip", sizeBytes: 862273823, fileCount: 40 },
-  { fileName: "零境V0.6基础碎片002.zip", sizeBytes: 846465935, fileCount: 75 },
-  { fileName: "零境V0.6基础碎片003.zip", sizeBytes: 951699870, fileCount: 64 },
+  { fileName: "零境V0.6PC基础碎片001.zip", sizeBytes: 862273823, fileCount: 40 },
+  { fileName: "零境V0.6PC基础碎片002.zip", sizeBytes: 846465935, fileCount: 75 },
+  { fileName: "零境V0.6PC基础碎片003.zip", sizeBytes: 951699870, fileCount: 64 },
 ];
 
 function inspection(
@@ -96,13 +96,13 @@ describe("matchChunkSelection", () => {
       inspection("我改的名字.zip", 846465935),
     ]);
     const renamed = selection.rows.find((row) => row.status === "renamed");
-    expect(renamed?.fileName).toBe("零境V0.6基础碎片002.zip");
+    expect(renamed?.fileName).toBe("零境V0.6PC基础碎片002.zip");
     expect(selection.importablePaths).toEqual(["C:\\碎片\\我改的名字.zip"]);
   });
 
   it("flags a downloaded-half package instead of importing it", () => {
     const selection = matchChunkSelection(fragments, [
-      inspection("零境V0.6基础碎片001.zip", 123),
+      inspection("零境V0.6PC基础碎片001.zip", 123),
     ]);
     const row = selection.rows[0];
     expect(row.status).toBe("size-mismatch");
@@ -113,7 +113,7 @@ describe("matchChunkSelection", () => {
 
   it("flags a file that is not a zip and leaves it out of the import", () => {
     const selection = matchChunkSelection(fragments, [
-      inspection("零境V0.6基础碎片001.zip", 862273823, {
+      inspection("零境V0.6PC基础碎片001.zip", 862273823, {
         isZip: false,
         error: "不是有效的 zip",
       }),
@@ -132,11 +132,26 @@ describe("matchChunkSelection", () => {
 
   it("keeps the missing rows visible so the player knows what to download", () => {
     const selection = matchChunkSelection(fragments, [
-      inspection("零境V0.6基础碎片001.zip", 862273823),
+      inspection("零境V0.6PC基础碎片001.zip", 862273823),
     ]);
     expect(selection.rows.map((row) => row.status)).toEqual(["ready", "missing", "missing"]);
     expect(selection.readyCount).toBe(1);
     expect(selection.allReady).toBe(false);
+  });
+
+  it("still takes packages downloaded before the PC re-release by their unique size", () => {
+    // 0.6.0 重发只把外层名从「零境V0.6基础碎片」改成「零境V0.6PC基础碎片」，
+    // 包内条目名和字节都没动：玩家手里的旧包不该被逼着重下 2.5GB。
+    const selection = matchChunkSelection(fragments, [
+      inspection("零境V0.6基础碎片001.zip", 862273823),
+      inspection("零境V0.6基础碎片002.zip", 846465935),
+      inspection("零境V0.6基础碎片003.zip", 951699870),
+    ]);
+    expect(selection.rows.map((row) => row.status)).toEqual(["renamed", "renamed", "renamed"]);
+    expect(selection.readyCount).toBe(3);
+    expect(selection.allReady).toBe(true);
+    expect(selection.unexpected).toHaveLength(0);
+    expect(selection.importablePaths).toHaveLength(3);
   });
 
   it("does not guess when two packages share the same size", () => {

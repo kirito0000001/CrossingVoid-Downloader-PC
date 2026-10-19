@@ -48,8 +48,13 @@
 | 9 | 单包小于 4 GB（百度网盘非会员限制） | 上传/下载受限 |
 | 10 | 不要打包 `Saved/`、`launcher.game.json`、旧 `CrossingVoid.manifest.json` | 清单里没有，导不进去，白占体积 |
 
-包名随意，导入器不看包名。建议带上版本和序号，例如
-`零境-0.6.0-基础碎片01.zip`，避免用户把两个版本的包放进同一个文件夹。
+包名随意，导入器不看包名，只认包内条目名。**当前约定的名字**是
+`零境V{版本}PC基础碎片{三位序号}.zip`（例如 `零境V0.6PC基础碎片001.zip`）：带上完整
+版本号和平台，避免玩家把两个版本的包、或者手机端的包混进同一个文件夹。
+
+改名不影响导入。0.6.0 重发时外层名从 `零境V0.6基础碎片001~003.zip` 改成了
+`零境V0.6PC基础碎片001~003.zip`，包里的条目名和字节都没动 —— 已经下载过旧名包的
+玩家不用重下，启动器会按大小把它们认回来（见 6.1）。
 
 坏包容错：任何一个 zip 打不开（下坏、没下完整）只会被跳过并写进结果，
 其余包照常导入，包里的文件按缺失结算 —— 玩家重下那一个包再导一次即可，
@@ -157,7 +162,12 @@ exit 1
 - `version` 必须与 `latest.json.version` 一致，不一致整份忽略 —— 宁可退化成
   “直接选文件、导入后判齐”，也不能把上一版的包名摆给玩家；
 - `sizeBytes` 用文件实际字节数，`fileCount` 是包内非目录条目数；
-- **重打碎片后这份 JSON 必须一起更新**，否则界面会按旧的包名/大小把新包判红。
+- **重打、改名之后必须点「发布碎片清单」重发这份 JSON**，否则界面会按旧的包名/大小
+  把新包判红；
+- 重发是**原地更新同一个 URL**，启动器每次拉取都会带 `?t=<时间戳>`，不会被缓存住；
+- 这份文件只是界面上的“齐没齐”；真正的内容校验仍然是导入时逐个文件的 sha256。
+
+当前线上（2026-10-19 PC 0.6.0 重发后，`fragments/0.6.0.json`）：
 
 ```json
 {
@@ -165,12 +175,26 @@ exit 1
   "version": "0.6.0",
   "totalBytes": 2660439628,
   "fragments": [
-    { "fileName": "零境V0.6基础碎片001.zip", "sizeBytes": 862273823, "fileCount": 40 }
+    { "fileName": "零境V0.6PC基础碎片001.zip", "sizeBytes": 862273823, "fileCount": 40 },
+    { "fileName": "零境V0.6PC基础碎片002.zip", "sizeBytes": 846465935, "fileCount": 75 },
+    { "fileName": "零境V0.6PC基础碎片003.zip", "sizeBytes": 951699870, "fileCount": 64 }
   ]
 }
 ```
 
-这份文件只是界面上的“齐没齐”；真正的内容校验仍然是导入时逐个文件的 sha256。
+### 6.1 改名 / 重发时玩家侧会发生什么
+
+0.6.0 这次只改了**外层文件名**（`零境V0.6基础碎片001~003.zip` →
+`零境V0.6PC基础碎片001~003.zip`），压缩包里的条目名和字节都没变，
+`sizeBytes` / `fileCount` / `totalBytes` 也一分不少地对得上。
+
+- 启动器先按**文件名**认包；名字对不上时再按**大小唯一**认，状态显示
+  “已识别（按大小）”。所以已经下过旧名包的玩家不用重下 2.5 GB，选中旧包照样能导 ——
+  导入的裁判始终是包内条目名 + sha256，不是包名。
+- 如果重生成导致**大小也变了**，旧包就会落到“不是这一版的包”，玩家得按新清单重下；
+  所以重发前先用第 5 节的自检脚本对新包跑一遍，再核对 `fragments.json` 的 `sizeBytes`。
+- 两个包大小撞车时启动器不会猜（`matchChunkSelection` 只在大小唯一时认改名的包），
+  这种情况按新清单重新下载就行。
 
 ## 7. 启动器侧对应实现（排查时可对照）
 
@@ -179,6 +203,7 @@ exit 1
 | 读碎片清单（`latest.json` → `fragmentsUrl`，版本不一致判无效） | `src/App.vue` `loadGameChunkFragments` / `src/gameChunkFragments.ts` |
 | 选中文件的轻量体检（只读 zip 中央目录，不解压） | `game_package.rs` `inspect_game_chunk_files` |
 | 选中文件 ↔ 应有包的对照（绿/黄/红/灰） | `src/gameChunkFragments.ts` `matchChunkSelection` |
+| 包名对不上时按大小唯一认（重发前的旧名包、玩家改过名） | `src/gameChunkFragments.ts` `matchChunkSelection`（`renamed` 分支） |
 | 选文件与选文件夹的统一入口 | `game_package.rs` `import_package_files(sources: &[PathBuf])` |
 | 递归扫描源目录，收集 `.zip` 与散件 | `game_package.rs` `import_collect_sources` |
 | 打开每个 zip，把条目名归一后与清单 path 对应 | `game_package.rs` `import_index_archives` |

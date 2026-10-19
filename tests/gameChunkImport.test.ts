@@ -163,6 +163,14 @@ describe("game chunk import", () => {
     expect(packageSource).toContain("IMPORT_ROOT_PROBE_DEPTH");
   });
 
+  it("never hardcodes fragment file names — the published list stays the only source", () => {
+    // 0.6.0 重发把外层名改成了「零境V0.6PC基础碎片001~003」；界面里不能留死名字，
+    // 否则下一次改名又得发一版启动器。名字只从 fragments/<version>.json 来。
+    expect(appSource).not.toContain("基础碎片");
+    expect(appSource).not.toContain("零境V0.6");
+    expect(appSource).toContain("chunkFragments.value?.fragments");
+  });
+
   it("refuses to take the install directory itself as the fragment source", () => {
     expect(packageSource).toContain("碎片来源不能是游戏安装目录本身");
     expect(packageSource).toContain("chosen.starts_with(&install_root)");
