@@ -36,6 +36,7 @@ import {
 import { ACTIVE_GAME_STORAGE_KEY, createPlatformLauncher } from "./platform/platformLauncher";
 import {
   DEFAULT_PLATFORM_GAME_ID,
+  gamePackageSources,
   getGamePackageConfig,
   isPlatformGameId,
   type PlatformGameId,
@@ -954,6 +955,8 @@ async function initializePlatformPage() {
   await refreshRemoteLauncherNotice();
   // 渠道开关同样先拉：玩家可能正因为某个源被关而进不来。
   await refreshRemoteDownloadChannels();
+  // 开局就可能停在只发 GitHub 的档位（上次停在幻杀）：先把下载源收窄到这一档支持的。
+  clampDownloadSourceToActiveGame();
   if (hasLauncherUpdate || launcherUpdateGate.value !== "ready" || !isGamePageActive.value) return;
   await checkGameVersion({ manual: false });
   await Promise.all([
@@ -1145,6 +1148,8 @@ function applyGameScopedState(gameId: PlatformGameId) {
   downloadSource.value = normalizeDownloadSourceKey(
     state?.downloadSource ?? savedPreferredDownloadSource,
   );
+  // 换档后当前源可能不在这一档支持的列表里（例如从零境官方源切到只发 GitHub 的幻杀）
+  clampDownloadSourceToActiveGame();
 
   // 版本 / 更新 / 运行状态先清空，交给 refreshActiveGamePage() 重新查这一档的真实情况。
   remoteGameVersion.value = "";
@@ -2090,13 +2095,26 @@ const downloadChannelWarningText = computed(() =>
 );
 /**
  * 这一档真正支持的下载源：没配 GitHub 备用源（`runtime.github === null`）的档位只留官方源，
- * 免得玩家在火影页上能选一个永远 404 的源。
+ * 免得玩家在火影页上能选一个永远 404 的源；`gamePackage.sources` 再按"这一版实际发在哪"收窄
+ * （幻杀 0.1.0 只发了 GitHub，官方源在下载站补完之前不摆出来）。
  */
-const downloadSourcesForGame = computed(() =>
-  downloadSources.filter(
-    (source) => source.key === "official" || Boolean(activeGameRuntime.value?.github),
-  ),
-);
+const downloadSourcesForGame = computed(() => {
+  const allowed = gamePackageSources(currentGamePackageConfig());
+  return downloadSources.filter((source) => {
+    if (!allowed.includes(source.key)) return false;
+    if (source.key === "github" && !activeGameRuntime.value?.github) return false;
+    return true;
+  });
+});
+
+/** 当前源不在这一档支持的列表里时换到第一个能用的（幻杀只有 GitHub）。 */
+function clampDownloadSourceToActiveGame() {
+  const allowed = downloadSourcesForGame.value;
+  if (allowed.length === 0) return;
+  if (!allowed.some((source) => source.key === downloadSource.value)) {
+    downloadSource.value = allowed[0].key;
+  }
+}
 /** 还开着的下载源；全关时回落到本档支持的列表，好让界面仍能显示"已关闭"。 */
 const availableDownloadSources = computed(() => {
   const available = downloadSourcesForGame.value.filter((source) =>
@@ -2510,8 +2528,11 @@ function getRemoteArchiveBytes(info: UpdateManifestPayload) {
 }
 
 async function fetchRemoteJson<T>(url: string) {
-  const text = await invoke<string>("fetch_remote_text", { url });
-  return JSON.parse(text) as T;
+  return JSON.parse(await fetchRemoteText(url)) as T;
+}
+
+async function fetchRemoteText(url: string) {
+  return invoke<string>("fetch_remote_text", { url });
 }
 
 async function fetchRemoteLauncherNotice() {
@@ -2701,10 +2722,12 @@ async function fetchGamePackageManifest(): Promise<GamePackageManifest> {
   const expectation = { productKey: config.productKey, runtime: config.runtime };
   const officialEnabled = isDownloadChannelEnabled(downloadChannelStates.value, "official");
   const githubEnabled = isDownloadChannelEnabled(downloadChannelStates.value, "github");
+  // 这一档发在哪几个源上：幻杀只发 GitHub，就不要再白跑一次官网 404。
+  const sources = gamePackageSources(config);
   const failures: string[] = [];
 
   // ① 下载站：latest.json → manifestUrl
-  if (officialEnabled) {
+  if (sources.includes("official") && officialEnabled) {
     try {
       const pointer = parseLatestPointer(
         await fetchRemoteJson<unknown>(withCacheBuster(gamePackageManifestUrl(config.productSegment))),
@@ -2720,22 +2743,25 @@ async function fetchGamePackageManifest(): Promise<GamePackageManifest> {
     }
   }
 
-  // ② 备用源：GitHub Release 里同样放了一份 manifest.json —— 下载站挂了这个还能用。
+  // ② 备用源/主源：GitHub Release 里同样放了一份 manifest.json —— 下载站挂了这个还能用。
   // 这一档没有配 GitHub 仓库时直接跳过，别拿零境的仓库去查别人的清单。
-  if (githubEnabled && githubGameRepository()) {
+  if (sources.includes("github") && githubEnabled && githubGameRepository()) {
+    const repository = githubGameRepository();
     try {
-      const releases = await fetchRemoteJson<GitHubReleaseSummary[]>(
-        withCacheBuster(githubGameReleasesUrl()),
-      );
-      const picked = pickGitHubGameRelease(releases, { tagPrefix: githubGameTagPrefix() });
-      if (!picked) throw new GamePackageError("manifest-invalid", "GitHub 上没有找到本平台的游戏包。");
+      let tag = "";
+      try {
+        tag = await resolveGithubGameTag();
+        saveCachedGithubGameTag(tag);
+      } catch (tagError) {
+        // API 和 Atom 都拿不到（断网 / 被墙）：用上次记住的 tag 直接取清单
+        tag = readCachedGithubGameTag();
+        if (!tag) throw tagError;
+      }
       const manifest = parseGamePackageManifest(
-        await fetchRemoteJson<unknown>(
-          withCacheBuster(githubGameManifestUrl(githubGameRepository(), picked.tag)),
-        ),
+        await fetchRemoteJson<unknown>(withCacheBuster(githubGameManifestUrl(repository, tag))),
         expectation,
       );
-      activeGamePackageGithubTag.value = picked.tag;
+      activeGamePackageGithubTag.value = tag;
       return manifest;
     } catch (error) {
       failures.push(describeGamePackageError(error));
@@ -2753,6 +2779,73 @@ async function fetchGamePackageManifest(): Promise<GamePackageManifest> {
 function githubGameReleasesUrl() {
   const repo = githubGameRepository().trim().replace(/^\/+|\/+$/g, "");
   return `https://api.github.com/repos/${repo}/releases?per_page=10`;
+}
+
+/**
+ * 公开订阅源：不需要 API 配额，用来在 GitHub API 被限流时找最新 tag。
+ *
+ * 2026-10-19 实测：同一出口 IP 下未鉴权的 `api.github.com/.../releases` 会 403
+ * （`API rate limit exceeded`），而 `releases.atom` 仍然 200 —— 幻杀只发 GitHub，
+ * 没有这条兜底就等于版本检查直接失败。
+ */
+function githubGameReleasesAtomUrl() {
+  const repo = githubGameRepository().trim().replace(/^\/+|\/+$/g, "");
+  return `https://github.com/${repo}/releases.atom`;
+}
+
+const GITHUB_GAME_TAG_STORAGE_PREFIX = "tfac-launcher.github-game-tag.";
+
+/** 上次成功解析到的 tag：API 和 Atom 都拿不到时，至少还能用上次那份清单。 */
+function readCachedGithubGameTag() {
+  if (typeof window === "undefined") return "";
+  try {
+    const raw = window.localStorage.getItem(`${GITHUB_GAME_TAG_STORAGE_PREFIX}${activeGameId.value}`);
+    if (!raw) return "";
+    const parsed = JSON.parse(raw) as { tag?: unknown };
+    return typeof parsed?.tag === "string" ? parsed.tag.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
+function saveCachedGithubGameTag(tag: string) {
+  if (typeof window === "undefined" || !tag) return;
+  try {
+    window.localStorage.setItem(
+      `${GITHUB_GAME_TAG_STORAGE_PREFIX}${activeGameId.value}`,
+      JSON.stringify({ tag, savedAt: Date.now() }),
+    );
+  } catch {
+    // 存不进去不影响当前会话。
+  }
+}
+
+/**
+ * 找这一档在 GitHub 上的最新 Release tag。
+ *
+ * ① API（信息最全） → ② Atom 订阅源（无配额） → ③ 上次成功记住的 tag。
+ * 只认 tag 前缀，所以同一个仓库里混着安卓/旧流程的 release 也不会挑错。
+ */
+async function resolveGithubGameTag(): Promise<string> {
+  const prefix = githubGameTagPrefix().trim().toLowerCase();
+  try {
+    const releases = await fetchRemoteJson<GitHubReleaseSummary[]>(
+      withCacheBuster(githubGameReleasesUrl()),
+    );
+    const picked = pickGitHubGameRelease(releases, { tagPrefix: githubGameTagPrefix() });
+    if (picked) return picked.tag;
+  } catch (error) {
+    console.warn("GitHub releases API unavailable, falling back to the Atom feed", error);
+  }
+
+  const atom = await fetchRemoteText(withCacheBuster(githubGameReleasesAtomUrl()));
+  const tags = [...atom.matchAll(/releases\/tag\/([^"'<\s]+)/g)]
+    .map((match) => decodeURIComponent(match[1]))
+    .filter((tag) => tag.toLowerCase().startsWith(prefix));
+  if (tags.length === 0) {
+    throw new GamePackageError("manifest-invalid", "GitHub 上没有找到本平台的游戏包。");
+  }
+  return tags[0];
 }
 
 /**

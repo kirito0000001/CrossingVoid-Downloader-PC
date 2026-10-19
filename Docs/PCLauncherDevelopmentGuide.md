@@ -1063,7 +1063,7 @@ cargo test --manifest-path src-tauri\Cargo.toml
 
 这些值会随发布变化。接手时应以本机开发版本、Gitee 最新清单、服务器产品清单和实际 Release 为准，不要仅凭本文中的快照决定发布版本。
 
-## 29. 多档游戏接入（已接第二档：火影忍者手游 BP 模拟器）
+## 29. 多档游戏接入（已接三档：火影忍者手游 BP 模拟器、幻杀）
 
 启动器从"只有零境"改成了**按档位配置驱动**：一档游戏 = `src/platform/gameCatalog.ts` 里的一个条目，
 条目里分成三块，缺一块就接不完整。
@@ -1222,3 +1222,39 @@ Rust 侧新增了 `GameIdentity`（`src-tauri/src/lib.rs`），字段**全部可
 
 **排查口诀**：公告/开关"发出去没生效"时，先 `curl` 那份分档文件看状态码 ——
 `401` 是权限（本坑）、`404` 是没传上去、`200` 但内容是别人的就是回退逻辑出错。
+
+### 29.12 幻杀（第三档，2026-10-19 接入）
+
+幻杀的值来自它自己的 0.1.0 发布产物（UE 工程 `FantasyProject`）：
+
+| 项 | 值 |
+| --- | --- |
+| `gamePackage` | `fantasyproject` / `fantasyproject-game` / `Windows` / `FantasyProject.version.json` |
+| `sources` | `["github"]`（**下载站还没有它的 latest.json，只发 GitHub**） |
+| GitHub 仓库 | `kirito0000001/fantasy-project-packages`，tag 前缀 `PC-V`（当前 `PC-V0.1.0`） |
+| 安装目录 | `D:\TFAC-hz64\FantasyProject` |
+| 主程序 | `FantasyProject.exe` |
+| 工程名（日志） | `FantasyProject` |
+| 进程名 | `FantasyProject.exe`、`FantasyProject-Win64-Shipping.exe` |
+| 页面内容 | `content: null`（只用背景图 + 标题栏 + 右侧下载/启动区） |
+| 品牌位 | 背景 `fantasy-kill-bg.jpg`、侧栏图标 `icons/fantasy-kill.png`；品牌/开机 logo 暂时留空（回退成文字"幻杀"），有正式字标再补 |
+
+**`gamePackage.sources`（2026-10-19 新增）**：告诉启动器"这一版实际发在哪几个源上"，缺省
+`["official", "github"]`。幻杀填 `["github"]` 之后：
+
+- 版本检查跳过官网 `latest.json`，直接读 GitHub Release 里的 `manifest.json`（不再白跑一次 404）；
+- 设置页的下载源只剩 GitHub，启动/切档时 `clampDownloadSourceToActiveGame()` 会把残留的官方源收窄；
+- 文件地址仍然按 `buildGamePackageUrlCandidates` 生成（首选 GitHub，自动换源开着时官网作为兜底）。
+
+**GitHub 上的 tag 怎么找**（`resolveGithubGameTag()`，三层）：
+
+1. `api.github.com/repos/<repo>/releases` —— 信息最全，但未鉴权只有 60 次/小时；
+2. `https://github.com/<repo>/releases.atom` —— 公开订阅源，**不需要 API 配额**，从
+   `releases/tag/<tag>` 链接里按 `PC-V` 前缀挑最新的；2026-10-19 实测同一出口 IP 下
+   API 已经 403、Atom 仍然 200，所以这条不是可选项；
+3. localStorage 里上次成功解析的 tag（`tfac-launcher.github-game-tag.<gameId>`）—— 断网时
+   至少还能用上次那份清单。
+
+选 tag 一律按前缀过滤（`PC-V` / `Android-V`），所以仓库里将来混进安卓 release 也不会挑错。
+
+等下载站补发 `games/fantasyproject/latest.json` 后，把 `sources` 改成缺省即可恢复双源。

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_PLATFORM_GAME_ID,
   PLATFORM_GAMES,
+  gamePackageSources,
 } from "../src/platform/gameCatalog";
 import { createPlatformLauncher } from "../src/platform/platformLauncher";
 
@@ -50,6 +51,26 @@ describe("platform launcher", () => {
       if (!game.themeAccent) continue;
       expect(game.themeAccent, game.id).toMatch(/^#[0-9a-f]{6}$/i);
     }
+  });
+
+  it("wires 幻杀 to its GitHub-only package", () => {
+    const fantasy = PLATFORM_GAMES.find((game) => game.id === "fantasy-kill");
+    expect(fantasy?.implemented).toBe(true);
+    expect(fantasy?.gamePackage).toMatchObject({
+      productSegment: "fantasyproject",
+      productKey: "fantasyproject-game",
+      runtime: "Windows",
+      versionMarker: "FantasyProject.version.json",
+    });
+    // 0.1.0 只发了 GitHub：官方源先不摆出来，否则版本检查和下载都会 404
+    expect(gamePackageSources(fantasy?.gamePackage ?? null)).toEqual(["github"]);
+    expect(fantasy?.runtime).toMatchObject({
+      installDirectoryName: "FantasyProject",
+      executable: "FantasyProject.exe",
+      projectName: "FantasyProject",
+      github: { repository: "kirito0000001/fantasy-project-packages", tagPrefix: "PC-V" },
+      content: null,
+    });
   });
 
   it("restores the last selected page and persists later selections", () => {

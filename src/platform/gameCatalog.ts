@@ -1,3 +1,5 @@
+import type { DownloadSourceKey } from "../launcherTypes";
+
 export const PLATFORM_GAME_IDS = [
   "tfac-home",
   "crossing-void",
@@ -42,7 +44,23 @@ export type GamePackageConfig = {
   runtime: "Windows" | "Android";
   /** 版本标记文件，落位后由启动器读取（诊断用）。 */
   versionMarker: string;
+  /**
+   * 这一版实际发在哪几个源上；缺省 = 两个源都发（官网下载站 + GitHub 备用源）。
+   *
+   * 幻杀 0.1.0 只发了 GitHub（下载站还没发完），所以填 `["github"]`：
+   * 界面不会再摆一个永远 404 的官方源，版本检查和下载也直接走 GitHub。
+   */
+  sources?: readonly DownloadSourceKey[];
 };
+
+/** `gamePackage.sources` 的缺省值：两个源都发。 */
+export const DEFAULT_GAME_PACKAGE_SOURCES: readonly DownloadSourceKey[] = ["official", "github"];
+
+/** 这一档允许的下载源；没接入的档位返回空数组。 */
+export function gamePackageSources(config: GamePackageConfig | null): readonly DownloadSourceKey[] {
+  if (!config) return [];
+  return config.sources ?? DEFAULT_GAME_PACKAGE_SOURCES;
+}
 
 /**
  * 这一档游戏在**本机**长什么样：装到哪个目录、主程序叫什么、怎么判断它在跑。
@@ -124,14 +142,28 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
     englishName: "FANTASY KILL",
     description: "幻想世界的战斗体验。",
     shortLabel: "幻",
-    iconSrc: null,
+    iconSrc: "/launcher/icons/fantasy-kill.png",
     bootLogoSrc: null,
     brandLogoSrc: null,
-    backgroundSrc: null,
+    backgroundSrc: "/launcher/fantasy-kill-bg.jpg",
     themeAccent: null,
-    implemented: false,
-    gamePackage: null,
-    runtime: null,
+    implemented: true,
+    gamePackage: {
+      productSegment: "fantasyproject",
+      productKey: "fantasyproject-game",
+      runtime: "Windows",
+      versionMarker: "FantasyProject.version.json",
+      // 0.1.0 只发了 GitHub（下载站还没发完），官方源先不摆出来
+      sources: ["github"],
+    },
+    runtime: {
+      installDirectoryName: "FantasyProject",
+      executable: "FantasyProject.exe",
+      projectName: "FantasyProject",
+      processNames: ["FantasyProject.exe", "FantasyProject-Win64-Shipping.exe"],
+      github: { repository: "kirito0000001/fantasy-project-packages", tagPrefix: "PC-V" },
+      content: null,
+    },
   },
   {
     id: "naruto-bp",

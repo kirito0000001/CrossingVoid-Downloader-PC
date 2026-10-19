@@ -16,7 +16,11 @@ const rustSource = readFileSync(resolve(process.cwd(), "src-tauri/src/lib.rs"), 
 describe("game runtime profile", () => {
   it("每一档接入的游戏都有完整的下载契约与本机运行参数", () => {
     const implemented = PLATFORM_GAMES.filter((game) => game.implemented);
-    expect(implemented.map((game) => game.id)).toEqual(["crossing-void", "naruto-bp"]);
+    expect(implemented.map((game) => game.id)).toEqual([
+      "crossing-void",
+      "fantasy-kill",
+      "naruto-bp",
+    ]);
 
     for (const game of implemented) {
       const config = getGamePackageConfig(game.id);
