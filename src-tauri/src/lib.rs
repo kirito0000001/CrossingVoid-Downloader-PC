@@ -4980,6 +4980,7 @@ pub fn run() {
             game_package::scan_local_game_package,
             game_package::download_game_package,
             game_package::import_game_package_files,
+            game_package::inspect_game_chunk_files,
             game_package::prune_game_package,
             game_package::read_game_package_state,
             game_package::write_game_package_state,

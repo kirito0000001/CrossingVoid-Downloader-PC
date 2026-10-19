@@ -196,9 +196,9 @@ export type RepairProgressEvent = {
 /**
  * 导入碎片的结果（`import_game_package_files`）。
  *
- * 碎片有散件也有压缩包，但压缩包里的条目名就是清单里的相对路径，
- * 所以 Rust 侧只回"哪些没找到 / 哪些对不上"，不关心它们原来在哪个包里。
- * `missing` 与 `mismatched` 都只列前若干条（给玩家看的，不是给机器用的）。
+ * 碎片是若干独立整包 zip（如「零境V0.6基础碎片001~003」），包内条目名就是清单里的
+ * 相对路径，所以 Rust 侧只回“哪些没找到 / 哪些对不上 / 哪些包打不开”，
+ * 不关心它们原来在哪个包里。三个清单都只列前若干条（给玩家看的，不是给机器用的）。
  */
 export type GamePackageImportSummary = {
   importedFiles: number;
@@ -209,6 +209,8 @@ export type GamePackageImportSummary = {
   sourceRoot: string;
   missing: string[];
   mismatched: string[];
+  /** 打不开或解压失败的压缩包（`文件名：原因`）；包里的文件会按缺失处理。 */
+  brokenArchives: string[];
 };
 export type LauncherUpdateConfirmStage = "idle" | "available";
 export type DevScriptProgressEvent = {

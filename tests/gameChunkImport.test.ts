@@ -42,16 +42,19 @@ describe("game chunk import", () => {
     expect(toolMenuSource).toMatch(/\.tool-menu\.has-chunk-install\s*\{[\s\S]*?right:\s*402px;/);
   });
 
-  it("selects one folder and hands the manifest to the native importer", () => {
+  it("selects zip files and hands their paths to the native importer", () => {
     const importSource = appSource.match(/async function importGameChunks\(\) \{[\s\S]*?\n\}/)?.[0];
-    const folderSource = appSource.match(/async function chooseGameChunkFolder\(\) \{[\s\S]*?\n\}/)?.[0];
+    const pickerSource = appSource.match(/async function chooseGameChunkFiles\(\) \{[\s\S]*?\n\}/)?.[0];
 
     expect(importSource).toBeTruthy();
-    expect(folderSource).toBeTruthy();
-    expect(folderSource).toContain("directory: true");
-    expect(folderSource).toContain("multiple: false");
-    // 只选一个文件夹就够：散件和压缩包都在里面，按清单路径对，不用玩家挑
-    expect(importSource).toContain("sourceDirectory: selected");
+    expect(pickerSource).toBeTruthy();
+    // 下载下来就是文件，直接多选；不再让玩家找文件夹
+    expect(pickerSource).toContain("multiple: true");
+    expect(pickerSource).toContain("directory: false");
+    expect(pickerSource).toContain('extensions: ["zip"]');
+    expect(appSource).toContain("async function addGameChunkFiles(");
+    expect(importSource).toContain("const sources = chunkImportPaths.value;");
+    expect(importSource).toContain("sources,");
     expect(importSource).toContain("files: manifest.files");
     expect(importSource).toContain("stopActiveDownloadBeforeChunkImport");
     expect(packageSource).toContain("pub fn import_package_files");
@@ -70,21 +73,27 @@ describe("game chunk import", () => {
     expect(appSource).not.toContain('class="confirm-panel launcher-update-panel"');
   });
 
-  it("shows an import guide with folder selection and four external download sources", () => {
+  it("shows the expected fragments from the network list and marks picked ones ready", () => {
     expect(appSource).toContain('v-if="showGameChunkImportGuide"');
-    expect(appSource).toContain("游戏碎片是把完整游戏包拆开后的文件");
-    expect(appSource).toContain("选放着这些文件的文件夹就行");
+    expect(appSource).toContain("本次需要的碎片");
+    expect(appSource).toContain(':class="`is-${row.status}`"');
+    expect(appSource).toContain("chunkStatusLabel(row)");
+    expect(appSource).toContain("chunkUnexpectedLabel(file)");
+    expect(appSource).toContain("chunkSelection.readyCount");
+    expect(appSource).toContain(':disabled="!chunkCanStartImport"');
+    // 清单从 latest.json 的 fragmentsUrl 读，版本不一致直接判无效
+    expect(appSource).toContain("pointer.fragmentsUrl");
+    expect(appSource).toContain("parseGameChunkFragments(");
     expect(launcherSource).toContain("https://qm.qq.com/q/Nrlo5pBLwY");
     expect(launcherSource).toContain("https://pan.baidu.com/s/1J5zcggAWiq0Ui47fSZ1P0Q?pwd=2333");
     expect(launcherSource).toContain("https://www.alipan.com/s/hGG6ZxsR6Y1");
     expect(launcherSource).toContain("https://www.123684.com/s/SQH4vd-OoPZ3");
     expect(appSource).toContain('openUrl(url)');
-    expect(appSource).toContain(':disabled="!selectedChunkFolder || gameChunkImportPending"');
   });
 
   it("keeps the import guide readable and visually compact", () => {
     expect(appSource).toContain("获取游戏碎片");
-    expect(appSource).toContain("选择碎片文件夹");
+    expect(appSource).toContain("选择压缩包");
     expect(launcherStyleSource).toMatch(/\.chunk-import-panel\s*\{[\s\S]*?min-height:\s*450px;/);
     expect(launcherStyleSource).toMatch(/\.chunk-import-description[\s\S]*?font-size:\s*20px;/);
     expect(launcherStyleSource).toMatch(/\.chunk-import-hint\s*\{[\s\S]*?font-size:\s*17px;/);
@@ -98,6 +107,18 @@ describe("game chunk import", () => {
     expect(appSource).not.toContain("game-chunk-import-progress");
     expect(appSource).toContain("const importingFragments = gameChunkImportPending.value;");
     expect(appSource).toContain("正在导入碎片");
+  });
+
+  it("registers the progress listeners before importing and before install verification", () => {
+    // 导入不经过下载，没人替它注册监听器；漏挂的后果就是进度条一直 0、最后直接完成。
+    const importSource = appSource.match(/async function importGameChunks\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+    const finalizeSource =
+      appSource.match(/async function finalizeGamePackageInstall\(\) \{[\s\S]*?\n\}/)?.[0] ?? "";
+
+    expect(importSource).toContain("await ensureDownloadProgressListener();");
+    expect(finalizeSource).toContain("await ensureDownloadProgressListener();");
+    // 导入顶替“下载”那一段，百分比按 90 的尺子缩放，导入结束不会从 100% 掉回 90%。
+    expect(appSource).toContain("((payload.percent || 0) * DOWNLOAD_PROGRESS_SHARE) / 100");
   });
 
   it("writes every fragment through a .part file and only keeps it after the hash matches", () => {
@@ -117,6 +138,19 @@ describe("game chunk import", () => {
     expect(packageSource).toContain("if file_matches_entry(&target, entry) {");
     // 已经对上的直接算进度、不重拷
     expect(packageSource).toContain("continue;");
+  });
+
+  it("keeps importing when one archive is broken and reports the bad package", () => {
+    // 网盘下坏一个包不该让另外两个包白导：坏包记进 brokenArchives，包内文件按缺失算；
+    // 但落盘失败（磁盘满 / 没权限）和取消仍然整单停，不能当成“源坏了”咽掉。
+    expect(packageSource).toContain("pub broken_archives: Vec<String>");
+    expect(packageSource).toContain("fn archive_label");
+    expect(packageSource).toContain("broken.push(format!(");
+    expect(packageSource).toContain("Err(ImportWriteError::Source(message)) => {");
+    expect(packageSource).toContain("| Err(ImportWriteError::Target(message)) => return Err(message)");
+    expect(packageSource).toContain("broken_archive_paths.contains(archive_path)");
+    expect(appSource).toContain("result.brokenArchives ?? []");
+    expect(appSource).toContain("个压缩包打不开");
   });
 
   it("matches fragments by manifest path so archives may be renamed", () => {

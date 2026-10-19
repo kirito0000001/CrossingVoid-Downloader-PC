@@ -61,6 +61,14 @@ import {
   type GitHubReleaseSummary,
 } from "./gamePackage";
 import {
+  importablePathsWithoutManifest,
+  matchChunkSelection,
+  parseGameChunkFragments,
+  type ChunkSelectionRow,
+  type GameChunkFileInspection,
+  type GameChunkFragments,
+} from "./gameChunkFragments";
+import {
   DOWNLOAD_CHANNELS_URL,
   LAUNCHER_NOTICE_URL,
   downloadChannelsUrl,
@@ -377,7 +385,17 @@ const showDeleteGameConfirm = ref(false);
 const showInstallConfirm = ref(false);
 const installDialogMode = ref<InstallDialogMode>("install");
 const showGameChunkImportGuide = ref(false);
-const selectedChunkFolder = ref("");
+/** 玩家选中的碎片压缩包（绝对路径）。再选一次是追加合并，不是覆盖。 */
+const selectedChunkFiles = ref<string[]>([]);
+/** 选中文件的体检结果（Rust 只读 zip 中央目录，不解压）。 */
+const chunkFileInspections = ref<GameChunkFileInspection[]>([]);
+/** 这一版应该有哪些包（`fragments/<version>.json`）。读不到就退化成直接选文件。 */
+const chunkFragments = ref<GameChunkFragments | null>(null);
+const chunkFragmentsLoading = ref(false);
+const chunkFragmentsError = ref("");
+const chunkInspectPending = ref(false);
+/** 碎片清单的请求序号：只让最后一次请求的结果落到界面上。 */
+let chunkFragmentsRequest = 0;
 const showDevPackageConfirm = ref(false);
 const confirmAction = ref<"cancelDownload" | "deleteGame" | "uninstallLauncher">("deleteGame");
 const activeSettingsTab = ref<SettingsTab>("preferences");
@@ -1208,6 +1226,10 @@ async function selectPlatformGame(id: PlatformGameId) {
   showMenu.value = false;
   showInstallConfirm.value = false;
   showGameChunkImportGuide.value = false;
+  selectedChunkFiles.value = [];
+  chunkFileInspections.value = [];
+  chunkFragments.value = null;
+  chunkFragmentsError.value = "";
   applyGameScopedState(id);
   if (hasOnSetContent.value) startCharacterBannerRotation();
   if (isGamePageActive.value) {
@@ -1611,6 +1633,55 @@ const showGameChunkImportAction = computed(
     launcherState.value !== "downloaded" &&
     !hasCompleteDownloadedArchive.value,
 );
+
+/** 选中文件 ↔ 这一版应有包的对照结果：绿/黄/红/灰全在这一份里。 */
+const chunkSelection = computed(() =>
+  matchChunkSelection(chunkFragments.value?.fragments ?? [], chunkFileInspections.value),
+);
+
+/**
+ * 真正交给 Rust 的路径。
+ * 清单模式只收“对得上”的（名字+大小，或改名但大小唯一）；没有清单时收所有能打开的 zip，
+ * 缺什么由导入结果说话 —— 这条退路保证清单挂了也不影响玩家导碎片。
+ */
+const chunkImportPaths = computed(() => {
+  if (!chunkFragments.value) return importablePathsWithoutManifest(chunkFileInspections.value);
+  return chunkSelection.value.importablePaths;
+});
+
+const chunkCanStartImport = computed(
+  () =>
+    chunkImportPaths.value.length > 0 &&
+    !gameChunkImportPending.value &&
+    !chunkInspectPending.value,
+);
+
+const chunkImportDescription = computed(() => {
+  const meta = chunkFragments.value;
+  if (!meta) {
+    return "把从网盘或 QQ 群下载到的碎片压缩包选中即可（不用解压）—— 启动器会按官方清单逐个文件核对，已经对上的不会重复拷贝。";
+  }
+  return `这一版需要 ${meta.fragments.length} 个压缩包（共 ${formatBytes(meta.totalBytes)}）。从下面任一渠道下载后不用解压，直接选中 zip 文件即可 —— 启动器会按官方清单核对包是否齐全，再逐个文件校验，已经对上的不会重复拷贝。`;
+});
+
+const chunkImportHint = computed(() => {
+  if (chunkInspectPending.value) return "正在检查选中的压缩包…";
+  if (!chunkFragments.value) {
+    if (chunkFragmentsLoading.value) return "正在读取这一版的碎片清单…";
+    return chunkFragmentsError.value || "选中下载到的 zip 文件即可，包名不影响识别。";
+  }
+  const invalidSelected = chunkSelection.value.rows.filter(
+    (row) => row.status === "size-mismatch" || row.status === "invalid",
+  );
+  if (invalidSelected.length > 0) {
+    return `有 ${invalidSelected.length} 个已选文件对不上这一版，请重新下载后再试。`;
+  }
+  const missing = chunkSelection.value.rows.filter((row) => row.status === "missing");
+  if (missing.length === 0) return "所有包都齐了，可以开始导入。";
+  const names = missing.slice(0, 2).map((row) => row.fileName).join("、");
+  const more = missing.length > 2 ? " 等" : "";
+  return `还差 ${missing.length} 个：${names}${more}。也可以先导入已有的部分。`;
+});
 
 const primaryActionSpinning = computed(() => {
   if (
@@ -2841,6 +2912,9 @@ async function finalizeGamePackageInstall() {
     installProgressItems.value = null;
     downloadPauseRequested.value = false;
     await ensureInstallProgressListener();
+    // 安装前那次整包复核靠 `game-package-scan-progress` 心跳报进度；
+    // 这条监听器挂在下载侧，从“导入碎片”进来的会话没下载过，必须在这里补挂。
+    await ensureDownloadProgressListener();
 
     // ① 先核一遍整包，没核过之前不做任何"安装"动作（也不写 ready 状态）。
     const verifiedPlan = await verifyInstalledPackageFiles(manifest);
@@ -3553,7 +3627,12 @@ async function ensureDownloadProgressListener() {
     } else if (importingFragments) {
       // 导入碎片走的是同一份进度事件（字节 + 文件数），喂给"正在导入碎片 N/M"那一行。
       // 千万别在这里落盘状态：导入中途的字节数不代表"下载完了"。
-      repairProgressPercent.value = Math.max(0, Math.min(100, payload.percent || 0));
+      // 进度按同一把尺子缩到前 90%（导入顶替的就是"下载"那一段）：
+      // 否则导入跑到 100%、一切到"已下载"就掉回 90%，看起来像倒退。
+      repairProgressPercent.value = Math.max(
+        0,
+        Math.min(DOWNLOAD_PROGRESS_SHARE, ((payload.percent || 0) * DOWNLOAD_PROGRESS_SHARE) / 100),
+      );
       repairProgressItems.value = {
         checked: Math.max(0, payload.doneFiles ?? 0),
         total: Math.max(0, payload.totalFiles ?? 0),
@@ -3847,16 +3926,15 @@ async function installDownloadedGameArchive() {
 /**
  * 玩家从网盘 / QQ 群拿到的碎片，导入进安装目录。
  *
- * 碎片有两种形态（AxTools《生成碎片》产出的）：保持目录结构的散件（分片），
- * 以及压缩包（影片各自一个、其余文件一个）—— 压缩包里的条目名就是清单里的相对路径，
- * 所以这里不用关心哪个包装了什么，**和下载共用同一把尺子**：
- * 目标位置的文件 size + sha256 对得上清单就算"已就位"，对上的直接跳过。
- * 于是导入是幂等的：导到一半中断、再点一次不会白拷。
+ * 入口是“选文件”而不是“选文件夹”：下载下来本来就是几个 zip，再让人找文件夹只会
+ * 让玩家以为自己还得先解压。选中的文件先过一遍轻量体检（Rust 只读 zip 中央目录，
+ * 不解压），再按网络上的碎片清单标成绿/黄/红；真正的裁判仍是导入时逐个文件的
+ * size + sha256 —— 和下载共用同一把尺子，对上的直接跳过，所以导入是幂等的。
  */
 async function importGameChunks() {
   if (gameChunkImportDisabled.value) return;
-  const selected = selectedChunkFolder.value;
-  if (!selected) return;
+  const sources = chunkImportPaths.value;
+  if (sources.length === 0) return;
   showGameChunkImportGuide.value = false;
 
   const previousState = launcherState.value;
@@ -3867,6 +3945,9 @@ async function importGameChunks() {
     repairProgressPercent.value = 0;
     repairProgressItems.value = null;
     launcherState.value = "checking";
+    // 导入不经过下载，没人替我们注册监听器 —— 必须在这里挂上，
+    // 否则 Rust 发来的导入进度和安装前校验心跳全被丢掉（进度条一直 0）。
+    await ensureDownloadProgressListener();
 
     // 清单和本地核对都走下载那条既有链路（resolveGamePackage），不另造一份清单来源。
     const { manifest } = await resolveGamePackage();
@@ -3881,7 +3962,7 @@ async function importGameChunks() {
     const result = await invoke<GamePackageImportSummary>("import_game_package_files", {
       installPath: installPath.value,
       files: manifest.files,
-      sourceDirectory: selected,
+      sources,
     });
 
     const complete = result.missing.length === 0 && result.mismatched.length === 0;
@@ -3912,38 +3993,170 @@ async function importGameChunks() {
     showCheckResult(`导入碎片失败：${formatUnknownError(error)}`);
   } finally {
     gameChunkImportPending.value = false;
-    selectedChunkFolder.value = "";
+    selectedChunkFiles.value = [];
+    chunkFileInspections.value = [];
   }
 }
 
 function describeImportSuccess(result: GamePackageImportSummary) {
-  return `已导入 ${result.importedFiles} 个文件（${bytesToMb(result.importedBytes).toFixed(1)} MB），可以开始安装。`;
+  // 坏包里的文件如果本来就已经就位，整包仍然算齐 —— 这时候要顺带提一句，
+  // 否则玩家会以为“坏一个包也没事”，下次还拿同一个坏包去装别的机器。
+  const broken = result.brokenArchives ?? [];
+  const brokenNote =
+    broken.length > 0
+      ? `（另有 ${broken.length} 个压缩包打不开，不过里面需要的文件已经就位）`
+      : "";
+  return `已导入 ${result.importedFiles} 个文件（${bytesToMb(result.importedBytes).toFixed(1)} MB）${brokenNote}，可以开始安装。`;
 }
 
 function describeImportIncomplete(result: GamePackageImportSummary) {
+  const broken = result.brokenArchives ?? [];
   const parts: string[] = [];
+  if (broken.length > 0) {
+    parts.push(`有 ${broken.length} 个压缩包打不开（${broken.slice(0, 2).join("、")}）`);
+  }
   if (result.missing.length > 0) {
     parts.push(`缺 ${result.missing.length} 个（${result.missing.slice(0, 3).join("、")}）`);
   }
   if (result.mismatched.length > 0) {
     parts.push(`有 ${result.mismatched.length} 个内容对不上（${result.mismatched.slice(0, 3).join("、")}）`);
   }
-  return `碎片还不齐：${parts.join("；")}。补齐后再点一次导入，已经对上的不会重拷。`;
+  const advice =
+    broken.length > 0
+      ? "把打不开的包重新下载一次再点导入，已经对上的不会重拷。"
+      : "补齐后再点一次导入，已经对上的不会重拷。";
+  return `碎片还不齐：${parts.join("；")}。${advice}`;
 }
 
 function openGameChunkImportGuide() {
   if (gameChunkImportDisabled.value) return;
-  selectedChunkFolder.value = "";
+  selectedChunkFiles.value = [];
+  chunkFileInspections.value = [];
   showGameChunkImportGuide.value = true;
+  void loadGameChunkFragments();
 }
 
-async function chooseGameChunkFolder() {
+/**
+ * 读这一版的碎片清单（`latest.json` → `fragmentsUrl`）。
+ *
+ * 只走下载站：碎片是网盘分发的，GitHub 备用源上没有这份东西。拿不到就退化成
+ * “直接选文件、导入后判齐”——清单只负责好看，不能把导入本身堵死。
+ */
+async function loadGameChunkFragments() {
+  const request = ++chunkFragmentsRequest;
+  const requestedGameId = activeGameId.value;
+  const isStale = () =>
+    request !== chunkFragmentsRequest || activeGameId.value !== requestedGameId;
+  const config = currentGamePackageConfig();
+  if (!config) {
+    chunkFragments.value = null;
+    chunkFragmentsError.value = "当前游戏还没有接入碎片清单，直接选择压缩包即可。";
+    return;
+  }
+  chunkFragmentsLoading.value = true;
+  chunkFragmentsError.value = "";
+  try {
+    const pointer = await fetchRemoteJson<Record<string, unknown>>(
+      withCacheBuster(gamePackageManifestUrl(config.productSegment)),
+    );
+    // 等网络的这几秒里玩家可能已经切了档位，别把上一个游戏的包名写进这一档。
+    if (isStale()) return;
+    const fragmentsUrl =
+      typeof pointer.fragmentsUrl === "string" ? pointer.fragmentsUrl.trim() : "";
+    if (!/^https?:\/\//i.test(fragmentsUrl)) {
+      chunkFragments.value = null;
+      chunkFragmentsError.value = "这一版没有发布碎片清单，直接选择压缩包即可。";
+      return;
+    }
+    const parsed = parseGameChunkFragments(
+      await fetchRemoteJson<unknown>(withCacheBuster(fragmentsUrl)),
+      typeof pointer.version === "string" ? pointer.version : undefined,
+    );
+    if (isStale()) return;
+    chunkFragments.value = parsed;
+    if (!parsed) chunkFragmentsError.value = "碎片清单格式不对，直接选择压缩包即可。";
+  } catch (error) {
+    console.warn("Unable to load game chunk fragments", error);
+    if (isStale()) return;
+    chunkFragments.value = null;
+    chunkFragmentsError.value = "读不到这一版的碎片清单，直接选择压缩包即可。";
+  } finally {
+    if (!isStale()) chunkFragmentsLoading.value = false;
+  }
+}
+
+async function chooseGameChunkFiles() {
   const selected = await open({
-    multiple: false,
-    directory: true,
-    title: "选择游戏碎片所在文件夹",
+    multiple: true,
+    directory: false,
+    title: "选择游戏碎片压缩包",
+    filters: [{ name: "碎片压缩包", extensions: ["zip"] }],
   });
-  if (typeof selected === "string") selectedChunkFolder.value = selected;
+  if (!selected) return;
+  const paths = Array.isArray(selected) ? selected : [selected];
+  await addGameChunkFiles(paths);
+}
+
+/** 再选一次是追加（按路径去重），玩家想一个一个加也行。 */
+async function addGameChunkFiles(paths: string[]) {
+  const merged = [...selectedChunkFiles.value];
+  for (const path of paths) {
+    if (!merged.includes(path)) merged.push(path);
+  }
+  selectedChunkFiles.value = merged;
+  await inspectGameChunkFiles();
+}
+
+async function inspectGameChunkFiles() {
+  if (selectedChunkFiles.value.length === 0) {
+    chunkFileInspections.value = [];
+    return;
+  }
+  chunkInspectPending.value = true;
+  try {
+    chunkFileInspections.value = await invoke<GameChunkFileInspection[]>(
+      "inspect_game_chunk_files",
+      { paths: selectedChunkFiles.value },
+    );
+  } catch (error) {
+    console.warn("Unable to inspect game chunk files", error);
+    chunkFileInspections.value = [];
+  } finally {
+    chunkInspectPending.value = false;
+  }
+}
+
+async function removeGameChunkFile(path: string) {
+  selectedChunkFiles.value = selectedChunkFiles.value.filter((item) => item !== path);
+  await inspectGameChunkFiles();
+}
+
+function removeChunkRow(row: ChunkSelectionRow) {
+  if (row.selectedPath) void removeGameChunkFile(row.selectedPath);
+}
+
+function clearGameChunkFiles() {
+  selectedChunkFiles.value = [];
+  chunkFileInspections.value = [];
+}
+
+function chunkStatusLabel(row: ChunkSelectionRow) {
+  switch (row.status) {
+    case "ready":
+      return "已就绪";
+    case "renamed":
+      return "已识别（按大小）";
+    case "size-mismatch":
+      return "大小不符，可能没下完";
+    case "invalid":
+      return "不是有效的压缩包";
+    default:
+      return "未选择";
+  }
+}
+
+function chunkUnexpectedLabel(file: GameChunkFileInspection) {
+  return file.isZip ? "不是这一版的包" : "不是有效的压缩包";
 }
 
 async function openGameChunkSource(url: string) {
@@ -5460,11 +5673,7 @@ provide(settingsContextKey, settingsContext);
             <X :size="23" stroke-width="2.5" />
           </button>
           <h2>导入碎片</h2>
-          <p class="chunk-import-description">
-            游戏碎片是把完整游戏包拆开后的文件：分片保持原来的目录结构，影片和其余文件是压缩包。
-            从网盘或 QQ 群下载后，选放着这些文件的文件夹就行 —— 压缩包不用自己解压，启动器会直接读，
-            已经对上的文件也不会重复拷贝。
-          </p>
+          <p class="chunk-import-description">{{ chunkImportDescription }}</p>
           <span class="chunk-import-section-title">获取游戏碎片</span>
           <div class="chunk-source-actions" aria-label="游戏碎片下载渠道">
             <button v-for="source in chunkImportSources" :key="source.name" type="button" @click="openGameChunkSource(source.url)">
@@ -5472,19 +5681,71 @@ provide(settingsContextKey, settingsContext);
               <span>{{ source.name }}</span>
             </button>
           </div>
-          <span class="chunk-import-section-title">选择碎片文件夹</span>
-          <div class="install-path-row chunk-folder-row">
-            <span>{{ selectedChunkFolder || "尚未选择碎片文件夹" }}</span>
-            <button type="button" @click="chooseGameChunkFolder">选择</button>
+          <span class="chunk-import-section-title">
+            本次需要的碎片
+            <em v-if="chunkFragments" class="chunk-expected-summary">
+              {{ chunkFragments.fragments.length }} 个 · 已就绪 {{ chunkSelection.readyCount }}/{{ chunkSelection.rows.length }}
+            </em>
+          </span>
+          <div v-if="chunkFragments" class="chunk-expected-list">
+            <div
+              v-for="row in chunkSelection.rows"
+              :key="row.fileName"
+              class="chunk-expected-row"
+              :class="`is-${row.status}`"
+            >
+              <span class="chunk-expected-mark" aria-hidden="true">{{
+                row.status === "ready" || row.status === "renamed" ? "✓" : row.status === "missing" ? "○" : "!"
+              }}</span>
+              <span class="chunk-expected-name" :title="row.fileName">{{ row.fileName }}</span>
+              <span class="chunk-expected-size" :title="`${row.expectedFiles} 个文件`">{{ formatBytes(row.actualBytes ?? row.expectedBytes) }}</span>
+              <span class="chunk-expected-state">{{ chunkStatusLabel(row) }}</span>
+              <button
+                v-if="row.selectedPath"
+                class="chunk-expected-remove"
+                type="button"
+                aria-label="移除"
+                @click="removeChunkRow(row)"
+              >×</button>
+              <span v-else class="chunk-expected-remove" aria-hidden="true"></span>
+            </div>
+            <div
+              v-for="file in chunkSelection.unexpected"
+              :key="file.path"
+              class="chunk-expected-row is-invalid"
+            >
+              <span class="chunk-expected-mark" aria-hidden="true">!</span>
+              <span class="chunk-expected-name" :title="file.path">{{ file.fileName }}</span>
+              <span class="chunk-expected-size">{{ formatBytes(file.sizeBytes) }}</span>
+              <span class="chunk-expected-state">{{ chunkUnexpectedLabel(file) }}</span>
+              <button
+                class="chunk-expected-remove"
+                type="button"
+                aria-label="移除"
+                @click="removeGameChunkFile(file.path)"
+              >×</button>
+            </div>
           </div>
-          <p class="chunk-import-hint">选放碎片的那一层就行，启动器会在里面（含子文件夹）自动找当前版本的文件，压缩包也会打开看。</p>
+          <div class="chunk-file-actions">
+            <button type="button" @click="chooseGameChunkFiles">
+              <PackageOpen :size="20" />
+              <span>选择压缩包…</span>
+            </button>
+            <button
+              v-if="selectedChunkFiles.length > 0"
+              class="chunk-file-clear"
+              type="button"
+              @click="clearGameChunkFiles"
+            >清除</button>
+          </div>
+          <p class="chunk-import-hint">{{ chunkImportHint }}</p>
           <button
             class="install-continue chunk-import-continue"
             type="button"
-            :disabled="!selectedChunkFolder || gameChunkImportPending"
+            :disabled="!chunkCanStartImport"
             @click="importGameChunks"
           >
-            开始导入
+            {{ gameChunkImportPending ? "正在导入…" : "开始导入" }}
           </button>
         </section>
       </div>

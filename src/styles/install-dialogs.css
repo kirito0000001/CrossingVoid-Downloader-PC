@@ -157,10 +157,138 @@
   background: color-mix(in srgb, var(--cv-theme-support) 70%, var(--cv-theme-accent) 30%);
 }
 
-.chunk-folder-row {
-  width: 770px;
-  height: 64px;
+.chunk-expected-summary {
+  margin-left: 8px;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 15px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.chunk-expected-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   margin-top: 9px;
+  max-height: 216px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.chunk-expected-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 96px 170px 24px;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--cv-theme-support) 70%, transparent);
+  font-size: 16px;
+  font-weight: 850;
+}
+
+.chunk-expected-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chunk-expected-size {
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 15px;
+  text-align: right;
+}
+
+.chunk-expected-state {
+  font-size: 15px;
+  text-align: right;
+}
+
+.chunk-expected-mark {
+  display: grid;
+  place-items: center;
+  font-size: 17px;
+}
+
+.chunk-expected-row.is-ready,
+.chunk-expected-row.is-renamed {
+  border-color: rgba(86, 214, 128, 0.5);
+}
+
+.chunk-expected-row.is-ready .chunk-expected-mark,
+.chunk-expected-row.is-ready .chunk-expected-state,
+.chunk-expected-row.is-renamed .chunk-expected-mark,
+.chunk-expected-row.is-renamed .chunk-expected-state {
+  color: #62d98a;
+}
+
+.chunk-expected-row.is-missing {
+  opacity: 0.66;
+}
+
+.chunk-expected-row.is-size-mismatch {
+  border-color: rgba(240, 190, 80, 0.55);
+}
+
+.chunk-expected-row.is-size-mismatch .chunk-expected-mark,
+.chunk-expected-row.is-size-mismatch .chunk-expected-state {
+  color: #f0be50;
+}
+
+.chunk-expected-row.is-invalid {
+  border-color: rgba(255, 112, 106, 0.6);
+}
+
+.chunk-expected-row.is-invalid .chunk-expected-mark,
+.chunk-expected-row.is-invalid .chunk-expected-state {
+  color: #ff706a;
+}
+
+.chunk-expected-remove {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  color: rgba(255, 255, 255, 0.55);
+  background: transparent;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.chunk-expected-remove:hover {
+  color: #fff;
+}
+
+.chunk-file-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.chunk-file-actions button {
+  height: 46px;
+  padding: 0 18px;
+  border: 1px solid color-mix(in srgb, var(--cv-panel-accent) 44%, rgba(255, 255, 255, 0.16));
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: rgba(255, 255, 255, 0.9);
+  background: color-mix(in srgb, var(--cv-theme-support) 84%, transparent);
+  font-size: 16px;
+  font-weight: 900;
+}
+
+.chunk-file-actions button:hover {
+  border-color: var(--cv-panel-accent);
+  color: #fff;
+}
+
+.chunk-file-actions .chunk-file-clear {
+  color: rgba(255, 255, 255, 0.66);
+  background: transparent;
 }
 
 .chunk-import-hint {
