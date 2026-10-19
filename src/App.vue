@@ -3028,6 +3028,10 @@ async function finalizeGamePackageInstall() {
       throw new GamePackageError("hash-mismatch", describeMissingPackageFiles(verifiedPlan));
     }
 
+    // 校验过了，后面还有写状态、建快捷方式、装 VC++ 运行库这些收尾。
+    // 它们可能要几十秒（运行库安装器甚至要等 UAC），界面不能一直停在"校验安装包 100%"。
+    installProgressStage.value = "finishing";
+
     const prunePaths = activeGamePackagePlan.value?.prune ?? [];
     if (prunePaths.length > 0) {
       await invoke("prune_game_package", {

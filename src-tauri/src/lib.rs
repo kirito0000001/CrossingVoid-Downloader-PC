@@ -1187,16 +1187,28 @@ fn launch_game(
 }
 
 #[tauri::command]
-fn create_game_desktop_shortcut_now(
+async fn create_game_desktop_shortcut_now(
     install_path: String,
     game: Option<GameIdentity>,
 ) -> Result<(), String> {
-    create_game_desktop_shortcut_with(&PathBuf::from(install_path), &game.unwrap_or_default())
+    // Tauri 的同步命令跑在主线程上：建快捷方式要起一次 PowerShell（1~3 秒），
+    // 留在主线程会把窗口钉成"未响应"，安装收尾时尤其明显。
+    tauri::async_runtime::spawn_blocking(move || {
+        create_game_desktop_shortcut_with(&PathBuf::from(install_path), &game.unwrap_or_default())
+    })
+    .await
+    .map_err(|error| format!("Desktop shortcut task failed: {}", error))?
 }
 
 #[tauri::command]
-fn install_vc_redist(app: AppHandle, install_path: String) -> Result<(), String> {
-    install_vc_redist_internal(Some(&app), &PathBuf::from(install_path))
+async fn install_vc_redist(app: AppHandle, install_path: String) -> Result<(), String> {
+    // 同上，而且更重：msiexec / VC_redist 可能要跑几十秒，没装过时还会弹 UAC。
+    // 以前这个同步命令直接把事件循环卡住 —— 界面停在"校验安装包 100%"，Windows 判定未响应。
+    tauri::async_runtime::spawn_blocking(move || {
+        install_vc_redist_internal(Some(&app), &PathBuf::from(install_path))
+    })
+    .await
+    .map_err(|error| format!("VC++ redistributable task failed: {}", error))?
 }
 
 #[tauri::command]
