@@ -1992,14 +1992,27 @@ const showOfficialTrafficWarning = computed(
 const showOfficialTrafficThrottled = computed(
   () => downloadSource.value === "official" && trafficQuota.value?.throttled === true,
 );
-const githubNetworkWarningText = computed(() =>
-  githubNetworkStatus.value
-    ? githubNetworkWarning(githubNetworkStatus.value, {
-        // 玩家自己把「GitHub 走系统代理」关了就是故意走直连，别再唠叨"未开启网络代理"。
-        proxyDisabledByUser: !githubUseSystemProxy.value,
-      })
-    : "",
-);
+/**
+ * 实测速度健康时，不要再拿"网络不好"唱衰。
+ *
+ * `get_github_network_status` 是开机/切源时的一次快照（系统代理 + 请求一次 github.com），
+ * 它不知道真正的下载速度。2026-10-19 现场：Github 源跑到十几 MB/s，右上角还在报
+ * "未开启网络代理，下载会很慢" —— 只要估算速度过线，这条提示直接闭嘴。
+ */
+const GITHUB_WARNING_HEALTHY_SPEED_BYTES = 1_000_000;
+const githubNetworkWarningText = computed(() => {
+  if (!githubNetworkStatus.value) return "";
+  const warning = githubNetworkWarning(githubNetworkStatus.value, {
+    // 玩家自己把「GitHub 走系统代理」关了就是故意走直连，别再唠叨"未开启网络代理"。
+    proxyDisabledByUser: !githubUseSystemProxy.value,
+  });
+  if (!warning) return "";
+  const estimate = downloadEstimate.value;
+  if (estimate.status === "ready" && estimate.bytesPerSecond >= GITHUB_WARNING_HEALTHY_SPEED_BYTES) {
+    return "";
+  }
+  return warning;
+});
 const showGithubNetworkWarning = computed(
   () => downloadSource.value === "github" && Boolean(githubNetworkWarningText.value),
 );

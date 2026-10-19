@@ -699,6 +699,17 @@ UI 展示“服务器可用下载流量”，按所有可用流量包汇总。�
 另外玩家自己关掉「GitHub 走系统代理」之后，`githubNetworkWarning` 不再唠叨"未开启网络代理"
 （传 `proxyDisabledByUser`）—— 那本来就是他选的直连。
 
+**"没检测到代理"不等于"网络差"**（2026-10-19 修）：当初 `!proxyDetected` 会无条件报
+"当前未开启网络代理，下载会很慢"，但玩家可能是 TUN/透明代理（系统代理里看不到），
+也可能直连本来就快 —— 现场截图里下载已经跑到十几 MB/s，横幅还在唱衰。现在两层收口：
+
+1. `githubNetworkWarning` 只在探测**真的**不通或 `latencyMs >= 2000` 时才提示；
+   直连快就一个字都不说（文案也从"下载会很慢"改成"GitHub 连接不稳定，可开启代理"）；
+2. `githubNetworkWarningText` 会用实测下载速度压掉提示：`downloadTimeEstimator`
+   的 10 秒窗口估算 ≥ 1 MB/s 时，横幅和设置页都不再显示这条警告（探测只是开机那一下的快照）。
+
+设置页的「代理：未检测到网络代理 / 延迟 N ms」仍然保留 —— 那是事实，不是评价。
+
 `TrafficQuotaAlert.ps1` 与 `Install-TrafficQuotaAlert.ps1` 在服务器上每 5 分钟检查一次状态，并复用 Watchdog 邮件配置发送不足/恢复邮件。凭据文件只在服务器，不进入本仓库。
 
 ## 17. OnSet 内容
