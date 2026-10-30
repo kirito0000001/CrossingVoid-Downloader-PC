@@ -59,6 +59,8 @@ export type TranslationKey =
   | "installStage.verifying"
   | "installStage.extracting"
   | "installStage.finishing"
+  | "installStage.patchDownloading"
+  | "installStage.patchApplying"
   | "status.ready"
   | "status.paused"
   | "status.waiting"
@@ -305,6 +307,8 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "installStage.verifying": "校验安装包",
     "installStage.extracting": "解压资源",
     "installStage.finishing": "完成安装",
+    "installStage.patchDownloading": "下载补丁",
+    "installStage.patchApplying": "应用补丁",
     "status.ready": "资源完整",
     "status.paused": "已暂停",
     "status.waiting": "等待下载",
@@ -539,6 +543,8 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "installStage.verifying": "校驗安裝包",
     "installStage.extracting": "解壓資源",
     "installStage.finishing": "完成安裝",
+    "installStage.patchDownloading": "下載補丁",
+    "installStage.patchApplying": "套用補丁",
     "status.ready": "資源完整",
     "status.paused": "已暫停",
     "status.waiting": "等待下載",
@@ -773,6 +779,8 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "installStage.verifying": "Verifying package",
     "installStage.extracting": "Extracting files",
     "installStage.finishing": "Finishing install",
+    "installStage.patchDownloading": "Downloading patch",
+    "installStage.patchApplying": "Applying patch",
     "status.ready": "Ready",
     "status.paused": "Paused",
     "status.waiting": "Waiting",
@@ -1007,6 +1015,8 @@ export const translations: Record<LauncherLanguage, Record<TranslationKey, strin
     "installStage.verifying": "パッケージ確認中",
     "installStage.extracting": "リソース展開中",
     "installStage.finishing": "インストール完了中",
+    "installStage.patchDownloading": "パッチをダウンロード中",
+    "installStage.patchApplying": "パッチを適用中",
     "status.ready": "準備完了",
     "status.paused": "一時停止中",
     "status.waiting": "待機中",

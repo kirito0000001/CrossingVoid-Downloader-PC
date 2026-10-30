@@ -34,6 +34,7 @@ use windows_sys::Win32::System::Threading::{
 mod download_task;
 mod feedback;
 mod game_package;
+mod game_patch;
 mod single_instance;
 mod webview_cleanup;
 
@@ -2990,7 +2991,10 @@ fn verify_game_manifest_internal(
     install_path: String,
 ) -> Result<ManifestVerifySummary, String> {
     let install_dir = PathBuf::from(&install_path);
-    let manifest_path = install_dir.join("CrossingVoid.manifest.json");
+    // 新安装的状态文件叫 `launcher.game.json`，老安装才叫 `CrossingVoid.manifest.json`；
+    // 以前这里写死老名字，导致新装机器一点「验证游戏完整性」就报“找不到清单”。
+    // 增量补丁把合并后的哈希写进同一个状态文件，验证也必须读它才对得上。
+    let manifest_path = game_package::state_path(&install_dir);
     let manifest_text = fs::read_to_string(&manifest_path).map_err(|error| {
         format!(
             "Unable to read game manifest {}: {}",
@@ -5176,6 +5180,7 @@ pub fn run() {
             game_package::prune_game_package,
             game_package::read_game_package_state,
             game_package::write_game_package_state,
+            game_patch::install_game_patch,
             dev_get_launcher_version,
             dev_get_published_launcher_version,
             dev_set_launcher_version,

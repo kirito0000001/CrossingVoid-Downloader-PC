@@ -157,8 +157,9 @@ exit 1
 
 启动器的导入框靠这份文件才知道“这一版应该有哪几个包”：
 
-- 位置由 `latest.json` 的 `fragmentsUrl` 给出（当前是
-  `https://dl.crossingvoid.top/games/crossingvoid/fragments/0.6.0.json`）；
+- 位置由 `latest.json` 的 `fragmentsUrl` 给出（2026-10-26 起是
+  `https://www.crossingvoid.top/games/crossingvoid/fragments/0.6.0.json`；启动器只认这个字段，
+  不认主机名 —— 换服务器不用发新版启动器，改清单即可）；
 - `version` 必须与 `latest.json.version` 一致，不一致整份忽略 —— 宁可退化成
   “直接选文件、导入后判齐”，也不能把上一版的包名摆给玩家；
 - `sizeBytes` 用文件实际字节数，`fileCount` 是包内非目录条目数；
@@ -200,7 +201,7 @@ exit 1
 
 | 行为 | 位置 |
 | --- | --- |
-| 读碎片清单（`latest.json` → `fragmentsUrl`，版本不一致判无效） | `src/App.vue` `loadGameChunkFragments` / `src/gameChunkFragments.ts` |
+| 读碎片清单（`latest.json` → `fragmentsUrl`，读失败退 GitHub 兜底，版本不一致判无效） | `src/App.vue` `loadGameChunkFragments` / `src/gameChunkFragments.ts` |
 | 选中文件的轻量体检（只读 zip 中央目录，不解压） | `game_package.rs` `inspect_game_chunk_files` |
 | 选中文件 ↔ 应有包的对照（绿/黄/红/灰） | `src/gameChunkFragments.ts` `matchChunkSelection` |
 | 包名对不上时按大小唯一认（重发前的旧名包、玩家改过名） | `src/gameChunkFragments.ts` `matchChunkSelection`（`renamed` 分支） |

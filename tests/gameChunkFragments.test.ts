@@ -6,9 +6,11 @@ import {
   GITHUB_FRAGMENTS_TAG,
   githubFragmentsManifestUrl,
   importablePathsWithoutManifest,
+  loadGameChunkFragmentsFromSources,
   matchChunkSelection,
   parseGameChunkFragments,
   resolveGameChunkFragmentsSource,
+  resolveGameChunkFragmentsSources,
   type GameChunkFileInspection,
   type GameChunkFragment,
 } from "../src/gameChunkFragments";
@@ -77,6 +79,36 @@ describe("碎片清单来源（下载站优先，GitHub 兜底）", () => {
     expect(
       resolveGameChunkFragmentsSource({ pointer: { version: "1.0.0" }, githubFallbackUrl: "   " }),
     ).toBeNull();
+    expect(resolveGameChunkFragmentsSources({ pointer: null, githubFallbackUrl: null })).toEqual([]);
+  });
+
+  it("候选按优先级排：latest.fragmentsUrl 第一，GitHub 第二，都带同一份版本", () => {
+    // 2026-10-26 清单主地址迁到 www（阿里云），dl 只留 latest.json；
+    // 启动器不认主机名，只认这个字段 —— 换地址不用发新版。
+    expect(
+      resolveGameChunkFragmentsSources({
+        pointer: { version: "0.6.0", fragmentsUrl: downloadStation },
+        githubFallbackUrl: github,
+      }),
+    ).toEqual([
+      { url: downloadStation, expectedVersion: "0.6.0", source: "download-station" },
+      { url: github, expectedVersion: "0.6.0", source: "github" },
+    ]);
+  });
+
+  it("首选地址和兜底地址相同时只留一条，不白请求两次", () => {
+    expect(
+      resolveGameChunkFragmentsSources({
+        pointer: { version: "0.6.0", fragmentsUrl: github },
+        githubFallbackUrl: github,
+      }),
+    ).toEqual([{ url: github, expectedVersion: "0.6.0", source: "download-station" }]);
+  });
+
+  it("只有 GitHub 的档位（幻杀）候选里就只有它", () => {
+    expect(
+      resolveGameChunkFragmentsSources({ pointer: null, githubFallbackUrl: ` ${github} ` }),
+    ).toEqual([{ url: github, source: "github" }]);
   });
 
   it("兜底地址按固定 tag 与附件名拼，非法仓库名返回 null", () => {
@@ -110,19 +142,115 @@ describe("碎片清单来源（下载站优先，GitHub 兜底）", () => {
       .toBeUndefined();
   });
 
-  it("App.vue 先把下载站当首选、再兜底，且不发下载站的档位不白跑一次 404", () => {
+  it("App.vue 先把 latest.fragmentsUrl 当首选、再兜底，且不发下载站的档位不白跑一次 404", () => {
     const appSource = readFileSync(resolve(process.cwd(), "src/App.vue"), "utf8");
     const loader = appSource.slice(
       appSource.indexOf("async function loadGameChunkFragments"),
       appSource.indexOf("async function chooseGameChunkFiles"),
     );
     expect(loader).toContain("gamePackageSources(config).includes");
-    expect(loader).toContain("resolveGameChunkFragmentsSource");
+    expect(loader).toContain("resolveGameChunkFragmentsSources");
+    expect(loader).toContain("loadGameChunkFragmentsFromSources");
     expect(loader.indexOf("gamePackageSources(config)")).toBeLessThan(
-      loader.indexOf("resolveGameChunkFragmentsSource"),
+      loader.indexOf("resolveGameChunkFragmentsSources"),
     );
+    // 首选地址自己读失败时也要退到 GitHub（不只是"缺 fragmentsUrl"那两种）
+    expect(loader).toContain("onCandidateError");
+    // 地址不能写死：主机与版本都由 latest.json 指，服务器再搬也不用发新版启动器
+    expect(appSource).not.toContain("/games/crossingvoid/fragments/");
+    expect(loader).not.toContain("crossingvoid.top");
     // 两条来源都拿不到时必须退化成"直接选压缩包"，不能把导入堵死
     expect(loader).toContain("直接选择压缩包即可");
+  });
+});
+
+describe("loadGameChunkFragmentsFromSources（首选失败才回退）", () => {
+  const stationUrl = "https://www.crossingvoid.top/games/crossingvoid/fragments/0.6.0.json";
+  const githubUrl =
+    "https://github.com/kirito0000001/CrossingVoid/releases/download/fragments-latest/fragments.json";
+  const payload = (version = "0.6.0") => ({
+    schemaVersion: 1,
+    version,
+    fragments,
+  });
+  const sources = () =>
+    resolveGameChunkFragmentsSources({
+      pointer: { version: "0.6.0", fragmentsUrl: stationUrl },
+      githubFallbackUrl: githubUrl,
+    });
+
+  it("首选成功就停：不再碰 GitHub", async () => {
+    const calls: string[] = [];
+    const result = await loadGameChunkFragmentsFromSources({
+      sources: sources(),
+      fetchJson: async (url) => {
+        calls.push(url);
+        return payload();
+      },
+    });
+    expect(calls).toEqual([stationUrl]);
+    expect(result.source?.source).toBe("download-station");
+    expect(result.fragments?.version).toBe("0.6.0");
+    expect(result.sawRequestError).toBe(false);
+    expect(result.sawInvalidManifest).toBe(false);
+    expect(result.stale).toBe(false);
+  });
+
+  it("首选请求失败（超时/404/TLS）→ 接着读 GitHub，而不是直接说读不到", async () => {
+    const calls: string[] = [];
+    const failed: string[] = [];
+    const result = await loadGameChunkFragmentsFromSources({
+      sources: sources(),
+      fetchJson: async (url) => {
+        calls.push(url);
+        if (url === stationUrl) throw new Error("TLS handshake timeout");
+        return payload();
+      },
+      onCandidateError: (source) => failed.push(source.source),
+    });
+    expect(calls).toEqual([stationUrl, githubUrl]);
+    expect(failed).toEqual(["download-station"]);
+    expect(result.sawRequestError).toBe(true);
+    expect(result.source?.source).toBe("github");
+    expect(result.fragments?.fragments).toHaveLength(3);
+  });
+
+  it("首选返回上一版清单 → 同样退到 GitHub，旧包名不摆给玩家", async () => {
+    const result = await loadGameChunkFragmentsFromSources({
+      sources: sources(),
+      fetchJson: async (url) => (url === stationUrl ? payload("0.5.9") : payload("0.6.0")),
+    });
+    expect(result.sawInvalidManifest).toBe(true);
+    expect(result.source?.source).toBe("github");
+    expect(result.fragments?.version).toBe("0.6.0");
+  });
+
+  it("两个地址都读不到 → 返回 null，交给界面退化成直接选压缩包", async () => {
+    const result = await loadGameChunkFragmentsFromSources({
+      sources: sources(),
+      fetchJson: async () => {
+        throw new Error("offline");
+      },
+    });
+    expect(result.fragments).toBeNull();
+    expect(result.source).toBeNull();
+    expect(result.sawRequestError).toBe(true);
+    expect(result.sawInvalidManifest).toBe(false);
+  });
+
+  it("中途换了档位：立刻停手，不再请求下一个来源", async () => {
+    let calls = 0;
+    const result = await loadGameChunkFragmentsFromSources({
+      sources: sources(),
+      fetchJson: async () => {
+        calls += 1;
+        return payload();
+      },
+      isStale: () => calls > 0,
+    });
+    expect(result.stale).toBe(true);
+    expect(result.fragments).toBeNull();
+    expect(calls).toBe(1);
   });
 });
 

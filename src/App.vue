@@ -68,13 +68,21 @@ import {
 } from "./gamePackage";
 import {
   importablePathsWithoutManifest,
+  loadGameChunkFragmentsFromSources,
   matchChunkSelection,
-  parseGameChunkFragments,
-  resolveGameChunkFragmentsSource,
+  resolveGameChunkFragmentsSources,
   type ChunkSelectionRow,
   type GameChunkFileInspection,
   type GameChunkFragments,
 } from "./gameChunkFragments";
+import {
+  mergeGamePatchFiles,
+  parseGamePatchManifest,
+  parseGamePatchPointer,
+  resolveGamePatchPlan,
+  type GamePatchPointer,
+  type GamePatchSummary,
+} from "./gamePatch";
 import {
   DOWNLOAD_CHANNELS_URL,
   LAUNCHER_NOTICE_URL,
@@ -412,6 +420,16 @@ const pendingRepairSummary = ref<ManifestVerifySummary | null>(
 );
 const updateAvailable = ref(false);
 const updateDownloadPending = ref(savedDownloadState?.mode === "update");
+/**
+ * 这一轮版本检测拿到的增量补丁指针（`PC-Patch-Latest/patch-latest.json`）。
+ *
+ * 只有"本地版本落在 baseVersion 上、补丁比本地新、且比完整清单还新"时才会留下来；
+ * 其余情况一律走原来的完整更新链路。
+ */
+const gamePatchPointer = ref<GamePatchPointer | null>(null);
+const gamePatchAvailable = ref(false);
+/** 正在下载/应用补丁：进度事件照常进界面，但不能让它去写下载状态文件。 */
+const gamePatchApplying = ref(false);
 const localGameVersion = ref("");
 /** 文件级游戏包（清单 v1）：本次要装的清单与差异计划。 */
 const activeGamePackage = shallowRef<GamePackageManifest | null>(null);
@@ -678,7 +696,9 @@ const gameOperationCancelRequested = ref(false);
 const downloadTimeEstimator = new DownloadTimeEstimator();
 const downloadEstimate = ref<DownloadEstimate>({ status: "calculating" });
 const installProgressPercent = ref(0);
-const installProgressStage = ref<"merging" | "verifying" | "extracting" | "finishing">("merging");
+const installProgressStage = ref<
+  "merging" | "verifying" | "extracting" | "finishing" | "patchDownloading" | "patchApplying"
+>("merging");
 const installProgressItems = ref<{ current: number; total: number } | null>(null);
 const repairProgressPercent = ref(0);
 const repairProgressItems = ref<{ checked: number; total: number; repaired: number } | null>(null);
@@ -1170,6 +1190,8 @@ function applyGameScopedState(gameId: PlatformGameId) {
   remoteArchiveBytes.value = null;
   localGameVersion.value = "";
   updateAvailable.value = false;
+  gamePatchAvailable.value = false;
+  gamePatchPointer.value = null;
   versionCheckPending.value = false;
   lastVersionCheckAt.value = 0;
   gameRunning.value = false;
@@ -1434,7 +1456,9 @@ const progressPercent = computed(() =>
     : launcherState.value === "repairing"
     ? Math.min(100, Number(repairProgressPercent.value.toFixed(2)))
     : launcherState.value === "installing"
-    ? Math.min(100, DOWNLOAD_PROGRESS_SHARE + Number((installProgressPercent.value * 0.1).toFixed(2)))
+    ? gamePatchApplying.value
+      ? Math.min(100, Number(installProgressPercent.value.toFixed(2)))
+      : Math.min(100, DOWNLOAD_PROGRESS_SHARE + Number((installProgressPercent.value * 0.1).toFixed(2)))
     : Math.min(
         100,
         Number(
@@ -2538,6 +2562,8 @@ async function clearDiskDownloadStateForPath(pathToClear: string) {
 function clearUpdateDownloadContext() {
   updateDownloadPending.value = false;
   updateAvailable.value = false;
+  gamePatchAvailable.value = false;
+  gamePatchPointer.value = null;
 }
 
 function clearPersistedDownloadState() {
@@ -3520,11 +3546,22 @@ async function checkGameVersion(options: { manual?: boolean } = {}) {
   const gameIdAtStart = activeGameId.value;
   versionCheckPending.value = true;
   updateAvailable.value = false;
+  gamePatchAvailable.value = false;
+  gamePatchPointer.value = null;
   try {
     // 接了下载站的档位就按它自己的清单算版本；只有还没接入的档位才回退到 www 那套旧 v2 清单
     // （2026-09-20 的改造方案里写死了"不要再读 www 的 manifests/game/*"）。
     const packageConfig = currentGamePackageConfig();
-    const [localVersion, archive] = await Promise.all([
+    // 增量补丁是 GitHub 上的固定指针：读不到只是"这次没有补丁可走"，绝不能弄挂版本检测。
+    const patchPointerPromise: Promise<GamePatchPointer | null> = packageConfig?.githubPatchPointerUrl
+      ? fetchRemoteJson<unknown>(withCacheBuster(packageConfig.githubPatchPointerUrl))
+          .then(parseGamePatchPointer)
+          .catch((error) => {
+            console.warn("无法读取增量补丁指针，按完整更新处理", error);
+            return null;
+          })
+      : Promise.resolve(null);
+    const [localVersion, archive, patchPointer] = await Promise.all([
       readLocalGameVersion(),
       packageConfig
         ? fetchGamePackageManifest().then((manifest) => ({
@@ -3532,14 +3569,46 @@ async function checkGameVersion(options: { manual?: boolean } = {}) {
             sizeBytes: manifest.files.reduce((sum, entry) => sum + entry.sizeBytes, 0),
           }))
         : fetchGameMetadataArchiveInfo(),
+      patchPointerPromise,
     ]);
     // 检测期间玩家切了档：这份结果是上一档的，直接丢掉，别写到当前档的界面上。
     if (activeGameId.value !== gameIdAtStart) return;
-    remoteGameVersion.value = archive.version || "";
+
+    // 补丁只在"本地落在 baseVersion 上、比本地新"时才算候选；
+    // 再和完整清单比一次：完整清单更新时优先走完整更新（补丁只是更快的那条路）。
+    // 补丁只发 GitHub：渠道被关、或者玩家明确"只走官方源且不许换源"时，不摆这个按钮。
+    const patchRouteEnabled =
+      isDownloadChannelEnabled(downloadChannelStates.value, "github") &&
+      (downloadSource.value !== "official" || autoSourceFallback.value);
+    const patchPlan = packageConfig && patchRouteEnabled
+      ? resolveGamePatchPlan({
+          pointer: patchPointer,
+          localVersion,
+          productSegment: packageConfig.productSegment,
+          platform: packageConfig.runtime,
+          channel: "stable",
+        })
+      : ({ applies: false, reason: "no-pointer" } as const);
+    const manifestVersion = archive.version || "";
+    const candidatePatch = patchPointer && patchPlan.applies ? patchPointer : null;
+    const usePatch =
+      candidatePatch !== null && compareVersions(candidatePatch.version, manifestVersion || "0") > 0;
+    remoteGameVersion.value = usePatch && candidatePatch ? candidatePatch.version : manifestVersion;
     remoteArchiveBytes.value = archive.sizeBytes || remoteArchiveBytes.value;
+    gamePatchPointer.value = usePatch ? candidatePatch : null;
+    gamePatchAvailable.value = usePatch;
     updateAvailable.value =
       Boolean(localVersion && remoteGameVersion.value) && compareVersions(remoteGameVersion.value, localVersion) > 0;
-    const result = updateAvailable.value ? "发现新版本" : "版本已是最新";
+    if (usePatch && candidatePatch) {
+      // 带补丁时界面的"总大小"是压缩包大小（约 68 MB），不是整包 2.7 GB——
+      // 否则玩家会以为增量更新也要下满。
+      remoteArchiveBytes.value = candidatePatch.packageSizeBytes || remoteArchiveBytes.value;
+    }
+    const result = updateAvailable.value
+      ? usePatch && candidatePatch
+        ? `发现新版本（增量补丁 ${candidatePatch.version}，${formatBytes(candidatePatch.packageSizeBytes)}）`
+        : "发现新版本"
+      : "版本已是最新";
     const message = `版本检测完成：本地 ${localVersion || "未知"} / 远程 ${remoteGameVersion.value || "未知"}，${result}`;
     console.info(message);
     showCheckResult(message);
@@ -3547,6 +3616,8 @@ async function checkGameVersion(options: { manual?: boolean } = {}) {
   } catch (error) {
     console.warn(options.manual ? "Unable to check game updates manually" : "Unable to check game updates on startup", error);
     updateAvailable.value = false;
+    gamePatchAvailable.value = false;
+    gamePatchPointer.value = null;
     if (options.manual) {
       const message = downloadSource.value === "github"
         ? "Github 源检查失败：无法读取版本清单，请确认网络代理可用后重试。"
@@ -3690,6 +3761,8 @@ async function ensureInstallProgressListener() {
     if (launcherState.value === "installing") {
       if (payload.stage === "merging") installProgressStage.value = "merging";
       if (payload.stage === "verifying") installProgressStage.value = "verifying";
+      if (payload.stage === "patchDownloading") installProgressStage.value = "patchDownloading";
+      if (payload.stage === "patchApplying") installProgressStage.value = "patchApplying";
       if (payload.stage === "extracting") {
         installProgressStage.value = "extracting";
         installStage.value = "extracting";
@@ -3705,8 +3778,9 @@ async function ensureInstallProgressListener() {
       installProgressStage.value = "finishing";
       installProgressItems.value = null;
       installStage.value = "downloaded";
-      persistDownloadState("ready", "immediate");
-    } else if (launcherState.value === "installing") {
+      // 补丁自己收尾（写状态、读版本、落 ready）：别让安装链路替它写下载状态。
+      if (!gamePatchApplying.value) persistDownloadState("ready", "immediate");
+    } else if (launcherState.value === "installing" && !gamePatchApplying.value) {
       persistDownloadState("downloaded");
     }
   });
@@ -3873,6 +3947,123 @@ function resetVerificationProgressDetail() {
   verificationTotalBytes.value = 0;
   verificationCurrentFileBytes.value = 0;
   verificationCurrentFileTotalBytes.value = 0;
+}
+
+/**
+ * 应用一次 Windows 增量补丁（GitHub 固定指针 `PC-Patch-Latest`）。
+ *
+ * 和完整更新的区别只在"字节从哪来"：这里是一个累积差量 zip。
+ * Rust 侧先校整包 sha256，再把 `patch.json` 里的文件逐个 `.part` + sha256 + 原子替换，
+ * 全部落位后才写版本标记 —— 中途失败时游戏仍停在旧版本，重试会跳过已经就位的文件。
+ * 成功后把补丁文件并进本地状态清单，否则下一次核对会拿旧哈希把新文件判成损坏。
+ */
+async function applyGamePatch() {
+  const config = currentGamePackageConfig();
+  const pointer = gamePatchPointer.value;
+  if (!config || !pointer || gamePatchApplying.value) return;
+  if (!(await ensureLatestLauncherForNetworkDownload())) return;
+  // 补丁只发 GitHub：渠道被关掉时不能偷偷走它。
+  if (!isDownloadChannelEnabled(downloadChannelStates.value, "github")) {
+    showCheckResult(downloadChannelNoticeText.value || "GitHub 渠道已被关闭，暂时无法下载游戏补丁。");
+    showSettings.value = true;
+    activeSettingsTab.value = "download";
+    return;
+  }
+  if (gameRunning.value) {
+    showCheckResult("游戏正在运行，请先关闭游戏再更新补丁。");
+    return;
+  }
+
+  const gameIdAtStart = activeGameId.value;
+  const previousVersion = localGameVersion.value;
+  gamePatchApplying.value = true;
+  gameOperationCancelRequested.value = false;
+  updateDownloadPending.value = true;
+  launcherState.value = "installing";
+  installProgressStage.value = "patchDownloading";
+  installProgressPercent.value = 0;
+  installProgressItems.value = null;
+  installStage.value = "downloaded";
+
+  try {
+    // 补丁不走下载链路，没人替它挂安装进度监听器（不挂的话进度条一直是 0）。
+    await ensureInstallProgressListener();
+    const manifest = parseGamePatchManifest(
+      await fetchRemoteJson<unknown>(withCacheBuster(pointer.manifestUrl)),
+      pointer.version,
+    );
+    if (!manifest) throw new Error("补丁清单格式不对，或版本与指针不一致。");
+    if (manifest.productSegment.toLowerCase() !== pointer.productSegment.toLowerCase()) {
+      throw new Error("补丁清单的产品段与指针不一致。");
+    }
+
+    // 基础清单 + 补丁文件先算好：状态写盘交给 Rust，和版本标记紧挨着，
+    // 避免"文件已经是 0.6.2、状态还停在 0.6.0"的窗口。
+    const baseFiles = await resolveGamePatchBaseFiles();
+    const mergedFiles = baseFiles.length > 0 ? mergeGamePatchFiles(baseFiles, manifest.files) : [];
+    const summary = await invoke<GamePatchSummary>("install_game_patch", {
+      installPath: installPath.value,
+      version: manifest.version,
+      versionMarker: config.versionMarker,
+      packageUrl: pointer.packageUrl,
+      packageSizeBytes: pointer.packageSizeBytes,
+      packageSha256: pointer.packageSha256,
+      files: manifest.files,
+      productKey: config.productKey,
+      stateFiles: mergedFiles,
+    });
+    if (activeGameId.value !== gameIdAtStart) return;
+
+    await readLocalGameVersion();
+    updateAvailable.value = false;
+    gamePatchAvailable.value = false;
+    gamePatchPointer.value = null;
+    updateDownloadPending.value = false;
+    launcherState.value = "ready";
+    installProgressStage.value = "finishing";
+    installProgressPercent.value = 100;
+    persistDownloadState("ready", "immediate");
+    showCheckResult(
+      `增量补丁已应用：${previousVersion || "未知"} → ${manifest.version}，` +
+        `写入 ${summary.appliedFiles} 个文件（${summary.skippedFiles} 个原本就已就位）。`,
+    );
+  } catch (error) {
+    console.error("Game patch failed", error);
+    if (isGameOperationCancelled(error)) {
+      showCheckResult("已取消更新补丁；已经写好的文件会在下次重试时跳过。");
+    } else {
+      showCheckResult(`应用补丁失败：${formatUnknownError(error)}`);
+    }
+    // 版本标记只在全部文件落位后才写：失败后游戏仍停在旧版本，状态回到 ready 即可。
+    launcherState.value = "ready";
+    installProgressPercent.value = 0;
+    installProgressItems.value = null;
+    updateDownloadPending.value = false;
+    persistDownloadState("ready", "immediate");
+  } finally {
+    gamePatchApplying.value = false;
+    gameOperationCancelRequested.value = false;
+  }
+}
+
+/** 补丁要并进的"基础文件清单"：优先本地状态文件，没有就退回线上完整清单。 */
+async function resolveGamePatchBaseFiles(): Promise<GamePackageFile[]> {
+  try {
+    const rawState = await invoke<unknown | null>("read_game_package_state", {
+      installPath: installPath.value,
+    });
+    const state = parseGamePackageState(rawState);
+    if (state?.files?.length) return state.files;
+  } catch (error) {
+    console.warn("无法读取本地游戏状态，改用线上清单合并补丁", error);
+  }
+  try {
+    const manifest = await fetchGamePackageManifest();
+    return manifest.files;
+  } catch (error) {
+    console.warn("无法读取完整清单，本次补丁不更新状态文件", error);
+    return [];
+  }
 }
 
 async function downloadGameArchive() {
@@ -4161,16 +4352,18 @@ function openGameChunkImportGuide() {
 }
 
 /**
- * 读这一版的碎片清单（下载站 `latest.json` → `fragmentsUrl`，拿不到就走 GitHub 兜底）。
+ * 读这一版的碎片清单：**`latest.json.fragmentsUrl` 第一，GitHub 兜底第二**。
  *
- * 两条来源：
- *   ① 下载站：`dl.crossingvoid.top/games/<产品段>/latest.json` 里的 `fragmentsUrl`（首选）；
- *   ② GitHub：条目的 `githubFragmentsUrl`（固定 tag `fragments-latest`，里面**只有清单**，
- *      碎片 zip 仍然走网盘 / QQ 群）。
- * 幻杀目前根本不发下载站，整份 `latest.json` 都是 404 —— 没有兜底的话碎片导入页会一直
- * 停在"读不到这一版的碎片清单"，等于这个机制对它不可用。
+ * ① 版本指针（`dl.crossingvoid.top/games/<产品段>/latest.json`）只负责给版本号和
+ *    `fragmentsUrl`；清单本体 2026-10-26 起由 `www.crossingvoid.top`（阿里云）承接 ——
+ *    比原来的 dl（野草云）快一个数量级。启动器**不认主机名、也不拼清单地址**，
+ *    服务器把 `fragmentsUrl` 指到哪就跟到哪，不用发新版启动器。
+ * ② GitHub：条目的 `githubFragmentsUrl`（固定 tag `fragments-latest`，里面**只有清单**，
+ *    碎片 zip 仍然走网盘 / QQ 群）。
  *
- * 两条都拿不到就退化成“直接选文件、导入后判齐”：清单只负责好看，不能把导入本身堵死。
+ * 首选地址读失败（超时、404、格式不对、版本不对）都会继续试 GitHub —— 幻杀根本不发
+ * 下载站，没有兜底这个机制对它不可用。全部拿不到就退化成“直接选文件、导入后判齐”：
+ * 清单只负责好看，不能把导入本身堵死。
  */
 async function loadGameChunkFragments() {
   const request = ++chunkFragmentsRequest;
@@ -4202,11 +4395,11 @@ async function loadGameChunkFragments() {
     // 等网络的这几秒里玩家可能已经切了档位，别把上一个游戏的包名写进这一档。
     if (isStale()) return;
 
-    const source = resolveGameChunkFragmentsSource({
+    const sources = resolveGameChunkFragmentsSources({
       pointer,
       githubFallbackUrl: config.githubFragmentsUrl ?? null,
     });
-    if (!source) {
+    if (sources.length === 0) {
       chunkFragments.value = null;
       chunkFragmentsError.value = pointer
         ? "这一版没有发布碎片清单，直接选择压缩包即可。"
@@ -4214,17 +4407,20 @@ async function loadGameChunkFragments() {
       return;
     }
 
-    const parsed = parseGameChunkFragments(
-      await fetchRemoteJson<unknown>(withCacheBuster(source.url)),
-      source.expectedVersion,
-    );
-    if (isStale()) return;
-    chunkFragments.value = parsed;
-    if (!parsed) {
-      chunkFragmentsError.value =
-        source.source === "github"
-          ? "GitHub 上的碎片清单格式不对，直接选择压缩包即可。"
-          : "碎片清单格式不对，直接选择压缩包即可。";
+    const result = await loadGameChunkFragmentsFromSources({
+      sources,
+      fetchJson: (url) => fetchRemoteJson<unknown>(withCacheBuster(url)),
+      isStale,
+      onCandidateError: (source, error) => {
+        console.warn(`碎片清单读取失败（${source.source}），改用下一个来源`, source.url, error);
+      },
+    });
+    if (result.stale || isStale()) return;
+    chunkFragments.value = result.fragments;
+    if (!result.fragments) {
+      chunkFragmentsError.value = result.sawInvalidManifest
+        ? "碎片清单格式不对或不是这一版，直接选择压缩包即可。"
+        : "读不到这一版的碎片清单，直接选择压缩包即可。";
     }
   } catch (error) {
     console.warn("Unable to load game chunk fragments", error);
@@ -4613,6 +4809,11 @@ async function handlePrimaryAction() {
   }
   if (launcherState.value === "ready") {
     if (updateAvailable.value && !offlineMode.value) {
+      // 有增量补丁就走补丁（68 MB 级）；否则维持原来的完整更新链路。
+      if (gamePatchAvailable.value) {
+        await applyGamePatch();
+        return;
+      }
       updateDownloadPending.value = true;
       downloadedBytes.value = 0;
       downloadedMb.value = 0;

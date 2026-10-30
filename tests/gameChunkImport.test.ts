@@ -81,11 +81,12 @@ describe("game chunk import", () => {
     expect(appSource).toContain("chunkUnexpectedLabel(file)");
     expect(appSource).toContain("chunkSelection.readyCount");
     expect(appSource).toContain(':disabled="!chunkCanStartImport"');
-    // 清单地址由 resolveGameChunkFragmentsSource 决定：下载站 fragmentsUrl 优先、GitHub 兜底，
-    // 版本不一致直接判无效（来源规则的细节在 tests/gameChunkFragments.test.ts）
-    expect(appSource).toContain("resolveGameChunkFragmentsSource");
-    expect(appSource).toContain("source.expectedVersion");
-    expect(appSource).toContain("parseGameChunkFragments(");
+    // 清单地址由 latest.json 的 fragmentsUrl 决定（2026-10-26 起指向 www），
+    // 首选读失败才退 GitHub；启动器里不写死主机/版本（细节在 tests/gameChunkFragments.test.ts）
+    expect(appSource).toContain("resolveGameChunkFragmentsSources");
+    expect(appSource).toContain("loadGameChunkFragmentsFromSources");
+    expect(appSource).toContain("githubFragmentsUrl");
+    expect(appSource).not.toContain("dl.crossingvoid.top/games/crossingvoid/fragments");
     expect(launcherSource).toContain("https://qm.qq.com/q/Nrlo5pBLwY");
     expect(launcherSource).toContain("https://pan.baidu.com/s/1J5zcggAWiq0Ui47fSZ1P0Q?pwd=2333");
     expect(launcherSource).toContain("https://www.alipan.com/s/hGG6ZxsR6Y1");

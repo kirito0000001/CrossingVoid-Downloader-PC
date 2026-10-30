@@ -59,6 +59,13 @@ export type GamePackageConfig = {
    * （幻杀目前不发下载站）时用它 —— 否则碎片导入那页连"这一版应该有哪几个包"都显示不出来。
    */
   githubFragmentsUrl?: string | null;
+  /**
+   * Windows 增量补丁的固定指针（发布侧固定 tag `PC-Patch-Latest` 下的 `patch-latest.json`）。
+   *
+   * 补丁包只发 GitHub：指针里带 `version/baseVersion/packageUrl/packageSha256`，
+   * 启动器读它判断"能不能从当前版本增量更新"。没接入补丁的档位留空 = 永远走完整更新。
+   */
+  githubPatchPointerUrl?: string | null;
 };
 
 /** `gamePackage.sources` 的缺省值：两个源都发。 */
@@ -136,6 +143,9 @@ export const PLATFORM_GAMES: readonly PlatformGameDefinition[] = [
       versionMarker: "CrossingVoid.version.json",
       githubFragmentsUrl:
         "https://github.com/kirito0000001/CrossingVoid/releases/download/fragments-latest/fragments.json",
+      // 2026-10-27 起：Windows 内容补丁走固定指针，补丁包是相对 0.6 基线的累积差量。
+      githubPatchPointerUrl:
+        "https://github.com/kirito0000001/CrossingVoid/releases/download/PC-Patch-Latest/patch-latest.json",
     },
     runtime: {
       installDirectoryName: "CrossingVoid",

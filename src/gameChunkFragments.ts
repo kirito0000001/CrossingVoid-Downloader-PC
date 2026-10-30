@@ -81,29 +81,44 @@ export type GameChunkFragmentsSource = {
 };
 
 /**
- * 决定这一版去读哪一份碎片清单：**下载站优先，GitHub 兜底**。
+ * 这一版按优先级排好的碎片清单地址：**下载站 `latest.json.fragmentsUrl` 第一，GitHub 兜底第二**。
  *
- * 触发兜底的两件事都要覆盖到：
+ * 返回列表而不是单个地址，是因为首选地址自己也可能读不出来：
  *   ① 下载站的 `latest.json` 根本拿不到（幻杀目前不发下载站 → 整份 404）；
- *   ② 拿得到，但里面没有 `fragmentsUrl`。
- * 两个地址都没有就返回 null，交给界面显示"直接选压缩包即可"——清单只负责好看，
- * 不能把导入本身堵死。
+ *   ② 拿得到，但里面没有 `fragmentsUrl`；
+ *   ③ 有 `fragmentsUrl`，但那份 JSON 请求失败 / 发坏了 / 是上一版的。
+ * 前两种只能换 GitHub；第三种原来会直接放弃 —— 现在同样能退到 GitHub 再试一次。
+ * 两个地址相同（或者只配了一个）时列表里只会剩一条。
+ */
+export function resolveGameChunkFragmentsSources(options: {
+  pointer: Record<string, unknown> | null;
+  githubFallbackUrl: string | null;
+}): GameChunkFragmentsSource[] {
+  const declared =
+    typeof options.pointer?.fragmentsUrl === "string" ? options.pointer.fragmentsUrl.trim() : "";
+  const version = typeof options.pointer?.version === "string" ? options.pointer.version.trim() : "";
+  const expectedVersion = version ? { expectedVersion: version } : {};
+  const sources: GameChunkFragmentsSource[] = [];
+  if (/^https?:\/\//i.test(declared)) {
+    sources.push({ url: declared, ...expectedVersion, source: "download-station" });
+  }
+
+  const fallback = (options.githubFallbackUrl ?? "").trim();
+  if (/^https?:\/\//i.test(fallback) && !sources.some((item) => item.url === fallback)) {
+    sources.push({ url: fallback, ...expectedVersion, source: "github" });
+  }
+  return sources;
+}
+
+/**
+ * 首选地址（兼容旧调用点）：一条候选都没有就返回 null，交给界面显示"直接选压缩包即可"——
+ * 清单只负责好看，不能把导入本身堵死。
  */
 export function resolveGameChunkFragmentsSource(options: {
   pointer: Record<string, unknown> | null;
   githubFallbackUrl: string | null;
 }): GameChunkFragmentsSource | null {
-  const declared =
-    typeof options.pointer?.fragmentsUrl === "string" ? options.pointer.fragmentsUrl.trim() : "";
-  const version = typeof options.pointer?.version === "string" ? options.pointer.version.trim() : "";
-  const expectedVersion = version ? { expectedVersion: version } : {};
-  if (/^https?:\/\//i.test(declared)) {
-    return { url: declared, ...expectedVersion, source: "download-station" };
-  }
-
-  const fallback = (options.githubFallbackUrl ?? "").trim();
-  if (!/^https?:\/\//i.test(fallback)) return null;
-  return { url: fallback, ...expectedVersion, source: "github" };
+  return resolveGameChunkFragmentsSources(options)[0] ?? null;
 }
 
 function asPositiveInt(value: unknown): number | null {
@@ -149,6 +164,72 @@ export function parseGameChunkFragments(
   const declaredTotal = asPositiveInt(record.totalBytes);
   const totalBytes = declaredTotal ?? fragments.reduce((sum, item) => sum + item.sizeBytes, 0);
   return { schemaVersion: 1, version, totalBytes, fragments };
+}
+
+export type GameChunkFragmentsLoadResult = {
+  fragments: GameChunkFragments | null;
+  /** 真正读到的那条来源；全都没读到时为 null。 */
+  source: GameChunkFragmentsSource | null;
+  /** 至少一个地址返回了内容，但格式不对 / 不是这一版。 */
+  sawInvalidManifest: boolean;
+  /** 至少一个地址请求本身就失败了（超时、DNS、404、TLS）。 */
+  sawRequestError: boolean;
+  /** 调用方中途换了档位或重开对话框：结果作废，界面不该再写。 */
+  stale: boolean;
+};
+
+/**
+ * 按顺序读候选地址，返回第一份能解析的清单。
+ *
+ * 首选（下载站 `fragmentsUrl`）读失败 —— 不管是请求失败还是 JSON 是坏的 —— 都会继续试
+ * 下一个（GitHub 兜底），而不是直接放弃。GitHub 那份同样带 `expectedVersion` 校验，
+ * 所以回退不会把上一版的包名摆给玩家。
+ *
+ * 网络与 JSON 解析都由调用方注入：这里只决定"试哪个、什么时候停"，
+ * 便于单测覆盖回退顺序（App.vue 里传的是 Tauri 的 `fetch_remote_text`）。
+ */
+export async function loadGameChunkFragmentsFromSources(options: {
+  sources: GameChunkFragmentsSource[];
+  fetchJson: (url: string) => Promise<unknown>;
+  isStale?: () => boolean;
+  onCandidateError?: (source: GameChunkFragmentsSource, error: unknown) => void;
+}): Promise<GameChunkFragmentsLoadResult> {
+  const result: GameChunkFragmentsLoadResult = {
+    fragments: null,
+    source: null,
+    sawInvalidManifest: false,
+    sawRequestError: false,
+    stale: false,
+  };
+
+  for (const source of options.sources) {
+    if (options.isStale?.()) {
+      result.stale = true;
+      return result;
+    }
+    let raw: unknown;
+    try {
+      raw = await options.fetchJson(source.url);
+    } catch (error) {
+      result.sawRequestError = true;
+      options.onCandidateError?.(source, error);
+      continue;
+    }
+    if (options.isStale?.()) {
+      result.stale = true;
+      return result;
+    }
+    const parsed = parseGameChunkFragments(raw, source.expectedVersion);
+    if (!parsed) {
+      result.sawInvalidManifest = true;
+      options.onCandidateError?.(source, new Error("清单格式不对，或不是这一版"));
+      continue;
+    }
+    result.fragments = parsed;
+    result.source = source;
+    return result;
+  }
+  return result;
 }
 
 function normalizeName(name: string) {

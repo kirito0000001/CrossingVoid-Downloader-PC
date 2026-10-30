@@ -678,7 +678,7 @@ Rust 侧 `scan_local_files` 每个文件都报一次、收尾报满。守卫见 
 **没有改 `src/gamePackage.ts`** —— 那份文件与 Android 仓库逐字相同，动了另一边就会红。
 持久化键 `crossing-void.launcher.auto-source-fallback`。守卫：`tests/settingsBehavior.test.ts`。
 
-### 12.4 碎片导入的清单：下载站优先，GitHub 兜底（2026-10-19）
+### 12.4 碎片导入的清单：latest.fragmentsUrl 优先，GitHub 兜底（2026-10-19，2026-10-26 换主机）
 
 碎片（那几个 GB 级的 `…碎片00N.zip`）**走网盘 / QQ 群分发**，启动器只负责"这一版应该有哪几个包、
 齐没齐、导进去"。这份清单（`fragments.json`）原来只从下载站的 `latest.json.fragmentsUrl` 取，
@@ -688,21 +688,111 @@ Rust 侧 `scan_local_files` 每个文件都报一次、收尾报满。守卫见 
 
 | 顺序 | 来源 | 地址 |
 | --- | --- | --- |
-| ① | 下载站版本指针里的 `fragmentsUrl` | `https://dl.crossingvoid.top/games/<产品段>/latest.json` |
+| ① | 版本指针里的 `fragmentsUrl` | 指针：`https://dl.crossingvoid.top/games/<产品段>/latest.json`；它 2026-10-26 起指向 `https://www.crossingvoid.top/games/<产品段>/fragments/<版本>.json` |
 | ② | 条目里的 `githubFragmentsUrl`（固定 tag） | 零境 `…/kirito0000001/CrossingVoid/releases/download/fragments-latest/fragments.json`；幻杀 `…/kirito0000001/fantasy-project-packages/releases/download/fragments-latest/fragments.json` |
 
 几条约束：
 
 - **GitHub Release 里只有清单，没有 zip。** 别指望兜底能下碎片 —— 它只补"该有哪些包"这一层信息。
-- 触发兜底要覆盖两种情形：`latest.json` **拿不到**（幻杀），和拿到了但**没有 `fragmentsUrl`**。
+- 触发兜底要覆盖三种情形：`latest.json` **拿不到**（幻杀）、拿到了但**没有 `fragmentsUrl`**、
+  以及 **`fragmentsUrl` 自己读失败**（超时 / 404 / 格式不对 / 不是这一版）。第三种是 2026-10-26
+  补的：以前首选地址一失败就显示"读不到清单"、退化成直接选文件，不会再去试 GitHub。
 - 这一档不发下载站时（`gamePackage.sources` 不含 `official`）**连问都不问**，避免每次开导入页白跑一次 404。
-- 版本校验：拿到版本指针就传 `expectedVersion`，上一版的清单直接判无效；只有走 GitHub 兜底、
-  而且连指针都没有时（幻杀）才不做版本比对——那时候没有版本可比。
+- 版本校验：拿到版本指针就传 `expectedVersion`，上一版的清单直接判无效（GitHub 那份同样校验）；
+  只有走 GitHub 兜底、而且连指针都没有时（幻杀）才不做版本比对——那时候没有版本可比。
 - 两条来源都拿不到就退化成"直接选压缩包、导入后判齐"。清单只负责好看，不能把导入堵死。
 
-代码：`src/gameChunkFragments.ts` 的 `githubFragmentsManifestUrl` / `resolveGameChunkFragmentsSource`，
-接在 `App.vue` 的 `loadGameChunkFragments()` 上；地址配在 `src/platform/gameCatalog.ts` 的
-`gamePackage.githubFragmentsUrl`。守卫：`tests/gameChunkFragments.test.ts`（含"配的地址必须和该档 GitHub 仓库对得上"）。
+#### 12.4.1 清单主机从 dl 换到 www（2026-10-26）
+
+`fragments.json` 的主地址迁到 `https://www.crossingvoid.top/games/<产品段>/fragments/<版本>.json`，
+`latest.json` 的 `fragmentsUrl` 已经指过去。**启动器从来没硬编码过碎片地址**（主机、版本、包名
+都只来自 `fragmentsUrl`），所以这次迁移客户端零改动就跟上了；只有 `latest.json` 本身还在 dl
+（`https://www.crossingvoid.top/games/crossingvoid/latest.json` 目前是 404），指针那一次请求的快慢不变。
+
+实测（2026-10-26，同一台机器、同一份 470 B 的零境 PC 清单、IPv4、带 cache-buster，各 8 次）：
+
+| 地址 | 平均 | 中位数 | 最慢 |
+| --- | --- | --- | --- |
+| dl 野草云（旧） | 0.867 s | 0.848 s | 1.864 s |
+| www 阿里云（现） | 0.097 s | 0.094 s | 0.134 s |
+| dl 野草云（安卓 602 B） | 1.432 s | 1.174 s | 2.904 s |
+| www 阿里云（安卓 602 B） | 0.092 s | 0.088 s | 0.137 s |
+
+差距主要在连接与 TLS：野草云多次出现 1 s 以上的 TLS/连接延迟，阿里云稳定在 0.06–0.07 s。
+**这只影响清单 JSON，不影响碎片 zip 下载** —— zip 仍然走网盘 / QQ 群，和清单主机无关。
+
+代码：`src/gameChunkFragments.ts` 的 `resolveGameChunkFragmentsSources`（有序候选）与
+`loadGameChunkFragmentsFromSources`（逐个试、返回第一份能解析的），接在 `App.vue` 的
+`loadGameChunkFragments()` 上；地址配在 `src/platform/gameCatalog.ts` 的
+`gamePackage.githubFragmentsUrl`。守卫：`tests/gameChunkFragments.test.ts`（含"配的地址必须和该档
+GitHub 仓库对得上"、"首选失败才回退"、"App.vue 不许写死清单地址"）。
+
+### 12.5 Windows 增量补丁：PC-Patch-Latest（2026-10-27）
+
+内容更新（大量 `_P.pak`、偶尔换 exe）不再要求玩家重下 2.5 GB 碎片：AxTools 的
+「发布 Windows 补丁」把「插件 `Version.json` 里的补丁文件 + 相对线上基线的程序文件差量」
+打成一个 zip，挂在 GitHub 固定 tag 上，启动器读固定指针做增量更新。
+
+**发布侧契约**（实现见 `AxTools/Scripts/Publishing/Games/Publish-GamePatch.ps1`）：
+
+| 项 | 值 |
+| --- | --- |
+| 指针 | `…/releases/download/PC-Patch-Latest/patch-latest.json`（每次原地覆盖） |
+| 版本包 | `PC-Patch-V<版本>` release 里的 `patch.json` + `…-Windows-Patch-<版本>.zip` |
+| 指针字段 | `schemaVersion` / `kind=patch` / `productSegment` / `platform` / `version` / `baseVersion` / `channel` / `manifestUrl` / `packageUrl` / `packageSizeBytes` / `packageSha256` |
+| `patch.json` | 同上 + `files[] = { path, sizeBytes, sha256 }` |
+| 包内布局 | 按游戏根目录相对路径平铺；包里另有 `patch.json` / `Version.json`（启动器**不落盘**） |
+
+`baseVersion` 来自 `Version.json` 的 `releaseVersion`（形如 `0.6`），不是完整版本号；
+本地标记是 `0.6.0`，所以只按**数字段前缀**匹配（`versionMatchesBase`：`0.6` 匹配
+`0.6.0`/`0.6.1`，但不匹配 `0.60.0`）。
+
+**启动器流程**：
+
+```text
+checkGameVersion：完整清单与 patch-latest.json 一起读（指针失败只当“这次没有补丁”）
+  -> 产品段/平台/通道一致、本地落在 baseVersion、补丁版本 > 本地
+  -> 再和完整清单比一次：完整清单更新时优先完整更新，否则认这个补丁
+点「更新游戏」
+  -> applyGamePatch()：拉 patch.json
+  -> Rust install_game_patch：下载整包（Range 续传）-> 校验整包 sha256
+       -> 逐文件 .part -> 校验 size+sha256 -> 原子替换（已就位的跳过）
+       -> 写合并后的 launcher.game.json（版本 = 补丁版本）
+       -> 最后写 CrossingVoid.version.json
+  -> ready
+```
+
+几条硬规则：
+
+- **先验包再动游戏目录**：整包 sha256 不对时一个字节都不写。
+- **版本标记最后写**：先写合并后的本地状态（新哈希），再写 `CrossingVoid.version.json`；
+  中途失败时游戏仍停在旧版本，重试是幂等的（已就位文件跳过）。
+- **只应用 `files[]`**：包里多出来的 `patch.json` / `Version.json` 不进游戏目录；
+  所有路径都过 `safe_relative_path`（防 zip slip）。
+- **补丁只发 GitHub**：GitHub 渠道被关掉时不走补丁；68 MB 下载照现有代理设置走。
+- 补丁是**累积差量**：同一 base 的后续补丁覆盖前一个，不叠多个补丁链（与 Android 的
+  patch OBB 设计一致）。
+
+**真实包联调（2026-10-27）**：用发布出来的 71,432,581 B 补丁包跑
+`live_patch_package_matches_the_published_manifest`，**127 个文件全部校验通过**，
+解压总量 173,802,024 B，版本标记写为 0.6.2，包内 `patch.json`/`Version.json` 未落盘。
+
+**当前边界（0.6.2 这一轮）**：
+
+- 线上还没有 0.6.2 的完整 manifest，`latest.json` 仍是 0.6.0。补丁应用后本地版本 0.6.2
+  高于完整清单，`assertNoGamePackageDowngrade` 会拒绝“拿 0.6.0 清单整包重下”——这是保护，
+  不是 bug；等 0.6.2 完整清单发布后自动恢复正常。
+- 修复暂时没有“从补丁包补文件”的实现；补丁成功后会写合并后的 `launcher.game.json`，
+  所以完整性核对用的是新哈希。旧安装如果还留着 `CrossingVoid.manifest.json`，`state_path`
+  会优先更新它，旧名字下的核对也能对上。
+- 补丁包校验通过后留在 `_download/patch/<版本>.zip`（暂不删，方便重试与排查）。
+
+代码：`src/gamePatch.ts`（解析/适用性/合并）、`App.vue` 的 `applyGamePatch()` 与
+`checkGameVersion()`、`src-tauri/src/game_patch.rs`（下载/落盘/版本标记）、
+`src/platform/gameCatalog.ts` 的 `githubPatchPointerUrl`。
+守卫：`tests/gamePatch.test.ts` + `game_patch.rs` 的 6 条单测（“标记最后写”、
+“哈希失败不留正式文件”、“重跑全部跳过”等），以及 `#[ignore]` 的真实包联调
+`live_patch_package_matches_the_published_manifest`。
 
 ## 13. 安装、解压与原子替换
 
